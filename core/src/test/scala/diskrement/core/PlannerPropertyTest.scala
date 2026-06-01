@@ -51,9 +51,9 @@ class PlannerPropertyTest extends munit.ScalaCheckSuite:
   property("7. finalize: at most one planned disc stays open (the last)"):
     forAll(Generators.genPlannerInput): (cs, discs, cap) =>
       val plan = Planner.plan(cs, discs, cap)
-      val openCount = plan.discs.count(!_.finalize)
+      val openCount = plan.discs.count(!_.willFinalize)
       openCount <= 1 &&
-        (plan.discs.isEmpty || !plan.discs.last.finalize)
+        (plan.discs.isEmpty || !plan.discs.last.willFinalize)
 
   property("8. tombstones cost nothing: deletions add no bytes to any disc"):
     forAll(Generators.genPlannerInput): (cs, discs, cap) =>

@@ -17,7 +17,7 @@ class PlannerTest extends munit.FunSuite:
     assertEquals(plan.discs.size, 1)
     val d = plan.discs.head
     assert(d.isNew)
-    assert(!d.finalize)
+    assert(!d.willFinalize)
     assertEquals(d.files.map(_.relPath.value), List("a", "b"))
     assertEquals(d.ordinal, 1)
 
@@ -34,9 +34,9 @@ class PlannerTest extends munit.FunSuite:
     val first = plan.discs(0)
     val last  = plan.discs(1)
     assertEquals(first.files.map(_.relPath.value), List("a"))
-    assert(first.finalize, "spilled disc must be finalized")
+    assert(first.willFinalize, "spilled disc must be finalized")
     assertEquals(last.files.map(_.relPath.value), List("b"))
-    assert(!last.finalize, "last disc stays open")
+    assert(!last.willFinalize, "last disc stays open")
     assertEquals(last.ordinal, 2)
 
   test("existing OPEN disc is topped off before opening a new disc"):
@@ -49,13 +49,13 @@ class PlannerTest extends munit.FunSuite:
     assertEquals(topped.ordinal, 1)
     assert(!topped.isNew)
     assertEquals(topped.files.map(_.relPath.value), List("a"))
-    assert(topped.finalize)               // spilled -> finalized
+    assert(topped.willFinalize)           // spilled -> finalized
     assertEquals(topped.totalUsedBytes, 100L)
     val fresh = plan.discs(1)
     assertEquals(fresh.ordinal, 2)
     assert(fresh.isNew)
     assertEquals(fresh.files.map(_.relPath.value), List("b"))
-    assert(!fresh.finalize)
+    assert(!fresh.willFinalize)
 
   test("deletions become tombstones and cost zero bytes"):
     val cs = ChangeSet(added = Nil, modified = Nil,

@@ -12,14 +12,14 @@ class PlannerEdgeTest extends munit.FunSuite:
     val plan = Planner.plan(ChangeSet.empty, Nil, Capacity(100L))
     assertEquals(plan.discs.size, 1)
     assert(plan.discs.head.files.isEmpty)
-    assert(!plan.discs.head.finalize)
+    assert(!plan.discs.head.willFinalize)
     assert(plan.oversized.isEmpty)
 
   test("a file exactly equal to free space fits"):
     val plan = Planner.plan(added(sf("a", 100)), Nil, Capacity(100L))
     assertEquals(plan.discs.size, 1)
     assertEquals(plan.discs.head.files.map(_.relPath.value), List("a"))
-    assert(!plan.discs.head.finalize)
+    assert(!plan.discs.head.willFinalize)
 
   test("only deletions: tombstones recorded, no data discs filled"):
     val cs = ChangeSet(Nil, Nil, List(RelPath("x")), Nil)
@@ -44,8 +44,8 @@ class PlannerEdgeTest extends munit.FunSuite:
     assertEquals(plan.discs.map(_.ordinal), List(1, 2))
     assertEquals(plan.discs(0).files.map(_.relPath.value), List("a"))
     assertEquals(plan.discs(0).usableBytes, bdrUsable)
-    assert(plan.discs(0).finalize)
+    assert(plan.discs(0).willFinalize)
     assertEquals(plan.discs(1).files.map(_.relPath.value), List("b"))
     assertEquals(plan.discs(1).usableBytes, bd50Usable)
-    assert(!plan.discs(1).finalize)
+    assert(!plan.discs(1).willFinalize)
     assert(plan.oversized.isEmpty)

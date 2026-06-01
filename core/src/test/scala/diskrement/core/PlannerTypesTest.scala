@@ -10,7 +10,7 @@ class PlannerTypesTest extends munit.FunSuite:
 
   test("PlannedDisc reports added and total bytes"):
     val f = ScannedFile(RelPath("a"), ContentHash("h"), 25L, Instant.EPOCH)
-    val pd = PlannedDisc(ordinal = 2, isNew = true, finalize = false,
+    val pd = PlannedDisc(ordinal = 2, isNew = true, willFinalize = false,
                          files = List(f, f), priorUsedBytes = 10L, usableBytes = 100L)
     assertEquals(pd.addedBytes, 50L)
     assertEquals(pd.totalUsedBytes, 60L)

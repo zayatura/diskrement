@@ -17,7 +17,7 @@ final case class DiscState(
 final case class PlannedDisc(
     ordinal: Int,
     isNew: Boolean,
-    finalize: Boolean,
+    willFinalize: Boolean,
     files: List[ScannedFile],
     priorUsedBytes: Long,
     usableBytes: Long
@@ -82,7 +82,7 @@ object Planner:
       PlannedDisc(
         ordinal = b.ordinal,
         isNew = b.isNew,
-        finalize = i != lastIdx,
+        willFinalize = i != lastIdx,
         files = b.files.toList,
         priorUsedBytes = b.priorUsedBytes,
         usableBytes = b.usableBytes

@@ -10,7 +10,7 @@ class ManifestBuilderTest extends munit.FunSuite:
     val added = List(sf("new1", 10))
     val modified = List(sf("edit1", 10))
     val cs = ChangeSet(added = added, modified = modified, deleted = Nil, unchanged = Nil)
-    val disc = PlannedDisc(ordinal = 1, isNew = true, finalize = false,
+    val disc = PlannedDisc(ordinal = 1, isNew = true, willFinalize = false,
                            files = added ++ modified, priorUsedBytes = 0L, usableBytes = 100L)
     val m = ManifestBuilder.build("photos", sessionOrdinal = 1, disc = disc,
                                   changes = cs, tombstones = List(RelPath("gone")))
