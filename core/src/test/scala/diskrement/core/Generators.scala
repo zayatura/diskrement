@@ -41,23 +41,30 @@ object Generators:
       f.copy(sizeBytes = size)
     }
 
-  /** An optional pre-existing OPEN disc with the same usable capacity. */
-  def genOptOpenDisc(cap: Capacity): Gen[List[DiscState]] =
-    Gen.option(
-      Gen.choose(0L, cap.usableBytes).map { used =>
-        DiscState(ordinal = 1, status = DiscStatus.OPEN,
-                  usableBytes = cap.usableBytes, usedBytes = used)
-      }
-    ).map(_.toList)
+  /** A pre-existing disc chain: zero or more discs with ascending ordinals,
+    * each FINALIZED except possibly the last, which may be OPEN. This mirrors
+    * the catalog's auto-finalize invariant (only the newest disc stays open)
+    * and exercises multi-disc catalogs and open discs at ordinals other than 1. */
+  def genDiscStates(cap: Capacity): Gen[List[DiscState]] =
+    for
+      n        <- Gen.choose(0, 4)
+      lastOpen <- Gen.oneOf(true, false)
+      useds    <- Gen.listOfN(n, Gen.choose(0L, cap.usableBytes))
+    yield useds.zipWithIndex.map { (used, idx) =>
+      val isLast = idx == n - 1
+      val status = if isLast && lastOpen then DiscStatus.OPEN else DiscStatus.FINALIZED
+      DiscState(ordinal = idx + 1, status = status,
+                usableBytes = cap.usableBytes, usedBytes = used)
+    }
 
-  /** A full planner input: capacity, optional open disc, and fitting changes. */
+  /** A full planner input: capacity, a pre-existing disc chain, and fitting changes. */
   val genPlannerInput: Gen[(ChangeSet, List[DiscState], Capacity)] =
     for
       cap   <- genNewDiscCap
-      open  <- genOptOpenDisc(cap)
+      discs <- genDiscStates(cap)
       files <- genFilesWithin(cap)
       // split files arbitrarily into added vs modified
       split <- Gen.choose(0, files.size)
     yield
       val (add, mod) = files.splitAt(split)
-      (ChangeSet(add, mod, Nil, Nil), open, cap)
+      (ChangeSet(add, mod, Nil, Nil), discs, cap)

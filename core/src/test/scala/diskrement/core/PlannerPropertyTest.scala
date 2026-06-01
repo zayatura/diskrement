@@ -1,5 +1,6 @@
 package diskrement.core
 
+import org.scalacheck.Gen
 import org.scalacheck.Prop.forAll
 
 class PlannerPropertyTest extends munit.ScalaCheckSuite:
@@ -34,10 +35,17 @@ class PlannerPropertyTest extends munit.ScalaCheckSuite:
       val placed = plan.discs.flatMap(_.files).map(_.relPath.value)
       placed == placed.sorted
 
-  property("5. determinism: shuffling inputs yields an identical plan"):
-    forAll(Generators.genPlannerInput): (cs, discs, cap) =>
-      val shuffled = cs.copy(added = cs.added.reverse, modified = cs.modified.reverse)
-      Planner.plan(cs, discs, cap) == Planner.plan(shuffled, discs, cap)
+  property("5. determinism: any permutation or redistribution of inputs yields an identical plan"):
+    forAll(Generators.genPlannerInput, Gen.long): (input, seed) =>
+      val (cs, discs, cap) = input
+      val rng = new scala.util.Random(seed)
+      // Arbitrarily reorder all placeable files and re-split them across the
+      // added/modified buckets — the plan must be invariant to both.
+      val combined = rng.shuffle(cs.added ++ cs.modified)
+      val k = if combined.isEmpty then 0 else rng.nextInt(combined.size + 1)
+      val (add2, mod2) = combined.splitAt(k)
+      val reshuffled = cs.copy(added = add2, modified = mod2)
+      Planner.plan(cs, discs, cap) == Planner.plan(reshuffled, discs, cap)
 
   property("6. open-disc-first: if an open disc exists, it is the first planned disc"):
     forAll(Generators.genPlannerInput): (cs, discs, cap) =>
