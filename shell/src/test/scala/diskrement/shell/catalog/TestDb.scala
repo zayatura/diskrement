@@ -26,3 +26,7 @@ object TestDb:
   /** Just the connection pool (for tests that only run raw SQL). */
   val poolLayer: ZLayer[Any, Throwable, ZConnectionPool] =
     pathLayer >>> Db.poolLayer
+
+  /** Pool + migrated CatalogStore, both visible to tests (>+> keeps the pool). */
+  val layer: ZLayer[Any, Throwable, ZConnectionPool & CatalogStore] =
+    pathLayer >>> (Db.poolLayer >+> CatalogStore.live)
