@@ -31,3 +31,10 @@ final case class CatalogView(current: Map[RelPath, CatalogEntry])
 
 object CatalogView:
   val empty: CatalogView = CatalogView(Map.empty)
+
+  /** The catalog view that results from recording exactly these files as the
+    * current versions (used to express diff idempotence). */
+  def fromScanned(files: List[ScannedFile]): CatalogView =
+    CatalogView(
+      files.map(f => f.relPath -> CatalogEntry(f.relPath, f.contentHash, f.sizeBytes)).toMap
+    )
