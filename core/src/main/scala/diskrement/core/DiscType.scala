@@ -11,7 +11,13 @@ enum DiscType(val nominalBytes: Long):
 final case class Capacity(usableBytes: Long)
 
 object Capacity:
-  /** Nominal capacity reduced by `marginPercent` (e.g. 2.0 == 2%), floored. */
+  /** Nominal capacity reduced by `marginPercent` (e.g. 2.0 == 2%), floored.
+    *
+    * Computed in `BigDecimal` rather than `Double`: at byte scale, IEEE-754
+    * rounding can floor an exact value one byte short (e.g. DVD-DL at 7% margin).
+    */
   def fromDiscType(discType: DiscType, marginPercent: Double): Capacity =
-    val usable = math.floor(discType.nominalBytes * (1.0 - marginPercent / 100.0))
+    val usable =
+      (BigDecimal(discType.nominalBytes) * (100 - BigDecimal(marginPercent)) / 100)
+        .setScale(0, BigDecimal.RoundingMode.FLOOR)
     Capacity(usable.toLong)
