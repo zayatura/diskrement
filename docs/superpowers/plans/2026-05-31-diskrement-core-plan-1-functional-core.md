@@ -637,7 +637,7 @@ class PlannerTypesTest extends munit.FunSuite:
 
   test("PlannedDisc reports added and total bytes"):
     val f = ScannedFile(RelPath("a"), ContentHash("h"), 25L, Instant.EPOCH)
-    val pd = PlannedDisc(ordinal = 2, isNew = true, finalize = false,
+    val pd = PlannedDisc(ordinal = 2, isNew = true, willFinalize = false,
                          files = List(f, f), priorUsedBytes = 10L, usableBytes = 100L)
     assertEquals(pd.addedBytes, 50L)
     assertEquals(pd.totalUsedBytes, 60L)
@@ -674,7 +674,7 @@ final case class DiscState(
 final case class PlannedDisc(
     ordinal: Int,
     isNew: Boolean,
-    finalize: Boolean,
+    willFinalize: Boolean,
     files: List[ScannedFile],
     priorUsedBytes: Long,
     usableBytes: Long
@@ -715,7 +715,13 @@ EOF
 - Modify: `core/src/main/scala/diskrement/core/Planner.scala` (add `Planner.plan`)
 - Test: `core/src/test/scala/diskrement/core/PlannerTest.scala`
 
-**Policy reminder (from spec §8):** sort added+modified by relPath; fill the existing OPEN disc first; a file that doesn't fit the remaining space spills *wholly* to the next disc; once a file doesn't fit, stop filling that disc (strict order, no backfill, leave gaps); a disc that spills is FINALIZED; only the last disc stays OPEN. **Documented edge case:** if there is any spillover to a new disc, a pre-existing OPEN disc is finalized even if it received zero files this session (it appears in the plan with empty `files` and `finalize = true`). This keeps the single-open-disc invariant.
+**Policy reminder (from spec §8):** sort added+modified by relPath; fill the existing OPEN disc first; a file that doesn't fit the remaining space spills *wholly* to the next disc; once a file doesn't fit, stop filling that disc (strict order, no backfill, leave gaps); a disc that spills is FINALIZED; only the last disc stays OPEN. **Documented edge case:** if there is any spillover to a new disc, a pre-existing OPEN disc is finalized even if it received zero files this session (it appears in the plan with empty `files` and `willFinalize = true`). This keeps the single-open-disc invariant.
+
+**Oversized rule (spec §8.2):** the oversized check considers **both** the currently open disc and the next blank disc — a file is oversized only when it fits neither. Concretely, compare each file against the **larger** of `newDiscCap` and the existing OPEN disc's full usable capacity; a file that exceeds a new blank disc but still fits the (larger) open disc is placed there, not rejected. (A file that passes this up-front check but still doesn't fit the open disc's *remaining* free space and is too big for a fresh disc is detected as oversized during placement.)
+
+**Ordinal rule:** new (spilled) discs take ordinals strictly above the highest existing ordinal (`maxOrdinal`), never merely the open disc's ordinal + 1, so they cannot collide with an existing disc.
+
+> **Note:** Tasks 9–12's code blocks below reflect the *initial* implementation. The oversized and ordinal rules above were tightened after a later review; the committed `Planner.scala` is the source of truth for those two behaviors.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -739,7 +745,7 @@ class PlannerTest extends munit.FunSuite:
     assertEquals(plan.discs.size, 1)
     val d = plan.discs.head
     assert(d.isNew)
-    assert(!d.finalize)
+    assert(!d.willFinalize)
     assertEquals(d.files.map(_.relPath.value), List("a", "b"))
     assertEquals(d.ordinal, 1)
 
@@ -756,9 +762,9 @@ class PlannerTest extends munit.FunSuite:
     val first = plan.discs(0)
     val last  = plan.discs(1)
     assertEquals(first.files.map(_.relPath.value), List("a"))
-    assert(first.finalize, "spilled disc must be finalized")
+    assert(first.willFinalize, "spilled disc must be finalized")
     assertEquals(last.files.map(_.relPath.value), List("b"))
-    assert(!last.finalize, "last disc stays open")
+    assert(!last.willFinalize, "last disc stays open")
     assertEquals(last.ordinal, 2)
 
   test("existing OPEN disc is topped off before opening a new disc"):
@@ -771,13 +777,13 @@ class PlannerTest extends munit.FunSuite:
     assertEquals(topped.ordinal, 1)
     assert(!topped.isNew)
     assertEquals(topped.files.map(_.relPath.value), List("a"))
-    assert(topped.finalize)               // spilled -> finalized
+    assert(topped.willFinalize)               // spilled -> finalized
     assertEquals(topped.totalUsedBytes, 100L)
     val fresh = plan.discs(1)
     assertEquals(fresh.ordinal, 2)
     assert(fresh.isNew)
     assertEquals(fresh.files.map(_.relPath.value), List("b"))
-    assert(!fresh.finalize)
+    assert(!fresh.willFinalize)
 
   test("deletions become tombstones and cost zero bytes"):
     val cs = ChangeSet(added = Nil, modified = Nil,
@@ -859,7 +865,7 @@ object Planner:
       PlannedDisc(
         ordinal = b.ordinal,
         isNew = b.isNew,
-        finalize = i != lastIdx,
+        willFinalize = i != lastIdx,
         files = b.files.toList,
         priorUsedBytes = b.priorUsedBytes,
         usableBytes = b.usableBytes
@@ -997,9 +1003,9 @@ class PlannerPropertyTest extends munit.ScalaCheckSuite:
   property("7. finalize: at most one planned disc stays open (the last)"):
     forAll(Generators.genPlannerInput): (cs, discs, cap) =>
       val plan = Planner.plan(cs, discs, cap)
-      val openCount = plan.discs.count(!_.finalize)
+      val openCount = plan.discs.count(!_.willFinalize)
       openCount <= 1 &&
-        (plan.discs.isEmpty || !plan.discs.last.finalize)
+        (plan.discs.isEmpty || !plan.discs.last.willFinalize)
 
   property("8. tombstones cost nothing: deletions add no bytes to any disc"):
     forAll(Generators.genPlannerInput): (cs, discs, cap) =>
@@ -1056,7 +1062,7 @@ class ManifestBuilderTest extends munit.FunSuite:
     val added = List(sf("new1", 10))
     val modified = List(sf("edit1", 10))
     val cs = ChangeSet(added = added, modified = modified, deleted = Nil, unchanged = Nil)
-    val disc = PlannedDisc(ordinal = 1, isNew = true, finalize = false,
+    val disc = PlannedDisc(ordinal = 1, isNew = true, willFinalize = false,
                            files = added ++ modified, priorUsedBytes = 0L, usableBytes = 100L)
     val m = ManifestBuilder.build("photos", sessionOrdinal = 1, disc = disc,
                                   changes = cs, tombstones = List(RelPath("gone")))
@@ -1176,14 +1182,14 @@ class PlannerEdgeTest extends munit.FunSuite:
     val plan = Planner.plan(ChangeSet.empty, Nil, Capacity(100L))
     assertEquals(plan.discs.size, 1)
     assert(plan.discs.head.files.isEmpty)
-    assert(!plan.discs.head.finalize)
+    assert(!plan.discs.head.willFinalize)
     assert(plan.oversized.isEmpty)
 
   test("a file exactly equal to free space fits"):
     val plan = Planner.plan(added(sf("a", 100)), Nil, Capacity(100L))
     assertEquals(plan.discs.size, 1)
     assertEquals(plan.discs.head.files.map(_.relPath.value), List("a"))
-    assert(!plan.discs.head.finalize)
+    assert(!plan.discs.head.willFinalize)
 
   test("only deletions: tombstones recorded, no data discs filled"):
     val cs = ChangeSet(Nil, Nil, List(RelPath("x")), Nil)
@@ -1208,10 +1214,10 @@ class PlannerEdgeTest extends munit.FunSuite:
     assertEquals(plan.discs.map(_.ordinal), List(1, 2))
     assertEquals(plan.discs(0).files.map(_.relPath.value), List("a"))
     assertEquals(plan.discs(0).usableBytes, bdrUsable)
-    assert(plan.discs(0).finalize)
+    assert(plan.discs(0).willFinalize)
     assertEquals(plan.discs(1).files.map(_.relPath.value), List("b"))
     assertEquals(plan.discs(1).usableBytes, bd50Usable)
-    assert(!plan.discs(1).finalize)
+    assert(!plan.discs(1).willFinalize)
     assert(plan.oversized.isEmpty)
 ```
 

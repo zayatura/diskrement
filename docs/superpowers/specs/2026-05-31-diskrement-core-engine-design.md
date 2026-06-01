@@ -289,9 +289,16 @@ this run. This is what makes mixed-capacity plans expressible.
 
 ### 8.2 Oversized files
 
-A single file larger than one blank disc's usable capacity cannot be placed (no
+A file that cannot fit on **any** disc available this run cannot be placed (no
 splitting in cycle 1). It is reported as a **hard error** in the plan — listed
 separately and skipped — rather than silently dropped.
+
+"Any disc available" is the **larger** of: a new blank disc's usable capacity
+(`newDiscCap`), or the existing OPEN disc's **full** usable capacity. So in a
+mixed-capacity project, a file that exceeds a new blank disc but still fits the
+(larger) open disc is placed on the open disc, not rejected. A file is oversized
+only when it fits neither — including the case where it fits the open disc's total
+capacity but not its remaining free space and is too big for a fresh disc.
 
 ### 8.3 Planner invariants (become ScalaCheck properties)
 
