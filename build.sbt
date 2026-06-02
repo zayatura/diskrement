@@ -5,6 +5,7 @@ ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-Wunused:all")
 val zioVersion     = "2.1.19"
 val zioJdbcVersion = "0.1.2"
 val sqliteVersion  = "3.49.1.0"
+val zioJsonVersion = "0.7.3"
 
 lazy val core = (project in file("core"))
   .settings(
@@ -23,6 +24,7 @@ lazy val shell = (project in file("shell"))
     libraryDependencies ++= Seq(
       "dev.zio"    %% "zio"          % zioVersion,
       "dev.zio"    %% "zio-jdbc"     % zioJdbcVersion,
+      "dev.zio"    %% "zio-json"     % zioJsonVersion,
       "org.xerial"  % "sqlite-jdbc"  % sqliteVersion,
       "dev.zio"    %% "zio-test"     % zioVersion % Test,
       "dev.zio"    %% "zio-test-sbt" % zioVersion % Test
