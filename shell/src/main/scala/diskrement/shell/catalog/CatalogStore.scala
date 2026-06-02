@@ -17,6 +17,7 @@ trait CatalogStore:
   def sessionsByState(project: ProjectId, state: SessionState): IO[CatalogError, List[Session]]
   def fingerprints(project: ProjectId): IO[CatalogError, Map[RelPath, FileFingerprint]]
   def snapshotTo(dest: Path): IO[CatalogError, Unit]
+  def archivePointers(project: ProjectId): IO[CatalogError, List[ArchivePointer]]
 
 object CatalogStore:
   /** Build the store from a pool, running migrations once at layer construction. */

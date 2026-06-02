@@ -210,6 +210,36 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
       DiscState(ord, DiscStatus.valueOf(status), usable, used)
     })
 
+  def archivePointers(project: ProjectId): IO[CatalogError, List[ArchivePointer]] =
+    tx {
+      sql"""select fv.rel_path, fv.content_hash, fv.size_bytes,
+                   d.ordinal, s.ordinal, p.disc_path, fvk.kind
+            from file_version fv
+            join placement p on p.file_version_id = fv.id
+            join session s   on s.id = p.session_id
+            join disc d      on d.id = s.disc_id
+            join (
+              select cr.file_version_id as fvid, cr.kind as kind,
+                     row_number() over (partition by cr.file_version_id order by cr.id desc) as rn
+              from change_record cr
+            ) fvk on fvk.fvid = fv.id and fvk.rn = 1
+            where fv.project_id = ${project.value}
+              and fv.id not in (
+                select fvid from (
+                  select cr.file_version_id as fvid, cr.kind as kind,
+                         row_number() over (partition by fv2.rel_path order by cr.id desc) as rn
+                  from change_record cr
+                  join file_version fv2 on fv2.id = cr.file_version_id
+                  where fv2.project_id = ${project.value}
+                ) cur
+                where cur.rn = 1 and cur.kind <> 'DELETED'
+              )
+            order by fv.rel_path, d.ordinal, s.ordinal"""
+        .query[(String, String, Long, Int, Int, String, String)].selectAll
+    }.map(_.toList.map { case (rp, ch, sz, dOrd, sOrd, dpath, kind) =>
+      ArchivePointer(RelPath(rp), ContentHash(ch), sz, dOrd, sOrd, dpath, ManifestChangeKind.valueOf(kind))
+    })
+
   def snapshotTo(dest: Path): IO[CatalogError, Unit] =
     transaction(sql"vacuum into ${dest.toString}".execute.unit)
       .provideEnvironment(ZEnvironment(pool))
