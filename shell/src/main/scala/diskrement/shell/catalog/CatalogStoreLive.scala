@@ -1,6 +1,6 @@
 package diskrement.shell.catalog
 
-import diskrement.core.{CatalogEntry, CatalogView, ContentHash, DiscStatus, DiscType, ManifestChangeKind, RelPath}
+import diskrement.core.{CatalogEntry, CatalogView, ContentHash, DiscState, DiscStatus, DiscType, ManifestChangeKind, RelPath}
 import diskrement.shell.model._
 import diskrement.shell.model.CatalogError._
 import zio._
@@ -160,3 +160,19 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
         rel -> CatalogEntry(rel, ContentHash(h), s)
       }.toMap)
     }
+
+  def readDiscStates(project: ProjectId): IO[CatalogError, List[DiscState]] =
+    tx {
+      sql"""select d.ordinal, d.status, d.usable_bytes,
+                   coalesce((select sum(fv.size_bytes)
+                             from placement p
+                             join session s on s.id = p.session_id
+                             join file_version fv on fv.id = p.file_version_id
+                             where s.disc_id = d.id), 0) as used
+            from disc d
+            where d.project_id = ${project.value}
+            order by d.ordinal"""
+        .query[(Int, String, Long, Long)].selectAll
+    }.map(_.toList.map { case (ord, status, usable, used) =>
+      DiscState(ord, DiscStatus.valueOf(status), usable, used)
+    })

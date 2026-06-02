@@ -1,6 +1,6 @@
 package diskrement.shell.catalog
 
-import diskrement.core.CatalogView
+import diskrement.core.{CatalogView, DiscState}
 import diskrement.shell.model._
 import zio._
 import zio.jdbc._
@@ -12,6 +12,7 @@ trait CatalogStore:
   def findProject(name: String):     IO[CatalogError, Option[Project]]
   def applyUpdate(update: CatalogUpdate): IO[CatalogError, Unit]
   def readView(project: ProjectId): IO[CatalogError, CatalogView]
+  def readDiscStates(project: ProjectId): IO[CatalogError, List[DiscState]]
 
 object CatalogStore:
   /** Build the store from a pool, running migrations once at layer construction. */
