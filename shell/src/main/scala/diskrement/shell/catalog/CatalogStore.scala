@@ -9,6 +9,7 @@ import zio.jdbc._
 trait CatalogStore:
   def createProject(p: ProjectInit): IO[CatalogError, ProjectId]
   def findProject(name: String):     IO[CatalogError, Option[Project]]
+  def applyUpdate(update: CatalogUpdate): IO[CatalogError, Unit]
 
 object CatalogStore:
   /** Build the store from a pool, running migrations once at layer construction. */
@@ -16,7 +17,8 @@ object CatalogStore:
     ZLayer {
       for
         pool <- ZIO.service[ZConnectionPool]
-        _    <- transaction(Migrations.run)
+        _    <- transaction(
+                  ZIO.serviceWithZIO[ZConnection](_.access(_.setAutoCommit(false))) *> Migrations.run)
                   .provideEnvironment(ZEnvironment(pool))
                   .mapError(CatalogError.MigrationFailed(_))
       yield CatalogStoreLive(pool)
