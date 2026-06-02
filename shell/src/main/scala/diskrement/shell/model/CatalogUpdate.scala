@@ -23,7 +23,9 @@ final case class SessionWrite(
     deleted: List[RelPath]   // tombstones: reference the current version of each path
 )
 
-/** One disc touched or created this run, with its single new session. */
+/** One disc touched or created this run, with its single new session.
+  * `discType`, `usableBytes`, and `label` are persisted only when `isNew` is true;
+  * for an existing disc (`isNew = false`) they are ignored and the stored row is kept. */
 final case class DiscWrite(
     ordinal: Int,
     isNew: Boolean,

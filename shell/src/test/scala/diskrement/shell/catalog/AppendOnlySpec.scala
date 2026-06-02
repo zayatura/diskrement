@@ -33,8 +33,9 @@ object AppendOnlySpec extends ZIOSpecDefault:
       session = SessionWrite(ord, ts, "m" + ord,
         added = cs.added.map(fw), modified = cs.modified.map(fw), deleted = cs.deleted))))
 
-  private def fvCount: URIO[ZConnectionPool, Int] =
-    transaction(sql"select count(*) from file_version".query[Int].selectOne).map(_.getOrElse(0)).orDie
+  private def fvCount(pid: ProjectId): URIO[ZConnectionPool, Int] =
+    transaction(sql"select count(*) from file_version where project_id = ${pid.value}"
+      .query[Int].selectOne).map(_.getOrElse(0)).orDie
 
   def spec = suite("catalog append-only")(
     test("readView equals the latest scan; file_version only grows"):
@@ -48,7 +49,7 @@ object AppendOnlySpec extends ZIOSpecDefault:
             val cs      = Diff.diff(prevView, scanned)
             for
               _        <- ZIO.serviceWithZIO[CatalogStore](_.applyUpdate(updateOf(pid, idx + 1, cs)))
-              count    <- fvCount
+              count    <- fvCount(pid)
               _        <- ZIO.when(count < prevCount)(
                             ZIO.die(new AssertionError("file_version count shrank")))
               nextView  = CatalogView.fromScanned(scanned)
