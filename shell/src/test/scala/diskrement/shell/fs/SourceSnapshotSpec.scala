@@ -15,7 +15,9 @@ object SourceSnapshotSpec extends ZIOSpecDefault:
         case None    =>
           ZIO.attempt {
             Files.createDirectories(dst)
-            Files.list(src).forEach(p => Files.copy(p, dst.resolve(p.getFileName)))
+            val list = Files.list(src)
+            try list.forEach(p => Files.copy(p, dst.resolve(p.getFileName)))
+            finally list.close()
           }.mapError(SnapshotError.SnapshotIoError(_))
 
   /** base/{src/f.txt, work} ; deleted recursively on release. */
@@ -81,6 +83,16 @@ object SourceSnapshotSpec extends ZIOSpecDefault:
                    SnapshotError.NotCowCapable(work, "operation not supported"))))
           err  <- snap.create(src, work).flip
         yield assertTrue(err.isInstanceOf[SnapshotError.NotCowCapable])
+      },
+    test("a SnapshotIoError from the cloner propagates"):
+      ZIO.scoped {
+        for
+          dirs <- makeDirs
+          (src, work) = dirs
+          snap = SourceSnapshotLive(FakeCloner(Some(
+                   SnapshotError.SnapshotIoError(new RuntimeException("boom")))))
+          err  <- snap.create(src, work).flip
+        yield assertTrue(err.isInstanceOf[SnapshotError.SnapshotIoError])
       },
     test("release removes the snapshot dir"):
       ZIO.scoped {

@@ -2,7 +2,7 @@ package diskrement.shell.fs
 
 import zio._
 import zio.test._
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, Paths}
 
 object HasherSpec extends ZIOSpecDefault:
   // Known SHA-256 vectors:
@@ -36,5 +36,8 @@ object HasherSpec extends ZIOSpecDefault:
       withFile(big) { p =>
         for h <- ZIO.serviceWithZIO[Hasher](_.hash(p))
         yield assertTrue(h.value == expected)
-      }
+      },
+    test("fails with IOException on a non-existent file"):
+      ZIO.serviceWithZIO[Hasher](_.hash(Paths.get("/tmp/diskrement-hasher-does-not-exist-xyz.bin")))
+        .flip.map(e => assertTrue(e.isInstanceOf[java.io.IOException]))
   ).provideLayer(Hasher.live)
