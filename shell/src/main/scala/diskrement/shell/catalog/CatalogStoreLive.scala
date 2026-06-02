@@ -161,6 +161,19 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
       }.toMap)
     }
 
+  def sessionsByState(project: ProjectId, state: SessionState): IO[CatalogError, List[Session]] =
+    tx {
+      sql"""select d.ordinal, s.ordinal, s.state, s.burned_at, s.manifest_hash
+            from session s
+            join disc d on d.id = s.disc_id
+            where d.project_id = ${project.value} and s.state = ${state.toString}
+            order by d.ordinal, s.ordinal"""
+        .query[(Int, Int, String, Option[String], Option[String])].selectAll
+    }.map(_.toList.map { case (dOrd, sOrd, st, burnedAt, manifestHash) =>
+      Session(dOrd, sOrd, SessionState.valueOf(st),
+              burnedAt.map(Instant.parse), manifestHash)
+    })
+
   def readDiscStates(project: ProjectId): IO[CatalogError, List[DiscState]] =
     tx {
       sql"""select d.ordinal, d.status, d.usable_bytes,

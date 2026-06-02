@@ -13,6 +13,7 @@ trait CatalogStore:
   def applyUpdate(update: CatalogUpdate): IO[CatalogError, Unit]
   def readView(project: ProjectId): IO[CatalogError, CatalogView]
   def readDiscStates(project: ProjectId): IO[CatalogError, List[DiscState]]
+  def sessionsByState(project: ProjectId, state: SessionState): IO[CatalogError, List[Session]]
 
 object CatalogStore:
   /** Build the store from a pool, running migrations once at layer construction. */
