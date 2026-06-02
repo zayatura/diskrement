@@ -17,20 +17,29 @@ object SnapshotToSpec extends ZIOSpecDefault:
     1, isNew = true, DiscType.BD_R, 100L, DiscStatus.OPEN, "d1",
     SessionWrite(1, ts, "m1", List(fw("a", "a1", 10), fw("b", "b1", 20)), Nil, Nil))))
 
+  private def deleteRecursive(dir: java.nio.file.Path): Unit =
+    val s = Files.walk(dir)
+    try s.sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.deleteIfExists(p))
+    finally s.close()
+
   def spec = suite("CatalogStore.snapshotTo")(
     test("VACUUM INTO produces a self-contained DB with the source's rows"):
-      for
-        pid  <- ZIO.serviceWithZIO[CatalogStore](_.createProject(init))
-        _    <- ZIO.serviceWithZIO[CatalogStore](_.applyUpdate(u.copy(projectId = pid)))
-        dest <- ZIO.attempt(Files.createTempDirectory("snap-to").resolve("snapshot.sqlite"))
-        _    <- ZIO.serviceWithZIO[CatalogStore](_.snapshotTo(dest))
-        exists <- ZIO.attempt(java.nio.file.Files.exists(dest))
-        count <- ZIO.attempt {
-                   val c = java.sql.DriverManager.getConnection(s"jdbc:sqlite:$dest")
-                   try
-                     val rs = c.createStatement().executeQuery("select count(*) from file_version")
-                     rs.next(); rs.getInt(1)
-                   finally c.close()
-                 }
-      yield assertTrue(exists, count == 2)
+      ZIO.scoped {
+        for
+          tmpDir <- ZIO.acquireRelease(ZIO.attempt(Files.createTempDirectory("snap-to")))(
+                      d => ZIO.attempt(deleteRecursive(d)).orDie)
+          dest = tmpDir.resolve("snapshot.sqlite")
+          pid  <- ZIO.serviceWithZIO[CatalogStore](_.createProject(init))
+          _    <- ZIO.serviceWithZIO[CatalogStore](_.applyUpdate(u.copy(projectId = pid)))
+          _    <- ZIO.serviceWithZIO[CatalogStore](_.snapshotTo(dest))
+          exists <- ZIO.attempt(java.nio.file.Files.exists(dest))
+          count  <- ZIO.attempt {
+                      val c = java.sql.DriverManager.getConnection(s"jdbc:sqlite:$dest")
+                      try
+                        val rs = c.createStatement().executeQuery("select count(*) from file_version")
+                        rs.next(); rs.getInt(1)
+                      finally c.close()
+                    }
+        yield assertTrue(exists, count == 2)
+      }
   ).provideLayer(TestDb.layer)

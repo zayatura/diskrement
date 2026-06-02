@@ -31,5 +31,16 @@ object ArchivePointersSpec extends ZIOSpecDefault:
       yield assertTrue(
         ps.toSet == Set(
           ArchivePointer(RelPath("b"), ContentHash("b1"), 20, 1, 1, "/data/b", ManifestChangeKind.ADDED),
-          ArchivePointer(RelPath("c"), ContentHash("c1"), 30, 1, 1, "/data/c", ManifestChangeKind.DELETED)))
+          ArchivePointer(RelPath("c"), ContentHash("c1"), 30, 1, 1, "/data/c", ManifestChangeKind.DELETED))),
+    test("add then delete then re-add: re-added version is live; original appears once as DELETED"):
+      for
+        pid <- ZIO.serviceWithZIO[CatalogStore](_.createProject(init))
+        st   = ZIO.serviceWithZIO[CatalogStore]
+        _   <- st(_.applyUpdate(session(1, added = List(fw("x", "x1", 10))).copy(projectId = pid)))
+        _   <- st(_.applyUpdate(session(2, deleted = List(RelPath("x"))).copy(projectId = pid)))
+        _   <- st(_.applyUpdate(session(3, added = List(fw("x", "x2", 15))).copy(projectId = pid)))
+        ps  <- st(_.archivePointers(pid))
+      yield assertTrue(
+        ps.toSet == Set(
+          ArchivePointer(RelPath("x"), ContentHash("x1"), 10, 1, 1, "/data/x", ManifestChangeKind.DELETED)))
   ).provideLayer(TestDb.layer)

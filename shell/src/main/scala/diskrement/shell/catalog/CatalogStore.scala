@@ -16,6 +16,10 @@ trait CatalogStore:
   def readDiscStates(project: ProjectId): IO[CatalogError, List[DiscState]]
   def sessionsByState(project: ProjectId, state: SessionState): IO[CatalogError, List[Session]]
   def fingerprints(project: ProjectId): IO[CatalogError, Map[RelPath, FileFingerprint]]
+  /** Write a consistent full-database snapshot to `dest` via SQLite `VACUUM INTO`
+    * (run outside a transaction). `dest` must NOT already exist — `VACUUM INTO`
+    * fails if it does. The destination filename is passed as a bound parameter,
+    * which sqlite-jdbc supports. */
   def snapshotTo(dest: Path): IO[CatalogError, Unit]
   def archivePointers(project: ProjectId): IO[CatalogError, List[ArchivePointer]]
 
