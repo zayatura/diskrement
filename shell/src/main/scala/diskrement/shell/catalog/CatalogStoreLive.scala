@@ -174,6 +174,25 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
               burnedAt.map(Instant.parse), manifestHash)
     })
 
+  def fingerprints(project: ProjectId): IO[CatalogError, Map[RelPath, FileFingerprint]] =
+    tx {
+      sql"""select fv.rel_path, fv.size_bytes, fv.mtime, fv.content_hash
+            from (
+              select cr.kind as kind, cr.file_version_id as fvid,
+                     row_number() over (partition by fv.rel_path order by cr.id desc) as rn
+              from change_record cr
+              join file_version fv on fv.id = cr.file_version_id
+              where fv.project_id = ${project.value}
+            ) l
+            join file_version fv on fv.id = l.fvid
+            where l.rn = 1 and l.kind <> 'DELETED'"""
+        .query[(String, Long, String, String)].selectAll
+    }.map { rows =>
+      rows.iterator.map { case (p, sz, mt, h) =>
+        RelPath(p) -> FileFingerprint(sz, Instant.parse(mt), ContentHash(h))
+      }.toMap
+    }
+
   def readDiscStates(project: ProjectId): IO[CatalogError, List[DiscState]] =
     tx {
       sql"""select d.ordinal, d.status, d.usable_bytes,
