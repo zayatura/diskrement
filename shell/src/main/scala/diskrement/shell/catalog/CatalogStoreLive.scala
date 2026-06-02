@@ -1,6 +1,6 @@
 package diskrement.shell.catalog
 
-import diskrement.core.{DiscStatus, DiscType, ManifestChangeKind, RelPath}
+import diskrement.core.{CatalogEntry, CatalogView, ContentHash, DiscStatus, DiscType, ManifestChangeKind, RelPath}
 import diskrement.shell.model._
 import diskrement.shell.model.CatalogError._
 import zio._
@@ -139,3 +139,24 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
     }.map(_.map { case (id, n, sr, wd, dt, mp, cp, ca) =>
       Project(ProjectId(id), n, sr, wd, DiscType.valueOf(dt), mp, cp, Instant.parse(ca))
     })
+
+  def readView(project: ProjectId): IO[CatalogError, CatalogView] =
+    tx {
+      sql"""select fv.rel_path, fv.content_hash, fv.size_bytes
+            from (
+              select cr.id as cr_id, cr.kind as kind, cr.file_version_id as fvid,
+                     fv.rel_path as rp,
+                     row_number() over (partition by fv.rel_path order by cr.id desc) as rn
+              from change_record cr
+              join file_version fv on fv.id = cr.file_version_id
+              where fv.project_id = ${project.value}
+            ) l
+            join file_version fv on fv.id = l.fvid
+            where l.rn = 1 and l.kind <> 'DELETED'"""
+        .query[(String, String, Long)].selectAll
+    }.map { rows =>
+      CatalogView(rows.iterator.map { case (p, h, s) =>
+        val rel = RelPath(p)
+        rel -> CatalogEntry(rel, ContentHash(h), s)
+      }.toMap)
+    }
