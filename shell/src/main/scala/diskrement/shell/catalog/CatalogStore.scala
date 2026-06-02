@@ -4,6 +4,7 @@ import diskrement.core.{CatalogView, DiscState, RelPath}
 import diskrement.shell.model._
 import zio._
 import zio.jdbc._
+import java.nio.file.Path
 
 /** SQLite-backed persistence port for the catalog. Grows across Plan 2a tasks;
   * currently it creates and finds projects. */
@@ -15,6 +16,7 @@ trait CatalogStore:
   def readDiscStates(project: ProjectId): IO[CatalogError, List[DiscState]]
   def sessionsByState(project: ProjectId, state: SessionState): IO[CatalogError, List[Session]]
   def fingerprints(project: ProjectId): IO[CatalogError, Map[RelPath, FileFingerprint]]
+  def snapshotTo(dest: Path): IO[CatalogError, Unit]
 
 object CatalogStore:
   /** Build the store from a pool, running migrations once at layer construction. */

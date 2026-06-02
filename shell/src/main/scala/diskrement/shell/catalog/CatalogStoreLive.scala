@@ -5,6 +5,7 @@ import diskrement.shell.model._
 import diskrement.shell.model.CatalogError._
 import zio._
 import zio.jdbc._
+import java.nio.file.Path
 import java.time.Instant
 
 private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extends CatalogStore:
@@ -208,3 +209,11 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
     }.map(_.toList.map { case (ord, status, usable, used) =>
       DiscState(ord, DiscStatus.valueOf(status), usable, used)
     })
+
+  def snapshotTo(dest: Path): IO[CatalogError, Unit] =
+    transaction(sql"vacuum into ${dest.toString}".execute.unit)
+      .provideEnvironment(ZEnvironment(pool))
+      .refineOrDie {
+        case e: CatalogError                              => e
+        case e: java.sql.SQLException if isConstraint(e)  => ConstraintViolation(e)
+      }
