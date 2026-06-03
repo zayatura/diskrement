@@ -30,7 +30,8 @@ private[pipeline] final case class PipelineLive(
 
   def init(p: ProjectInit): IO[PipelineError, ProjectId] =
     for
-      _  <- sameFilesystem(Path.of(p.sourceRoot), paths.workDir)
+      srcPath <- ZIO.attempt(Path.of(p.sourceRoot)).mapError(PipelineError.Failed(_))
+      _  <- sameFilesystem(srcPath, paths.workDir)
       _  <- snapshot.checkCowCapable(paths.workDir)
               .mapError(e => PipelineError.NotCowCapable(paths.workDir, e.getMessage))
       id <- catalog.createProject(p).mapError(PipelineError.Failed(_))
@@ -69,7 +70,8 @@ private[pipeline] final case class PipelineLive(
 
   private def freshScan(p: Project, verify: Boolean): IO[PipelineError, ScanResult] =
     for
-      handle  <- snapshot.create(Path.of(p.sourceRoot), paths.workDir)
+      srcPath <- ZIO.attempt(Path.of(p.sourceRoot)).mapError(PipelineError.Failed(_))
+      handle  <- snapshot.create(srcPath, paths.workDir)
                    .mapError(e => PipelineError.Failed(e))
       prior   <- catalog.fingerprints(p.id).mapError(PipelineError.Failed(_))
       scanned <- scanner.scan(handle.root, prior, verify).mapError(PipelineError.Failed(_))
@@ -144,6 +146,8 @@ private[pipeline] final case class PipelineLive(
       _           <- catalog.applyUpdate(update).mapError(PipelineError.Failed(_))
       _           <- snapshot.release(SnapshotHandle(snapRoot))
       _           <- staged.clear(paths.workDir)
+      // burnPlan.oversized is always empty here (burn hard-fails OversizedFiles above);
+      // the field is kept for the BurnReport shape the CLI (3b) renders.
     yield BurnReport(reports, burnPlan.oversized.map(_.relPath))
 
   /** Highest existing session ordinal per disc ordinal (for the next ordinal). */
@@ -177,6 +181,7 @@ private[pipeline] final case class PipelineLive(
       _ <- project(name)
       _ <- staged.clear(paths.workDir)
       _ <- ZIO.attemptBlockingIO {
+             Files.deleteIfExists(paths.workDir.resolve("burn-catalog.sqlite"))
              val staging = paths.workDir.resolve("staging")
              if Files.exists(staging) then
                val s = Files.walk(staging)
@@ -216,7 +221,7 @@ private[pipeline] final case class PipelineLive(
                       }
                     }.map(_.flatten)
       _ <- ZIO.when(existed && mismatches.isEmpty)(
-             sessions.filter(_.discOrdinal == ordinal).headOption match
+             sessions.filter(_.discOrdinal == ordinal).lastOption match
                case Some(s) => catalog.markVerified(pid, ordinal, s.ordinal).mapError(PipelineError.Failed(_))
                case None    => ZIO.unit)
     yield VerifyReport(ordinal, files.size, mismatches)

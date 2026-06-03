@@ -40,12 +40,14 @@ object PipelineFullLoopSpec extends ZIOSpecDefault:
           hB    <- pipe.history("p", RelPath("b.txt"))
           proj  <- ZIO.serviceWithZIO[CatalogStore](_.findProject("p"))
           view  <- ZIO.serviceWithZIO[CatalogStore](_.readView(proj.get.id))
+          ver   <- ZIO.serviceWithZIO[CatalogStore](_.sessionsByState(proj.get.id, SessionState.VERIFIED))
         yield assertTrue(
           s1 == ScanResult(2, 0, 0, 0),
           s2 == ScanResult(added = 1, modified = 1, deleted = 1, unchanged = 0),
           view.current.keySet.map(_.value) == Set("a.txt", "c.txt"),
           reps.forall(_.mismatches.isEmpty),
           hA.map(_.status) == List(VersionStatus.SUPERSEDED, VersionStatus.CURRENT),
-          hB.map(_.status) == List(VersionStatus.DELETED))
+          hB.map(_.status) == List(VersionStatus.DELETED),
+          ver.map(s => (s.discOrdinal, s.ordinal)) == List((1, 2)))
       }
   ).provideLayer(PipelineTestKit.env.orDie)

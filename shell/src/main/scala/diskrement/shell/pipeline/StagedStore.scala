@@ -55,6 +55,8 @@ final case class StagedStoreLive() extends StagedStore:
   def writeScan(workDir: Path, scanned: List[ScannedFile]): IO[PipelineError, Unit] =
     write(scanFile(workDir), scanned.map(ScannedFileJson.from).toJson)
 
+  // A corrupt staged JSON file is disk corruption, not a normal condition, so a
+  // decode failure is surfaced as a defect (die) rather than a typed PipelineError.
   def readScan(workDir: Path): IO[PipelineError, Option[List[ScannedFile]]] =
     read(scanFile(workDir)).map(_.map(s =>
       s.fromJson[List[ScannedFileJson]].fold(
