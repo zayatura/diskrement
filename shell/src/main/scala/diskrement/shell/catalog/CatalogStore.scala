@@ -22,6 +22,8 @@ trait CatalogStore:
     * which sqlite-jdbc supports. */
   def snapshotTo(dest: Path): IO[CatalogError, Unit]
   def archivePointers(project: ProjectId): IO[CatalogError, List[ArchivePointer]]
+  def fileHistory(project: ProjectId, relPath: RelPath): IO[CatalogError, List[FileHistoryEntry]]
+  def markVerified(project: ProjectId, discOrdinal: Int, sessionOrdinal: Int): IO[CatalogError, Unit]
 
 object CatalogStore:
   /** Build the store from a pool, running migrations once at layer construction. */

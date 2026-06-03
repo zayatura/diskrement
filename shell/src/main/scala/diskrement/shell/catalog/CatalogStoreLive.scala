@@ -240,6 +240,50 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
       ArchivePointer(RelPath(rp), ContentHash(ch), sz, dOrd, sOrd, dpath, ManifestChangeKind.valueOf(kind))
     })
 
+  def fileHistory(project: ProjectId, relPath: RelPath): IO[CatalogError, List[FileHistoryEntry]] =
+    tx {
+      sql"""select fv.content_hash, fv.size_bytes, d.ordinal, s.ordinal, fvk.kind,
+                   case when fv.id = cur.fvid then 1 else 0 end as is_current
+            from file_version fv
+            join placement p on p.file_version_id = fv.id
+            join session s   on s.id = p.session_id
+            join disc d      on d.id = s.disc_id
+            join (
+              select cr.file_version_id as fvid, cr.kind as kind,
+                     row_number() over (partition by cr.file_version_id order by cr.id desc) as rn
+              from change_record cr
+            ) fvk on fvk.fvid = fv.id and fvk.rn = 1
+            left join (
+              select fvid from (
+                select cr.file_version_id as fvid, cr.kind as kind,
+                       row_number() over (partition by fv2.rel_path order by cr.id desc) as rn
+                from change_record cr
+                join file_version fv2 on fv2.id = cr.file_version_id
+                where fv2.project_id = ${project.value} and fv2.rel_path = ${relPath.value}
+              ) c where c.rn = 1 and c.kind <> 'DELETED'
+            ) cur on cur.fvid = fv.id
+            where fv.project_id = ${project.value} and fv.rel_path = ${relPath.value}
+            order by fv.id"""
+        .query[(String, Long, Int, Int, String, Int)].selectAll
+    }.map(_.toList.map { case (ch, sz, dOrd, sOrd, kind, isCurrent) =>
+      val status =
+        if isCurrent == 1 then VersionStatus.CURRENT
+        else if kind == "DELETED" then VersionStatus.DELETED
+        else VersionStatus.SUPERSEDED
+      FileHistoryEntry(ContentHash(ch), sz, dOrd, sOrd, status)
+    })
+
+  def markVerified(project: ProjectId, discOrdinal: Int, sessionOrdinal: Int): IO[CatalogError, Unit] =
+    tx {
+      sql"""update session set state = 'VERIFIED'
+            where state = 'BURNED' and ordinal = $sessionOrdinal
+              and disc_id = (select id from disc where project_id = ${project.value} and ordinal = $discOrdinal)"""
+        .update.flatMap(n =>
+          ZIO.when(n == 0L)(
+            ZIO.fail(IllegalStatusTransition(
+              s"no BURNED session $sessionOrdinal on disc $discOrdinal"))).unit)
+    }
+
   def snapshotTo(dest: Path): IO[CatalogError, Unit] =
     transaction(sql"vacuum into ${dest.toString}".execute.unit)
       .provideEnvironment(ZEnvironment(pool))
