@@ -81,6 +81,22 @@ private[pipeline] final case class PipelineLive(
       ScanResult(cs.added.size, cs.modified.size, cs.deleted.size, cs.unchanged.size)
     }
 
+  def plan(name: String, discTypeOverride: Option[DiscType]): IO[PipelineError, BurnPlan] =
+    for
+      p       <- project(name)
+      scanned <- staged.readScan(paths.workDir).flatMap {
+                   case Some(s) => ZIO.succeed(s)
+                   case None    => ZIO.fail(PipelineError.NoStagedScan(name))
+                 }
+      view    <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
+      states  <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
+      discType = discTypeOverride.getOrElse(p.defaultDiscType)
+      cap      = Capacity.fromDiscType(discType, p.marginPercent)
+      cs       = Diff.diff(view, scanned)
+      burnPlan = Planner.plan(cs, states, cap)
+      _       <- staged.writePlan(paths.workDir, burnPlan, discType)
+    yield burnPlan
+
   def reset(name: String): IO[PipelineError, Unit] =
     for
       _ <- project(name)
