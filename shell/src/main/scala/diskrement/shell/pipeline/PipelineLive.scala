@@ -8,6 +8,7 @@ import diskrement.shell.fs.{FileScanner, Hasher, SnapshotHandle, SourceSnapshot}
 import diskrement.shell.model.*
 import zio.*
 import java.nio.file.{Files, Path}
+import scala.jdk.StreamConverters.*
 
 private[pipeline] final case class PipelineLive(
     catalog: CatalogStore,
@@ -184,3 +185,38 @@ private[pipeline] final case class PipelineLive(
            }.mapError(PipelineError.Failed(_))
       _ <- snapshot.release(SnapshotHandle(paths.workDir.resolve("snapshot")))
     yield ()
+
+  def verify(name: String, discOrdinal: Option[Int]): IO[PipelineError, List[VerifyReport]] =
+    for
+      p        <- project(name)
+      view     <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
+      states   <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
+      sessions <- catalog.sessionsByState(p.id, SessionState.BURNED).mapError(PipelineError.Failed(_))
+      targets   = states.map(_.ordinal).filter(o => discOrdinal.forall(_ == o))
+      reps     <- ZIO.foreach(targets)(o => verifyDisc(p.id, o, view, sessions))
+    yield reps
+
+  private def verifyDisc(
+      pid: ProjectId, ordinal: Int, view: CatalogView, sessions: List[Session]
+  ): IO[PipelineError, VerifyReport] =
+    val dataDir = paths.workDir.resolve("staging").resolve(s"disc-$ordinal").resolve("data")
+    for
+      existed <- ZIO.attemptBlockingIO(Files.exists(dataDir)).mapError(PipelineError.Failed(_))
+      files <- ZIO.attemptBlockingIO {
+                 if existed then
+                   val s = Files.walk(dataDir)
+                   try s.toScala(List).filter(p => Files.isRegularFile(p))
+                   finally s.close()
+                 else Nil
+               }.mapError(PipelineError.Failed(_))
+      mismatches <- ZIO.foreach(files) { f =>
+                      val rel = RelPath(dataDir.relativize(f).toString)
+                      hasher.hash(f).mapError(PipelineError.Failed(_)).map { h =>
+                        Option.when(!view.current.get(rel).exists(_.contentHash == h))(rel)
+                      }
+                    }.map(_.flatten)
+      _ <- ZIO.when(existed && mismatches.isEmpty)(
+             sessions.filter(_.discOrdinal == ordinal).headOption match
+               case Some(s) => catalog.markVerified(pid, ordinal, s.ordinal).mapError(PipelineError.Failed(_))
+               case None    => ZIO.unit)
+    yield VerifyReport(ordinal, files.size, mismatches)

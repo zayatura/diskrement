@@ -34,6 +34,7 @@ trait Pipeline:
   def reset(name: String): IO[PipelineError, Unit]
   def plan(name: String, discTypeOverride: Option[DiscType]): IO[PipelineError, BurnPlan]
   def burn(name: String): IO[PipelineError, BurnReport]
+  def verify(name: String, discOrdinal: Option[Int]): IO[PipelineError, List[VerifyReport]]
 
 object Pipeline:
   val live: ZLayer[
