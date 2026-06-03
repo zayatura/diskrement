@@ -30,6 +30,8 @@ trait Pipeline:
   def init(p: ProjectInit): IO[PipelineError, ProjectId]
   def status(name: String): IO[PipelineError, StatusReport]
   def history(name: String, relPath: RelPath): IO[PipelineError, List[FileHistoryEntry]]
+  def scan(name: String, verify: Boolean, force: Boolean): IO[PipelineError, ScanResult]
+  def reset(name: String): IO[PipelineError, Unit]
 
 object Pipeline:
   val live: ZLayer[
