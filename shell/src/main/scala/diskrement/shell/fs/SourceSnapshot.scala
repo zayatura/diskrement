@@ -53,6 +53,7 @@ private[fs] final case class CpCloner() extends Cloner:
 trait SourceSnapshot:
   def create(sourceRoot: Path, workDir: Path): IO[SnapshotError, SnapshotHandle]
   def release(handle: SnapshotHandle): UIO[Unit]
+  def checkCowCapable(workDir: Path): IO[SnapshotError, Unit]
 
 private[fs] final case class SourceSnapshotLive(cloner: Cloner) extends SourceSnapshot:
   def create(sourceRoot: Path, workDir: Path): IO[SnapshotError, SnapshotHandle] =
@@ -68,6 +69,21 @@ private[fs] final case class SourceSnapshotLive(cloner: Cloner) extends SourceSn
     yield SnapshotHandle(dst)
 
   def release(handle: SnapshotHandle): UIO[Unit] = removeDir(handle.root)
+
+  def checkCowCapable(workDir: Path): IO[SnapshotError, Unit] =
+    ZIO.acquireReleaseWith(
+      ZIO.attemptBlockingIO {
+        Files.createDirectories(workDir)
+        val src = Files.createTempFile(workDir, "cow-probe", ".src")
+        Files.write(src, Array[Byte](0))
+        src
+      }.mapError(SnapshotError.SnapshotIoError(_))
+    )(src =>
+      ZIO.attemptBlockingIO {
+        Files.deleteIfExists(src)
+        Files.deleteIfExists(Path.of(src.toString + ".clone"))
+      }.ignoreLogged
+    )(src => cloner.reflinkCopy(src, Path.of(src.toString + ".clone")))
 
   private def removeDir(dir: Path): UIO[Unit] =
     ZIO.attemptBlockingIO {
