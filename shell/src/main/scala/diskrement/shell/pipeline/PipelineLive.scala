@@ -2,7 +2,8 @@ package diskrement.shell.pipeline
 
 import diskrement.core.*
 import diskrement.shell.catalog.CatalogStore
-import diskrement.shell.burn.SimulatedBurner
+import diskrement.shell.burn.{DiscIdentity, DiscImage, DiscMetadata, ManifestJson, SimulatedBurner}
+import zio.json.*
 import diskrement.shell.fs.{FileScanner, Hasher, SnapshotHandle, SourceSnapshot}
 import diskrement.shell.model.*
 import zio.*
@@ -96,6 +97,79 @@ private[pipeline] final case class PipelineLive(
       burnPlan = Planner.plan(cs, states, cap)
       _       <- staged.writePlan(paths.workDir, burnPlan, discType)
     yield burnPlan
+
+  def burn(name: String): IO[PipelineError, BurnReport] =
+    for
+      p           <- project(name)
+      scanned     <- staged.readScan(paths.workDir).flatMap {
+                       case Some(s) => ZIO.succeed(s); case None => ZIO.fail(PipelineError.NoStagedScan(name)) }
+      planAndType <- staged.readPlan(paths.workDir).flatMap {
+                       case Some(pt) => ZIO.succeed(pt); case None => ZIO.fail(PipelineError.NoStagedPlan(name)) }
+      (burnPlan, discType) = planAndType
+      _           <- ZIO.when(burnPlan.oversized.nonEmpty)(
+                       ZIO.fail(PipelineError.OversizedFiles(burnPlan.oversized.map(_.relPath))))
+      snapRoot     = paths.workDir.resolve("snapshot")
+      _           <- ZIO.attemptBlockingIO(Files.exists(snapRoot)).mapError(PipelineError.Failed(_))
+                       .flatMap(e => ZIO.unless(e)(ZIO.fail(PipelineError.SnapshotMissing(name))).unit)
+      view        <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
+      changeSet    = Diff.diff(view, scanned)
+      now         <- Clock.instant
+      tmpCatalog   = paths.workDir.resolve("burn-catalog.sqlite")
+      _           <- ZIO.attemptBlockingIO {
+                       Files.createDirectories(tmpCatalog.getParent); Files.deleteIfExists(tmpCatalog) }
+                       .mapError(PipelineError.Failed(_))
+      _           <- catalog.snapshotTo(tmpCatalog).mapError(PipelineError.Failed(_))
+      pointers    <- catalog.archivePointers(p.id).mapError(PipelineError.Failed(_))
+      existing    <- existingSessions(p.id)
+      discCount    = burnPlan.discs.map(_.ordinal).maxOption.getOrElse(0)
+      lastIdx      = burnPlan.discs.size - 1
+      reports     <- ZIO.foreach(burnPlan.discs.zipWithIndex) { case (d, i) =>
+                       val tombs   = if i == lastIdx then burnPlan.tombstones else Nil
+                       val sessOrd = existing.getOrElse(d.ordinal, 0) + 1
+                       val manifest = ManifestBuilder.build(name, sessOrd, d, changeSet, tombs)
+                       val identity = DiscIdentity(name, d.ordinal, discCount, sessOrd, now)
+                       val meta  = DiscMetadata(identity, manifest, tmpCatalog, pointers)
+                       val image = DiscImage(
+                         paths.workDir.resolve("staging").resolve(s"disc-${d.ordinal}"), snapRoot, d.files, meta)
+                       burner.burn(image).mapError(PipelineError.Failed(_))
+                         .map(r => DiscBurn(d.ordinal, r.stagingDir, r.imageBytes))
+                     }
+      update       = CatalogUpdate(p.id, Nil, burnPlan.discs.zipWithIndex.map { case (d, i) =>
+                       val tombs   = if i == lastIdx then burnPlan.tombstones else Nil
+                       val sessOrd = existing.getOrElse(d.ordinal, 0) + 1
+                       val manifest = ManifestBuilder.build(name, sessOrd, d, changeSet, tombs)
+                       toDiscWrite(name, d, discType, sessOrd, now, changeSet, tombs, manifest)
+                     })
+      _           <- catalog.applyUpdate(update).mapError(PipelineError.Failed(_))
+      _           <- snapshot.release(SnapshotHandle(snapRoot))
+      _           <- staged.clear(paths.workDir)
+    yield BurnReport(reports, burnPlan.oversized.map(_.relPath))
+
+  /** Highest existing session ordinal per disc ordinal (for the next ordinal). */
+  private def existingSessions(pid: ProjectId): IO[PipelineError, Map[Int, Int]] =
+    for
+      b <- catalog.sessionsByState(pid, SessionState.BURNED).mapError(PipelineError.Failed(_))
+      v <- catalog.sessionsByState(pid, SessionState.VERIFIED).mapError(PipelineError.Failed(_))
+    yield (b ++ v).groupBy(_.discOrdinal).view.mapValues(_.map(_.ordinal).max).toMap
+
+  private def toDiscWrite(
+      name: String, d: PlannedDisc, discType: DiscType, sessOrd: Int, now: java.time.Instant,
+      cs: ChangeSet, tombs: List[RelPath], manifest: SessionManifest): DiscWrite =
+    val addedPaths = cs.added.iterator.map(_.relPath).toSet
+    val (addedFiles, modifiedFiles) = d.files.partition(f => addedPaths.contains(f.relPath))
+    def fw(f: ScannedFile) =
+      FileWrite(f.relPath, f.contentHash, f.sizeBytes, f.mtime, "/data/" + f.relPath.value, 0)
+    DiscWrite(
+      ordinal = d.ordinal, isNew = d.isNew, discType = discType, usableBytes = d.usableBytes,
+      status = if d.willFinalize then DiscStatus.FINALIZED else DiscStatus.OPEN,
+      label = s"$name disc ${d.ordinal}",
+      session = SessionWrite(sessOrd, now, manifestHash(manifest),
+        addedFiles.map(fw), modifiedFiles.map(fw), tombs))
+
+  private def manifestHash(m: SessionManifest): String =
+    val json = ManifestJson.from(m).toJson
+    java.security.MessageDigest.getInstance("SHA-256")
+      .digest(json.getBytes("UTF-8")).map(b => f"${b & 0xff}%02x").mkString
 
   def reset(name: String): IO[PipelineError, Unit] =
     for
