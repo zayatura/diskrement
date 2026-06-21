@@ -38,5 +38,9 @@ object PathResolverSpec extends ZIOSpecDefault:
       assertTrue(
         r.catalogPath == Paths.get("/tmp/c/my.sqlite"),
         r.dataDir == Paths.get("/tmp/c"))
+    },
+    test("--catalog with a relative path is normalized to absolute") {
+      val r = PathResolver.resolve("photos", GlobalOpts(Some(Paths.get("rel/my.sqlite")), None), env(Map.empty), home)
+      assertTrue(r.catalogPath.isAbsolute, r.dataDir.isAbsolute, r.catalogPath.endsWith(Paths.get("rel/my.sqlite")))
     }
   )

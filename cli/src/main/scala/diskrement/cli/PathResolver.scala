@@ -18,8 +18,11 @@ object PathResolver:
   ): ResolvedPaths =
     global.catalog match
       case Some(catalogPath) =>
-        val parent = Option(catalogPath.toAbsolutePath.getParent).getOrElse(Paths.get("."))
-        ResolvedPaths(catalogPath, parent)
+        // Normalize to absolute so the data dir we create and the path SQLite opens
+        // agree even when --catalog is given as a relative path.
+        val abs    = catalogPath.toAbsolutePath
+        val parent = Option(abs.getParent).getOrElse(Paths.get("."))
+        ResolvedPaths(abs, parent)
       case None =>
         // A set-but-empty env var (e.g. STATE_DIRECTORY="") would otherwise resolve
         // to the JVM working dir via Paths.get(""); treat empty as unset.

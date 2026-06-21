@@ -66,13 +66,16 @@ object Runner:
         }
 
       case c: DiskrementCommand.Burn =>
-        withProject(catalogPath, c.name) { (project, pipeline) =>
+        // Burn the plan exactly as staged (it carries the disc type chosen at `plan`
+        // time). We intentionally do NOT re-plan here: re-planning with `None` would
+        // overwrite the staged plan with the project's default disc type, silently
+        // discarding a `plan --disc-type ...` choice. The user saw the plan when they
+        // ran `plan`; `Render.burn` then reports what was actually written.
+        withProject(catalogPath, c.name) { (_, pipeline) =>
           for
-            staged <- pipeline.plan(c.name, None) // re-derive the staged plan, idempotent
-            _      <- printOut(Render.plan(staged, project.defaultDiscType))
-            ok     <- Prompt.confirm("Proceed?", c.assumeYes)
-            code   <- if !ok then printOut("Aborted.").as(ExitCode.success)
-                      else pipeline.burn(c.name).flatMap(r => printOut(Render.burn(r))).as(ExitCode.success)
+            ok   <- Prompt.confirm(s"Burn the staged plan for ${c.name}?", c.assumeYes)
+            code <- if !ok then printOut("Aborted.").as(ExitCode.success)
+                    else pipeline.burn(c.name).flatMap(r => printOut(Render.burn(r))).as(ExitCode.success)
           yield code
         }
 
