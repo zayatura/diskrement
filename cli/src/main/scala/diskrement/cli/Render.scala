@@ -3,6 +3,7 @@ package diskrement.cli
 import diskrement.core.*
 import diskrement.shell.model.*
 import diskrement.shell.pipeline.*
+import zio.ExitCode
 
 /** Pure formatters: Pipeline result types -> terminal text. No I/O. */
 object Render:
@@ -60,3 +61,23 @@ object Render:
 
   def init(name: String, id: ProjectId): String =
     s"Created project $name (id ${id.value})."
+
+  /** Known errors -> a stderr message and a stable exit code. */
+  def handle(e: PipelineError): (String, ExitCode) =
+    val code = e match
+      case _: PipelineError.ProjectNotFound   => ExitCode(2)
+      case _: PipelineError.NoStagedScan      => ExitCode(2)
+      case _: PipelineError.NoStagedPlan      => ExitCode(2)
+      case _: PipelineError.SnapshotMissing   => ExitCode(2)
+      case _: PipelineError.NotSameFilesystem => ExitCode(3)
+      case _: PipelineError.NotCowCapable     => ExitCode(3)
+      case _: PipelineError.OversizedFiles    => ExitCode(3)
+      case _: PipelineError.Failed            => ExitCode(5)
+    val message = e match
+      case PipelineError.Failed(cause) => s"internal error: ${cause.getMessage} (this is a bug)"
+      case other                       => other.getMessage
+    (message, code)
+
+  /** Result-driven exit: a verify that finds corruption is a successful run with a bad outcome. */
+  def verifyExit(reports: List[VerifyReport]): ExitCode =
+    if reports.exists(_.mismatches.nonEmpty) then ExitCode(4) else ExitCode(0)
