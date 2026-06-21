@@ -74,8 +74,10 @@ object Render:
       case _: PipelineError.OversizedFiles    => ExitCode(3)
       case _: PipelineError.Failed            => ExitCode(5)
     val message = e match
-      case PipelineError.Failed(cause) => s"internal error: ${cause.getMessage} (this is a bug)"
-      case other                       => other.getMessage
+      case PipelineError.Failed(cause) =>
+        val detail = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
+        s"internal error: $detail (this is a bug)"
+      case other => other.getMessage
     (message, code)
 
   /** Result-driven exit: a verify that finds corruption is a successful run with a bad outcome. */
