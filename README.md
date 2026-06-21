@@ -76,7 +76,7 @@ self-describing discs — all of these follow directly from "you can never undo 
 
 ## Status
 
-`diskrement` is under active development. This is the state of Cycle 1:
+`diskrement` is under active development. **Cycle 1 is complete:**
 
 | Component | Status |
 |-----------|--------|
@@ -85,7 +85,7 @@ self-describing discs — all of these follow directly from "you can never undo 
 | File scanning, SHA-256 hashing, CoW source snapshots | Done |
 | Disc staging, `/.diskrement` layout, simulated burner | Done |
 | Pipeline orchestration (all 8 operations) | Done |
-| **CLI adapter** (argument parsing, prompts, output formatting) | **In progress** |
+| CLI adapter (argument parsing, prompts, output formatting) | Done |
 | Real disc burning (`xorriso` / `growisofs`) | Planned (Cycle 2) |
 
 The pipeline orchestration layer is fully tested with integration tests against
@@ -93,8 +93,22 @@ real temp directories and a full scan → plan → burn → verify → history l
 simulated burner stages disc contents to directories rather than writing to physical
 media — this makes the entire workflow testable without hardware.
 
-The CLI wiring (Plan 3b) is the remaining piece of Cycle 1. Once it lands, the tool
-will be runnable end-to-end with simulated burns.
+With the CLI adapter (Plan 3b) in place, the tool is runnable end-to-end with
+simulated burns:
+
+```
+diskrement init photos --source /srv/photos --work-dir /srv/work
+diskrement scan photos
+diskrement plan photos
+diskrement burn photos          # asks for confirmation; --yes to skip
+diskrement status photos
+diskrement verify photos
+diskrement history photos some/file.jpg
+```
+
+Run it from the repo with `sbt "cli/run <args>"`. The per-project catalog defaults
+to `$XDG_DATA_HOME/diskrement/<name>.sqlite` (or systemd's `$STATE_DIRECTORY`),
+overridable with `--catalog`.
 
 ---
 
