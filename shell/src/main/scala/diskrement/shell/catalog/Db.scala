@@ -49,7 +49,15 @@ object Db:
       for
         dbPath <- ZIO.service[DbPath]
         cfg     = ZConnectionPoolConfig.default.copy(minConnections = 1, maxConnections = 1)
-        zenv   <- ZConnectionPool.make(acquireConn(dbPath.value)).build
-                    .provideSome[Scope](ZLayer.succeed(cfg))
+        // The pool forks a background fiber that recycles connections on a
+        // timeToLive timer driven by the Clock. Pin it to the live clock: a
+        // pool's TTL is real wall-clock maintenance (a no-op in production,
+        // where the clock is already live), and under ZIO Test's default
+        // TestClock that timer never advances, which hangs DB-touching suites
+        // intermittently.
+        zenv   <- ZIO.withClock(Clock.ClockLive) {
+                    ZConnectionPool.make(acquireConn(dbPath.value)).build
+                      .provideSome[Scope](ZLayer.succeed(cfg))
+                  }
       yield zenv.get[ZConnectionPool]
     }
