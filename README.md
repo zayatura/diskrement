@@ -106,9 +106,8 @@ diskrement verify photos
 diskrement history photos some/file.jpg
 ```
 
-Run it from the repo with `sbt "cli/run <args>"`. The per-project catalog defaults
-to `$XDG_DATA_HOME/diskrement/<name>.sqlite` (or systemd's `$STATE_DIRECTORY`),
-overridable with `--catalog`.
+The per-project catalog defaults to `$XDG_DATA_HOME/diskrement/<name>.sqlite`
+(or systemd's `$STATE_DIRECTORY`), overridable with `--catalog`.
 
 ---
 
@@ -125,6 +124,38 @@ sbt test
 
 The test suite includes integration tests that auto-skip on filesystems without
 copy-on-write support.
+
+### Producing an executable
+
+```bash
+sbt cli/stage
+```
+
+This places a self-contained `diskrement` launch script and all its JARs under
+`cli/target/universal/stage/`. You can run it directly:
+
+```bash
+cli/target/universal/stage/bin/diskrement --help
+```
+
+Or put it on your `PATH` permanently with a symlink:
+
+```bash
+ln -s "$PWD/cli/target/universal/stage/bin/diskrement" ~/.local/bin/diskrement
+```
+
+To produce a distributable zip archive instead:
+
+```bash
+sbt cli/universal:packageBin
+# output: cli/target/universal/diskrement-0.1.0-SNAPSHOT.zip
+```
+
+During development you can also run without staging:
+
+```bash
+sbt "cli/run scan photos"
+```
 
 ---
 

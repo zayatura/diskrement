@@ -35,8 +35,11 @@ lazy val shell = (project in file("shell"))
 
 lazy val cli = (project in file("cli"))
   .dependsOn(shell)
+  .enablePlugins(JavaAppPackaging)
   .settings(
-    name := "diskrement-cli",
+    name := "diskrement",
+    executableScriptName := "diskrement",
+    Compile / mainClass := Some("diskrement.cli.Main"),
     libraryDependencies ++= Seq(
       "dev.zio" %% "zio-cli"      % zioCliVersion,
       "dev.zio" %% "zio-test"     % zioVersion % Test,
