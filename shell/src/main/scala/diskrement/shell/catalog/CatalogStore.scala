@@ -37,3 +37,18 @@ object CatalogStore:
                   .mapError(CatalogError.MigrationFailed(_))
       yield CatalogStoreLive(pool)
     }
+
+  /** Open a standalone catalog file at `dbPath`, apply `update`, then close it.
+    * Used to materialize the post-burn catalog state into the per-disc snapshot
+    * (`burn-catalog.sqlite`) without committing anything to the live catalog —
+    * the live commit happens separately, only after the discs are staged. */
+  def applyUpdateTo(dbPath: Path, update: CatalogUpdate): IO[CatalogError, Unit] =
+    ZIO.serviceWithZIO[CatalogStore](_.applyUpdate(update))
+      .provide(
+        ZLayer.succeed(DbPath(dbPath)),
+        Db.poolLayer,
+        CatalogStore.live)
+      .mapError {
+        case e: CatalogError => e
+        case t               => CatalogError.MigrationFailed(t)
+      }
