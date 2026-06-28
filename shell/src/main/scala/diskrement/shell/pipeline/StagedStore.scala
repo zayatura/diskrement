@@ -10,8 +10,8 @@ import java.time.Instant
 trait StagedStore:
   def writeScan(workDir: Path, scanned: List[ScannedFile]): IO[PipelineError, Unit]
   def readScan(workDir: Path): IO[PipelineError, Option[List[ScannedFile]]]
-  def writePlan(workDir: Path, plan: BurnPlan, discType: DiscType): IO[PipelineError, Unit]
-  def readPlan(workDir: Path): IO[PipelineError, Option[(BurnPlan, DiscType)]]
+  def writePlan(workDir: Path, plan: PlanReport): IO[PipelineError, Unit]
+  def readPlan(workDir: Path): IO[PipelineError, Option[PlanReport]]
   def clear(workDir: Path): IO[PipelineError, Unit]
 
 private[pipeline] final case class ScannedFileJson(
@@ -35,17 +35,25 @@ private[pipeline] object PlannedDiscJson:
     PlannedDisc(j.ordinal, j.isNew, j.willFinalize,
       j.files.map(ScannedFileJson.to), j.priorUsedBytes, j.usableBytes)
 
-private[pipeline] final case class BurnPlanJson(
-    discs: List[PlannedDiscJson], tombstones: List[String],
-    oversized: List[ScannedFileJson], discType: String)
-private[pipeline] object BurnPlanJson:
-  given JsonCodec[BurnPlanJson] = DeriveJsonCodec.gen[BurnPlanJson]
-  def from(p: BurnPlan, discType: DiscType): BurnPlanJson =
-    BurnPlanJson(p.discs.map(PlannedDiscJson.from), p.tombstones.map(_.value),
-      p.oversized.map(ScannedFileJson.from), discType.toString)
-  def to(j: BurnPlanJson): (BurnPlan, DiscType) =
-    (BurnPlan(j.discs.map(PlannedDiscJson.to), j.tombstones.map(RelPath(_)),
-       j.oversized.map(ScannedFileJson.to)), DiscType.valueOf(j.discType))
+private[pipeline] final case class RemainingJson(moreDiscs: Int, moreFiles: Int, moreBytes: Long)
+private[pipeline] object RemainingJson:
+  given JsonCodec[RemainingJson] = DeriveJsonCodec.gen[RemainingJson]
+
+private[pipeline] final case class PlanReportJson(
+    disc: PlannedDiscJson, discType: String, tombstones: List[String],
+    remaining: RemainingJson, oversized: List[ScannedFileJson])
+private[pipeline] object PlanReportJson:
+  given JsonCodec[PlanReportJson] = DeriveJsonCodec.gen[PlanReportJson]
+  def from(p: PlanReport): PlanReportJson =
+    PlanReportJson(
+      PlannedDiscJson.from(p.disc), p.discType.toString, p.tombstones.map(_.value),
+      RemainingJson(p.remaining.moreDiscs, p.remaining.moreFiles, p.remaining.moreBytes),
+      p.oversized.map(ScannedFileJson.from))
+  def to(j: PlanReportJson): PlanReport =
+    PlanReport(
+      PlannedDiscJson.to(j.disc), DiscType.valueOf(j.discType), j.tombstones.map(RelPath(_)),
+      RemainingEstimate(j.remaining.moreDiscs, j.remaining.moreFiles, j.remaining.moreBytes),
+      j.oversized.map(ScannedFileJson.to))
 
 final case class StagedStoreLive() extends StagedStore:
   private def stagedDir(workDir: Path): Path = workDir.resolve("staged")
@@ -63,14 +71,16 @@ final case class StagedStoreLive() extends StagedStore:
         e => throw new RuntimeException(s"corrupt scan.json: $e"),
         _.map(ScannedFileJson.to))))
 
-  def writePlan(workDir: Path, plan: BurnPlan, discType: DiscType): IO[PipelineError, Unit] =
-    write(planFile(workDir), BurnPlanJson.from(plan, discType).toJson)
+  def writePlan(workDir: Path, plan: PlanReport): IO[PipelineError, Unit] =
+    write(planFile(workDir), PlanReportJson.from(plan).toJson)
 
-  def readPlan(workDir: Path): IO[PipelineError, Option[(BurnPlan, DiscType)]] =
+  // A corrupt staged JSON file is disk corruption, not a normal condition, so a
+  // decode failure is surfaced as a defect (die) rather than a typed PipelineError.
+  def readPlan(workDir: Path): IO[PipelineError, Option[PlanReport]] =
     read(planFile(workDir)).map(_.map(s =>
-      s.fromJson[BurnPlanJson].fold(
+      s.fromJson[PlanReportJson].fold(
         e => throw new RuntimeException(s"corrupt plan.json: $e"),
-        BurnPlanJson.to)))
+        PlanReportJson.to)))
 
   def clear(workDir: Path): IO[PipelineError, Unit] =
     ZIO.attemptBlockingIO {

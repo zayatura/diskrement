@@ -14,42 +14,37 @@ object PipelineSpillSpec extends ZIOSpecDefault:
     ProjectInit(name, src.toString, work.toString, DiscType.BD_R, 99.9999998, 1,
       Instant.parse("2026-06-01T00:00:00Z"))
 
-  private def countRows(db: java.nio.file.Path, table: String): Task[Int] =
-    ZIO.attemptBlocking {
-      val c = java.sql.DriverManager.getConnection(s"jdbc:sqlite:${db.toString}")
-      try
-        val rs = c.createStatement().executeQuery(s"select count(*) from $table")
-        rs.next(); rs.getInt(1)
-      finally c.close()
-    }
-
   def spec = suite("Pipeline spill / oversized")(
-    test("two files larger than half capacity spill across two discs and both commit"):
+    test("a cycle plans one disc, finalizes on spill, and the next cycle burns the rest"):
       ZIO.scoped {
         for
           paths <- ZIO.service[ProjectPaths]
           src   <- PipelineTestKit.makeSource(Map("a.txt" -> ("a" * 40), "b.txt" -> ("b" * 40)))
           pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
           _     <- pipe.init(initOf("p", src, paths.workDir))
+          // cycle 1: only the first file fits; the disc finalizes on spill
           _     <- pipe.scan("p", verify = false, force = false)
-          plan  <- pipe.plan("p", None)
-          rep   <- pipe.burn("p")
+          plan1 <- pipe.plan("p", None, finalize = false)
+          rep1  <- pipe.burn("p")
           proj  <- ZIO.serviceWithZIO[CatalogStore](_.findProject("p"))
-          states<- ZIO.serviceWithZIO[CatalogStore](_.readDiscStates(proj.get.id))
+          st1   <- ZIO.serviceWithZIO[CatalogStore](_.readDiscStates(proj.get.id))
+          // cycle 2: the remaining file lands on a fresh disc
+          _     <- pipe.scan("p", verify = false, force = true)
+          plan2 <- pipe.plan("p", None, finalize = false)
+          rep2  <- pipe.burn("p")
+          st2   <- ZIO.serviceWithZIO[CatalogStore](_.readDiscStates(proj.get.id))
           view  <- ZIO.serviceWithZIO[CatalogStore](_.readView(proj.get.id))
-          // Each disc's embedded catalog carries the full post-burn state, so a
-          // single disc knows about its sibling disc too (self-describing archive).
-          disc1     = rep.discs.minBy(_.ordinal).stagingDir.resolve(".diskrement/catalog.sqlite")
-          disc1Discs<- countRows(disc1, "disc")
-          disc1Files<- countRows(disc1, "file_version")
         yield assertTrue(
-          plan.discs.size == 2,
-          plan.oversized.isEmpty,
-          rep.discs.map(_.ordinal).sorted == List(1, 2),
-          states.size == 2,
-          view.current.keySet.map(_.value) == Set("a.txt", "b.txt"),
-          disc1Discs == 2,
-          disc1Files == 2)
+          plan1.disc.files.size == 1,
+          plan1.disc.willFinalize,
+          plan1.remaining.moreDiscs == 1,
+          rep1.disc.ordinal == 1, rep1.disc.finalized,
+          st1.size == 1, st1.head.status == DiscStatus.FINALIZED,
+          plan2.disc.ordinal == 2,
+          plan2.remaining.moreDiscs == 0,
+          rep2.disc.ordinal == 2, rep2.disc.finalized == false,
+          st2.size == 2,
+          view.current.keySet.map(_.value) == Set("a.txt", "b.txt"))
       },
     test("a file larger than any disc is surfaced by plan and rejected by burn"):
       ZIO.scoped {
@@ -59,7 +54,7 @@ object PipelineSpillSpec extends ZIOSpecDefault:
           pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
           _     <- pipe.init(initOf("p", src, paths.workDir))
           _     <- pipe.scan("p", verify = false, force = false)
-          plan  <- pipe.plan("p", None)
+          plan  <- pipe.plan("p", None, finalize = false)
           err   <- pipe.burn("p").flip
         yield assertTrue(
           plan.oversized.map(_.relPath.value) == List("big.txt"),

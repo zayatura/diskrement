@@ -11,9 +11,11 @@ object StagedStoreSpec extends ZIOSpecDefault:
   private val scanned = List(
     ScannedFile(RelPath("a"), ContentHash("h1"), 10, ts),
     ScannedFile(RelPath("sub/b"), ContentHash("h2"), 20, ts))
-  private val plan = BurnPlan(
-    discs = List(PlannedDisc(1, isNew = true, willFinalize = false, scanned, 0L, 1_000L)),
+  private val plan = PlanReport(
+    disc = PlannedDisc(1, isNew = true, willFinalize = false, scanned, 0L, 1_000L),
+    discType = DiscType.BD_R_DL,
     tombstones = List(RelPath("c")),
+    remaining = RemainingEstimate(moreDiscs = 1, moreFiles = 2, moreBytes = 30L),
     oversized = Nil)
 
   private val makeWork: ZIO[Scope, Throwable, Path] =
@@ -33,14 +35,14 @@ object StagedStoreSpec extends ZIOSpecDefault:
           got  <- ss.readScan(work)
         yield assertTrue(got == Some(scanned))
       },
-    test("round-trips a staged plan with its disc type"):
+    test("round-trips a staged plan report"):
       ZIO.scoped {
         for
           work <- makeWork
           ss    = StagedStoreLive()
-          _    <- ss.writePlan(work, plan, DiscType.BD_R_DL)
+          _    <- ss.writePlan(work, plan)
           got  <- ss.readPlan(work)
-        yield assertTrue(got == Some((plan, DiscType.BD_R_DL)))
+        yield assertTrue(got == Some(plan))
       },
     test("read returns None when nothing is staged; clear removes staged files"):
       ZIO.scoped {

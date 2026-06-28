@@ -23,7 +23,7 @@ object PipelineFullLoopSpec extends ZIOSpecDefault:
           _     <- pipe.init(initOf("p", src, paths.workDir))
           // first burn
           s1    <- pipe.scan("p", verify = false, force = false)
-          _     <- pipe.plan("p", None)
+          _     <- pipe.plan("p", None, finalize = false)
           _     <- pipe.burn("p")
           // modify source: change a.txt, delete b.txt, add c.txt
           _     <- ZIO.attempt {
@@ -33,7 +33,7 @@ object PipelineFullLoopSpec extends ZIOSpecDefault:
                    }
           // second burn (force a fresh scan since a staged scan exists)
           s2    <- pipe.scan("p", verify = false, force = true)
-          _     <- pipe.plan("p", Some(DiscType.BD_R_DL))
+          _     <- pipe.plan("p", Some(DiscType.BD_R_DL), finalize = false)
           _     <- pipe.burn("p")
           reps  <- pipe.verify("p", None)
           hA    <- pipe.history("p", RelPath("a.txt"))
@@ -49,5 +49,32 @@ object PipelineFullLoopSpec extends ZIOSpecDefault:
           hA.map(_.status) == List(VersionStatus.SUPERSEDED, VersionStatus.CURRENT),
           hB.map(_.status) == List(VersionStatus.DELETED),
           ver.map(s => (s.discOrdinal, s.ordinal)) == List((1, 2)))
+      }
+    ,
+    test("plan --finalize seals a non-full disc; the next cycle starts a fresh disc"):
+      ZIO.scoped {
+        for
+          paths <- ZIO.service[ProjectPaths]
+          src   <- PipelineTestKit.makeSource(Map("a.txt" -> "aaa"))
+          pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
+          _     <- pipe.init(initOf("p", src, paths.workDir))
+          // cycle 1: everything fits, but --finalize seals disc 1 anyway
+          _     <- pipe.scan("p", verify = false, force = false)
+          plan1 <- pipe.plan("p", None, finalize = true)
+          rep1  <- pipe.burn("p")
+          // cycle 2: a new file must start a fresh disc, since disc 1 is sealed
+          _     <- ZIO.attempt(Files.writeString(src.resolve("b.txt"), "bb"))
+          _     <- pipe.scan("p", verify = false, force = true)
+          plan2 <- pipe.plan("p", None, finalize = false)
+          rep2  <- pipe.burn("p")
+          proj  <- ZIO.serviceWithZIO[CatalogStore](_.findProject("p"))
+          st    <- ZIO.serviceWithZIO[CatalogStore](_.readDiscStates(proj.get.id))
+        yield assertTrue(
+          plan1.disc.willFinalize,
+          rep1.disc.finalized,
+          plan2.disc.ordinal == 2,
+          rep2.disc.ordinal == 2,
+          st.map(_.ordinal).sorted == List(1, 2),
+          st.find(_.ordinal == 1).get.status == DiscStatus.FINALIZED)
       }
   ).provideLayer(PipelineTestKit.env.orDie)

@@ -10,11 +10,6 @@ import zio.*
 import java.nio.file.{Files, Path}
 import scala.jdk.StreamConverters.*
 
-/** Per-disc data derived once during burn and reused for the embedded catalog,
-  * the staged manifest, and the live commit. */
-private final case class DiscPlanData(
-    disc: PlannedDisc, tombs: List[RelPath], sessOrd: Int, manifest: SessionManifest)
-
 private[pipeline] final case class PipelineLive(
     catalog: CatalogStore,
     scanner: FileScanner,
@@ -90,7 +85,7 @@ private[pipeline] final case class PipelineLive(
       ScanResult(cs.added.size, cs.modified.size, cs.deleted.size, cs.unchanged.size)
     }
 
-  def plan(name: String, discTypeOverride: Option[DiscType]): IO[PipelineError, BurnPlan] =
+  def plan(name: String, discTypeOverride: Option[DiscType], finalize: Boolean): IO[PipelineError, PlanReport] =
     for
       p       <- project(name)
       scanned <- staged.readScan(paths.workDir).flatMap {
@@ -102,66 +97,68 @@ private[pipeline] final case class PipelineLive(
       discType = discTypeOverride.getOrElse(p.defaultDiscType)
       cap      = Capacity.fromDiscType(discType, p.marginPercent)
       cs       = Diff.diff(view, scanned)
-      burnPlan = Planner.plan(cs, states, cap)
-      _       <- staged.writePlan(paths.workDir, burnPlan, discType)
-    yield burnPlan
+      full     = Planner.plan(cs, states, cap)
+      // The planner already finalizes the first disc iff the plan spilled; the
+      // --finalize flag forces a seal even when everything fit.
+      // Planner.plan always returns at least one disc in BurnPlan.discs.
+      head       = full.discs.head
+      sealedDisc = head.copy(willFinalize = head.willFinalize || finalize)
+      tail       = full.discs.tail
+      remaining  = RemainingEstimate(
+                     tail.size, tail.map(_.files.size).sum, tail.flatMap(_.files).map(_.sizeBytes).sum)
+      report     = PlanReport(sealedDisc, discType, full.tombstones, remaining, full.oversized)
+      _       <- staged.writePlan(paths.workDir, report)
+    yield report
 
   def burn(name: String): IO[PipelineError, BurnReport] =
     for
-      p           <- project(name)
-      scanned     <- staged.readScan(paths.workDir).flatMap {
-                       case Some(s) => ZIO.succeed(s); case None => ZIO.fail(PipelineError.NoStagedScan(name)) }
-      planAndType <- staged.readPlan(paths.workDir).flatMap {
-                       case Some(pt) => ZIO.succeed(pt); case None => ZIO.fail(PipelineError.NoStagedPlan(name)) }
-      (burnPlan, discType) = planAndType
-      _           <- ZIO.when(burnPlan.oversized.nonEmpty)(
-                       ZIO.fail(PipelineError.OversizedFiles(burnPlan.oversized.map(_.relPath))))
-      snapRoot     = paths.workDir.resolve("snapshot")
-      _           <- ZIO.attemptBlockingIO(Files.exists(snapRoot)).mapError(PipelineError.Failed(_))
-                       .flatMap(e => ZIO.unless(e)(ZIO.fail(PipelineError.SnapshotMissing(name))).unit)
-      view        <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
-      changeSet    = Diff.diff(view, scanned)
-      now         <- Clock.instant
-      existing    <- existingSessions(p.id)
-      lastIdx      = burnPlan.discs.size - 1
-      // Per-disc data derived once, so the embedded catalog, the staged manifests,
-      // and the live commit are all built from the same session ordinals/manifests.
-      discData     = burnPlan.discs.zipWithIndex.map { case (d, i) =>
-                       val tombs    = if i == lastIdx then burnPlan.tombstones else Nil
-                       val sessOrd  = existing.getOrElse(d.ordinal, 0) + 1
-                       val manifest = ManifestBuilder.build(name, sessOrd, d, changeSet, tombs)
-                       DiscPlanData(d, tombs, sessOrd, manifest)
-                     }
-      update       = CatalogUpdate(p.id, Nil, discData.map(dd =>
-                       toDiscWrite(name, dd.disc, discType, dd.sessOrd, now, changeSet, dd.tombs, dd.manifest)))
-      tmpCatalog   = paths.workDir.resolve("burn-catalog.sqlite")
-      _           <- ZIO.attemptBlockingIO {
-                       Files.createDirectories(tmpCatalog.getParent); Files.deleteIfExists(tmpCatalog) }
-                       .mapError(PipelineError.Failed(_))
-      _           <- catalog.snapshotTo(tmpCatalog).mapError(PipelineError.Failed(_))
-      // Materialize the post-burn state into the snapshot that each disc embeds,
-      // so a single disc fully describes the archive *including itself*. This
-      // applies the update to the copy only; the live catalog is committed below.
-      _           <- CatalogStore.applyUpdateTo(tmpCatalog, update).mapError(PipelineError.Failed(_))
-      pointers    <- catalog.archivePointers(p.id).mapError(PipelineError.Failed(_))
-      reports     <- ZIO.foreach(discData) { dd =>
-                       val identity = DiscIdentity(name, dd.disc.ordinal, dd.sessOrd, now)
-                       val meta  = DiscMetadata(identity, dd.manifest, tmpCatalog, pointers)
-                       val image = DiscImage(
-                         paths.workDir.resolve("staging").resolve(s"disc-${dd.disc.ordinal}"),
-                         snapRoot, dd.disc.files, meta)
-                       burner.burn(image).mapError(PipelineError.Failed(_))
-                         .map(r => DiscBurn(dd.disc.ordinal, r.stagingDir, r.imageBytes))
-                     }
-      // Commit to the live catalog only after every disc is staged — the
-      // crash-safe commit point. The committed state equals the embedded snapshot.
-      _           <- catalog.applyUpdate(update).mapError(PipelineError.Failed(_))
-      _           <- snapshot.release(SnapshotHandle(snapRoot))
-      _           <- staged.clear(paths.workDir)
-      _           <- ZIO.attemptBlockingIO(Files.deleteIfExists(tmpCatalog)).mapError(PipelineError.Failed(_))
-      // burnPlan.oversized is always empty here (burn hard-fails OversizedFiles above);
-      // the field is kept for the BurnReport shape the CLI (3b) renders.
-    yield BurnReport(reports, burnPlan.oversized.map(_.relPath))
+      p         <- project(name)
+      scanned   <- staged.readScan(paths.workDir).flatMap {
+                     case Some(s) => ZIO.succeed(s); case None => ZIO.fail(PipelineError.NoStagedScan(name)) }
+      report    <- staged.readPlan(paths.workDir).flatMap {
+                     case Some(r) => ZIO.succeed(r); case None => ZIO.fail(PipelineError.NoStagedPlan(name)) }
+      _         <- ZIO.when(report.oversized.nonEmpty)(
+                     ZIO.fail(PipelineError.OversizedFiles(report.oversized.map(_.relPath))))
+      snapRoot   = paths.workDir.resolve("snapshot")
+      _         <- ZIO.attemptBlockingIO(Files.exists(snapRoot)).mapError(PipelineError.Failed(_))
+                     .flatMap(e => ZIO.unless(e)(ZIO.fail(PipelineError.SnapshotMissing(name))).unit)
+      view      <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
+      changeSet  = Diff.diff(view, scanned)
+      now       <- Clock.instant
+      existing  <- existingSessions(p.id)
+      disc       = report.disc
+      discType   = report.discType
+      tombs      = report.tombstones
+      sessOrd    = existing.getOrElse(disc.ordinal, 0) + 1
+      manifest   = ManifestBuilder.build(name, sessOrd, disc, changeSet, tombs)
+      label      = s"$name disc ${disc.ordinal}"
+      update     = CatalogUpdate(p.id, Nil,
+                     List(toDiscWrite(name, disc, discType, sessOrd, now, changeSet, tombs, manifest)))
+      tmpCatalog = paths.workDir.resolve("burn-catalog.sqlite")
+      _         <- ZIO.attemptBlockingIO {
+                     Files.createDirectories(tmpCatalog.getParent); Files.deleteIfExists(tmpCatalog) }
+                     .mapError(PipelineError.Failed(_))
+      _         <- catalog.snapshotTo(tmpCatalog).mapError(PipelineError.Failed(_))
+      // Materialize the post-burn state into the snapshot this disc embeds, so a
+      // single disc fully describes the archive including its own session. Applies
+      // to the copy only; the live catalog is committed after the disc is staged.
+      _         <- CatalogStore.applyUpdateTo(tmpCatalog, update).mapError(PipelineError.Failed(_))
+      pointers  <- catalog.archivePointers(p.id).mapError(PipelineError.Failed(_))
+      identity   = DiscIdentity(name, disc.ordinal, sessOrd, now)
+      meta       = DiscMetadata(identity, manifest, tmpCatalog, pointers)
+      image      = DiscImage(
+                     paths.workDir.resolve("staging").resolve(s"disc-${disc.ordinal}"),
+                     snapRoot, disc.files, meta)
+      burned    <- burner.burn(image).mapError(PipelineError.Failed(_))
+      // Commit the single session only after the disc is staged — the crash-safe
+      // commit point. The committed state equals the embedded snapshot.
+      _         <- catalog.applyUpdate(update).mapError(PipelineError.Failed(_))
+      _         <- snapshot.release(SnapshotHandle(snapRoot))
+      _         <- staged.clear(paths.workDir)
+      _         <- ZIO.attemptBlockingIO(Files.deleteIfExists(tmpCatalog)).mapError(PipelineError.Failed(_))
+    yield BurnReport(
+      DiscBurn(disc.ordinal, label, disc.willFinalize, burned.stagingDir, burned.imageBytes),
+      report.remaining)
 
   /** Highest existing session ordinal per disc ordinal (for the next ordinal). */
   private def existingSessions(pid: ProjectId): IO[PipelineError, Map[Int, Int]] =
