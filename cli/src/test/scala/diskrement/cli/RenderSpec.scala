@@ -21,39 +21,58 @@ object RenderSpec extends ZIOSpecDefault:
       assertTrue(Render.scan(ScanResult(12, 3, 1, 540)) ==
         "Scanned: 12 added, 3 modified, 1 deleted, 540 unchanged.")
     },
-    test("plan: discs with top-off/new and an oversized block") {
-      val plan = BurnPlan(
-        discs = List(
-          PlannedDisc(1, isNew = false, willFinalize = true, files = List(sf("a", 24_100_000_000L)),
-            priorUsedBytes = 0L, usableBytes = 25_000_000_000L),
-          PlannedDisc(2, isNew = true, willFinalize = false, files = List(sf("b", 3_200_000_000L)),
-            priorUsedBytes = 0L, usableBytes = 25_000_000_000L)),
-        tombstones = Nil,
-        oversized = List(sf("huge.bin", 99_000_000_000L)))
-      val out = Render.plan(plan, DiscType.BD_R)
+    test("plan: single disc with remaining estimate") {
+      val rep = PlanReport(
+        disc = PlannedDisc(1, isNew = true, willFinalize = true, files = List(sf("a", 24_100_000_000L)),
+          priorUsedBytes = 0L, usableBytes = 25_000_000_000L),
+        discType = DiscType.BD_R, tombstones = Nil,
+        remaining = RemainingEstimate(moreDiscs = 1, moreFiles = 1, moreBytes = 3_200_000_000L),
+        oversized = Nil)
+      val out = Render.plan(rep)
       assertTrue(
-        out.contains("Plan: 2 discs (BD_R)"),
-        out.contains("disc 1"), out.contains("(top-off)"),
-        out.contains("disc 2"), out.contains("(new)"),
-        out.contains("Oversized (cannot be placed):"),
-        out.contains("huge.bin"))
+        out.contains("disc 1"), out.contains("BD_R"),
+        out.contains("new disc"),
+        out.contains("FINALIZE"), out.contains("more discs"))
+    },
+    test("plan: appending to an open disc, left open") {
+      val rep = PlanReport(
+        disc = PlannedDisc(2, isNew = false, willFinalize = false, files = List(sf("a", 3_200_000_000L)),
+          priorUsedBytes = 10_000_000_000L, usableBytes = 25_000_000_000L),
+        discType = DiscType.BD_R, tombstones = Nil,
+        remaining = RemainingEstimate(moreDiscs = 0, moreFiles = 0, moreBytes = 0L),
+        oversized = Nil)
+      val out = Render.plan(rep)
+      assertTrue(
+        out.contains("appending to open disc 2"), out.contains("left OPEN"))
     },
     test("plan: empty plan says nothing to burn") {
-      assertTrue(Render.plan(BurnPlan(Nil, Nil, Nil), DiscType.BD_R) == "Nothing to burn: no changes to plan.")
+      val rep = PlanReport(
+        PlannedDisc(1, isNew = false, willFinalize = false, Nil, 0L, 25_000_000_000L),
+        DiscType.BD_R, Nil, RemainingEstimate(0, 0, 0), Nil)
+      assertTrue(Render.plan(rep) == "Nothing to burn: no changes to plan.")
     },
-    test("burn report") {
-      val report = BurnReport(
-        discs = List(DiscBurn(1, Paths.get("/w/disc-1"), 24_100_000_000L), DiscBurn(2, Paths.get("/w/disc-2"), 3_200_000_000L)),
-        oversized = Nil)
-      val out = Render.burn(report)
-      assertTrue(out.contains("Burned disc 1"), out.contains("Burned disc 2"), out.contains("✓"))
+    test("plan: oversized files are listed") {
+      val rep = PlanReport(
+        PlannedDisc(1, isNew = true, willFinalize = false, List(sf("a", 10L)), 0L, 25_000_000_000L),
+        DiscType.BD_R, Nil, RemainingEstimate(0, 0, 0), List(sf("huge.bin", 99_000_000_000L)))
+      val out = Render.plan(rep)
+      assertTrue(out.contains("Oversized (cannot be placed):"), out.contains("huge.bin"))
     },
-    test("burn report: oversized files are listed as skipped") {
-      val report = BurnReport(
-        discs = List(DiscBurn(1, Paths.get("/w/disc-1"), 24_100_000_000L)),
-        oversized = List(RelPath("huge.bin")))
-      val out = Render.burn(report)
-      assertTrue(out.contains("Burned disc 1"), out.contains("Oversized (skipped):"), out.contains("huge.bin"))
+    test("burn: finalized disc, with more discs remaining") {
+      val rep = BurnReport(
+        DiscBurn(1, "photos disc 1", finalized = true, Paths.get("/w/disc-1"), 24_100_000_000L),
+        RemainingEstimate(moreDiscs = 2, moreFiles = 50, moreBytes = 40_000_000_000L))
+      val out = Render.burn(rep)
+      assertTrue(
+        out.contains("Wrote disc 1"), out.contains("photos disc 1"),
+        out.contains("FINALIZED"), out.contains("more discs"))
+    },
+    test("burn: open disc, set up to date") {
+      val rep = BurnReport(
+        DiscBurn(1, "photos disc 1", finalized = false, Paths.get("/w/disc-1"), 1_000L),
+        RemainingEstimate(0, 0, 0))
+      val out = Render.burn(rep)
+      assertTrue(out.contains("Wrote disc 1"), out.contains("OPEN"), out.contains("up to date"))
     },
     test("status table") {
       val report = StatusReport(

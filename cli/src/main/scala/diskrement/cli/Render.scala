@@ -14,25 +14,35 @@ object Render:
   def scan(r: ScanResult): String =
     s"Scanned: ${r.added} added, ${r.modified} modified, ${r.deleted} deleted, ${r.unchanged} unchanged."
 
-  def plan(p: BurnPlan, discType: DiscType): String =
-    if p.discs.isEmpty then "Nothing to burn: no changes to plan."
+  def plan(p: PlanReport): String =
+    val d = p.disc
+    if d.files.isEmpty && p.tombstones.isEmpty && p.oversized.isEmpty then
+      "Nothing to burn: no changes to plan."
     else
-      val header = s"Plan: ${p.discs.size} discs (${discType})"
-      val lines = p.discs.map { d =>
-        val kind = if d.isNew then "(new)" else "(top-off)"
-        f"  disc ${d.ordinal}%-3d ${gb(d.totalUsedBytes)}%10s   $kind"
-      }
+      val kind = if d.isNew then "new disc" else s"appending to open disc ${d.ordinal}"
+      val fin  = if d.willFinalize then "will FINALIZE" else "left OPEN"
+      val header =
+        f"Plan: disc ${d.ordinal} ($kind, ${p.discType}) — ${d.files.size} files, ${gb(d.totalUsedBytes)}, $fin"
+      val rem =
+        if p.remaining.moreDiscs == 0 then "This disc completes the set."
+        else s"~${p.remaining.moreFiles} more files (~${p.remaining.moreDiscs} more discs) remain after this one."
+      val tomb = if p.tombstones.isEmpty then Nil else List(s"Deletions: ${p.tombstones.size}")
       val oversized =
         if p.oversized.isEmpty then Nil
         else "Oversized (cannot be placed):" :: p.oversized.map(f => s"  ${f.relPath.value}  ${gb(f.sizeBytes)}")
-      (header :: lines ::: oversized).mkString("\n")
+      (header :: rem :: tomb ::: oversized).mkString("\n")
 
   def burn(r: BurnReport): String =
-    val discs = r.discs.map(d => s"Burned disc ${d.ordinal} ✓  (${gb(d.imageBytes)})").mkString("\n")
-    val oversized =
-      if r.oversized.isEmpty then ""
-      else "\nOversized (skipped):\n" + r.oversized.map(p => s"  ${p.value}").mkString("\n")
-    discs + oversized
+    val d = r.disc
+    val status =
+      if d.finalized then "Status: FINALIZED — set this disc aside, it is sealed."
+      else "Status: left OPEN — may receive more sessions later."
+    val next =
+      if r.remaining.moreDiscs == 0 then "No more changes — the set is up to date."
+      else s"~${r.remaining.moreDiscs} more discs of changes remain. Run: scan → plan → burn"
+    s"""✔ Wrote disc ${d.ordinal}  —  label: "${d.label}"
+       |$status
+       |$next""".stripMargin
 
   def status(project: Project, r: StatusReport): String =
     val header = f"Project ${project.name}  (source ${project.sourceRoot}, ${project.defaultDiscType}, margin ${project.marginPercent}%.1f%%)"

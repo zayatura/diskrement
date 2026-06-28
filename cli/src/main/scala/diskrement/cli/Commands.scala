@@ -50,9 +50,10 @@ object Commands:
   // --- plan ---
   private val plan: Command[DiskrementCommand] =
     val discType = Options.enumeration("disc-type")(discTypeChoices*).optional
-    Command("plan", discType, nameArg)
-      .withHelp(HelpDoc.p("Plan a burn from the staged scan."))
-      .map { case (dt, name) => DiskrementCommand.Plan(name, dt) }
+    val finalize = Options.boolean("finalize")
+    Command("plan", discType ++ finalize, nameArg)
+      .withHelp(HelpDoc.p("Plan the next disc from the staged scan."))
+      .map { case ((dt, fin), name) => DiskrementCommand.Plan(name, dt, fin) }
 
   // --- burn ---
   private val burn: Command[DiskrementCommand] =

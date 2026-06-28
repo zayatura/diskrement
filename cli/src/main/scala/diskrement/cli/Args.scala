@@ -11,7 +11,7 @@ final case class GlobalOpts(catalog: Option[Path], dataDir: Option[Path])
 enum DiskrementCommand:
   case Init(name: String, source: Path, workDir: Path, discType: DiscType, marginPercent: Double, copies: Int)
   case Scan(name: String, verify: Boolean, force: Boolean)
-  case Plan(name: String, discType: Option[DiscType])
+  case Plan(name: String, discType: Option[DiscType], willFinalize: Boolean)
   case Burn(name: String, assumeYes: Boolean)
   case Reset(name: String)
   case Status(name: String)
