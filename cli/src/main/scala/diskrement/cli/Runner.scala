@@ -60,9 +60,8 @@ object Runner:
         }
 
       case c: DiskrementCommand.Plan =>
-        withProject(catalogPath, c.name) { (project, pipeline) =>
-          val effectiveType = c.discType.getOrElse(project.defaultDiscType)
-          pipeline.plan(c.name, c.discType).flatMap(p => printOut(Render.plan(p, effectiveType))).as(ExitCode.success)
+        withProject(catalogPath, c.name) { (_, pipeline) =>
+          pipeline.plan(c.name, c.discType, c.willFinalize).flatMap(r => printOut(Render.plan(r))).as(ExitCode.success)
         }
 
       case c: DiskrementCommand.Burn =>

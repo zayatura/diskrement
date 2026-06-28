@@ -49,7 +49,7 @@ object CliSmokeSpec extends ZIOSpecDefault:
             c1      <- Runner.run(global, DiskrementCommand.Init("photos", java.nio.file.Paths.get(src),
                          java.nio.file.Paths.get(work), diskrement.core.DiscType.BD_R, 2.0, 1))
             c2      <- Runner.run(global, DiskrementCommand.Scan("photos", verify = false, force = false))
-            c3      <- Runner.run(global, DiskrementCommand.Plan("photos", None))
+            c3      <- Runner.run(global, DiskrementCommand.Plan("photos", None, willFinalize = false))
             _       <- TestConsole.feedLines("y")
             c4      <- Runner.run(global, DiskrementCommand.Burn("photos", assumeYes = false))
             c5      <- Runner.run(global, DiskrementCommand.Status("photos"))
@@ -60,7 +60,7 @@ object CliSmokeSpec extends ZIOSpecDefault:
             c4 == ExitCode.success, c5 == ExitCode.success,
             text.contains("Created project photos"),
             text.contains("Scanned: 2 added"),
-            text.contains("Burned disc 1"),
+            text.contains("Wrote disc 1"),
             text.contains("Project photos"))
         }
       }

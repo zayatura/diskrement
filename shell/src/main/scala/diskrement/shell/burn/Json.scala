@@ -7,14 +7,13 @@ import zio.json._
 final case class ProjectJson(
     projectName: String,
     discOrdinal: Int,
-    discCount: Int,
     sessionOrdinal: Int,
     createdAt: String
 )
 object ProjectJson:
   given JsonCodec[ProjectJson] = DeriveJsonCodec.gen[ProjectJson]
   def from(id: DiscIdentity): ProjectJson =
-    ProjectJson(id.projectName, id.discOrdinal, id.discCount, id.sessionOrdinal, id.createdAt.toString)
+    ProjectJson(id.projectName, id.discOrdinal, id.sessionOrdinal, id.createdAt.toString)
 
 final case class ManifestEntryJson(relPath: String, contentHash: String, sizeBytes: Long)
 object ManifestEntryJson:

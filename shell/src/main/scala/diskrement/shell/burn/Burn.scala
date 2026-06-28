@@ -8,7 +8,6 @@ import java.time.Instant
 final case class DiscIdentity(
     projectName: String,
     discOrdinal: Int,
-    discCount: Int,
     sessionOrdinal: Int,
     createdAt: Instant
 )

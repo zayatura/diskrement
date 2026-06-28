@@ -20,14 +20,13 @@ object PipelinePlanSpec extends ZIOSpecDefault:
           pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
           _     <- pipe.init(initOf("p", src, paths.workDir))
           _     <- pipe.scan("p", verify = false, force = false)
-          plan  <- pipe.plan("p", discTypeOverride = None)
+          plan  <- pipe.plan("p", discTypeOverride = None, finalize = false)
           staged<- ZIO.serviceWithZIO[StagedStore](_.readPlan(paths.workDir))
         yield assertTrue(
-          plan.discs.size == 1,
-          plan.discs.head.isNew,
-          plan.discs.head.files.map(_.relPath.value).sorted == List("a.txt", "b.txt"),
+          plan.disc.isNew,
+          plan.disc.files.map(_.relPath.value).sorted == List("a.txt", "b.txt"),
           plan.oversized.isEmpty,
-          staged.map(_._2) == Some(DiscType.BD_R))
+          staged.map(_.discType) == Some(DiscType.BD_R))
       },
     test("plan fails NoStagedScan when scan has not run"):
       ZIO.scoped {
@@ -36,7 +35,7 @@ object PipelinePlanSpec extends ZIOSpecDefault:
           src   <- PipelineTestKit.makeSource(Map("a.txt" -> "aaa"))
           pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
           _     <- pipe.init(initOf("p", src, paths.workDir))
-          err   <- pipe.plan("p", None).flip
+          err   <- pipe.plan("p", None, finalize = false).flip
         yield assertTrue(err.isInstanceOf[PipelineError.NoStagedScan])
       }
   ).provideLayer(PipelineTestKit.env.orDie)

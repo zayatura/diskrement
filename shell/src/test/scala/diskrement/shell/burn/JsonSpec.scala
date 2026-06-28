@@ -11,9 +11,9 @@ object JsonSpec extends ZIOSpecDefault:
 
   def spec = suite("burn JSON DTOs")(
     test("ProjectJson maps from DiscIdentity and round-trips"):
-      val pj = ProjectJson.from(DiscIdentity("photos", 2, 3, 1, ts))
+      val pj = ProjectJson.from(DiscIdentity("photos", 2, 1, ts))
       assertTrue(
-        pj == ProjectJson("photos", 2, 3, 1, "2026-06-01T00:00:00Z"),
+        pj == ProjectJson("photos", 2, 1, "2026-06-01T00:00:00Z"),
         pj.toJson.fromJson[ProjectJson] == Right(pj)),
     test("ManifestJson maps from SessionManifest and round-trips"):
       val m = SessionManifest("photos", 1, 1,

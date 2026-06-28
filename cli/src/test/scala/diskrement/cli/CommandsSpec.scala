@@ -36,12 +36,14 @@ object CommandsSpec extends ZIOSpecDefault:
       for v <- parse("scan", "photos")
       yield assertTrue(v._2 == DiskrementCommand.Scan("photos", verify = false, force = false))
     },
-    test("plan with optional disc-type override") {
+    test("plan with optional disc-type override and finalize flag") {
       for a <- parse("plan", "photos")
           b <- parse("plan", "photos", "--disc-type", "DVD")
+          c <- parse("plan", "photos", "--finalize")
       yield assertTrue(
-        a._2 == DiskrementCommand.Plan("photos", None),
-        b._2 == DiskrementCommand.Plan("photos", Some(DiscType.DVD)))
+        a._2 == DiskrementCommand.Plan("photos", None, willFinalize = false),
+        b._2 == DiskrementCommand.Plan("photos", Some(DiscType.DVD), willFinalize = false),
+        c._2 == DiskrementCommand.Plan("photos", None, willFinalize = true))
     },
     test("burn with --yes") {
       for v <- parse("burn", "photos", "--yes")

@@ -17,8 +17,21 @@ import java.time.Instant
 final case class ProjectPaths(catalogPath: Path, workDir: Path)
 
 final case class ScanResult(added: Int, modified: Int, deleted: Int, unchanged: Int)
-final case class DiscBurn(ordinal: Int, stagingDir: Path, imageBytes: Long)
-final case class BurnReport(discs: List[DiscBurn], oversized: List[RelPath])
+
+/** How much outstanding change did NOT fit on the disc planned this cycle. */
+final case class RemainingEstimate(moreDiscs: Int, moreFiles: Int, moreBytes: Long)
+
+/** The single disc this cycle will write, plus what spills to later cycles. */
+final case class PlanReport(
+    disc: PlannedDisc,
+    discType: DiscType,
+    tombstones: List[RelPath],
+    remaining: RemainingEstimate,
+    oversized: List[ScannedFile])
+
+final case class DiscBurn(ordinal: Int, label: String, finalized: Boolean, stagingDir: Path, imageBytes: Long)
+final case class BurnReport(disc: DiscBurn, remaining: RemainingEstimate)
+
 final case class StatusReport(
     discs: List[DiscState], openDiscOrdinal: Option[Int],
     totalCurrentFiles: Int, lastBurnAt: Option[Instant])
@@ -32,7 +45,7 @@ trait Pipeline:
   def history(name: String, relPath: RelPath): IO[PipelineError, List[FileHistoryEntry]]
   def scan(name: String, verify: Boolean, force: Boolean): IO[PipelineError, ScanResult]
   def reset(name: String): IO[PipelineError, Unit]
-  def plan(name: String, discTypeOverride: Option[DiscType]): IO[PipelineError, BurnPlan]
+  def plan(name: String, discTypeOverride: Option[DiscType], finalize: Boolean): IO[PipelineError, PlanReport]
   def burn(name: String): IO[PipelineError, BurnReport]
   def verify(name: String, discOrdinal: Option[Int]): IO[PipelineError, List[VerifyReport]]
 

@@ -33,9 +33,9 @@ object PipelineBurnSpec extends ZIOSpecDefault:
           pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
           _     <- pipe.init(initOf("p", src, paths.workDir))
           _     <- pipe.scan("p", verify = false, force = false)
-          _     <- pipe.plan("p", None)
+          _     <- pipe.plan("p", None, finalize = false)
           rep   <- pipe.burn("p")
-          d0     = rep.discs.head
+          d0     = rep.disc
           dataA <- ZIO.attempt(Files.readString(d0.stagingDir.resolve("data/a.txt")))
           hasManifest <- ZIO.attempt(Files.exists(d0.stagingDir.resolve(".diskrement/manifest.json")))
           hasCatalog  <- ZIO.attempt(Files.exists(d0.stagingDir.resolve(".diskrement/catalog.sqlite")))
@@ -43,8 +43,8 @@ object PipelineBurnSpec extends ZIOSpecDefault:
           view  <- ZIO.serviceWithZIO[CatalogStore](_.readView(proj.get.id))
           states<- ZIO.serviceWithZIO[CatalogStore](_.readDiscStates(proj.get.id))
         yield assertTrue(
-          rep.discs.size == 1, rep.oversized.isEmpty,
           dataA == "aaa", hasManifest, hasCatalog,
+          rep.disc.ordinal == 1, rep.disc.finalized == false,
           view.current.keySet.map(_.value) == Set("a.txt", "sub/b.txt"),
           states.size == 1, states.head.usedBytes == 7L)
       },
@@ -56,9 +56,9 @@ object PipelineBurnSpec extends ZIOSpecDefault:
           pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
           _     <- pipe.init(initOf("p", src, paths.workDir))
           _     <- pipe.scan("p", verify = false, force = false)
-          _     <- pipe.plan("p", None)
+          _     <- pipe.plan("p", None, finalize = false)
           rep   <- pipe.burn("p")
-          embedded   = rep.discs.head.stagingDir.resolve(".diskrement/catalog.sqlite")
+          embedded   = rep.disc.stagingDir.resolve(".diskrement/catalog.sqlite")
           discRows  <- countRows(embedded, "disc")
           fileRows  <- countRows(embedded, "file_version")
           sessRows  <- countRows(embedded, "session")
@@ -72,7 +72,7 @@ object PipelineBurnSpec extends ZIOSpecDefault:
           pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
           _     <- pipe.init(initOf("p", src, paths.workDir))
           _     <- pipe.scan("p", verify = false, force = false)
-          _     <- pipe.plan("p", None)
+          _     <- pipe.plan("p", None, finalize = false)
           _     <- pipe.burn("p")
           leftover <- ZIO.attempt(Files.exists(paths.workDir.resolve("burn-catalog.sqlite")))
         yield assertTrue(!leftover)
