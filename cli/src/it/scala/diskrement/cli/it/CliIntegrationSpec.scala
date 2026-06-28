@@ -22,5 +22,6 @@ object CliIntegrationSpec extends ZIOSpecDefault:
   def spec = suite("diskrement CLI integration")(
     scenarios.Scenario01Happy.suite,
     scenarios.Scenario02AppendOpen.suite,
+    scenarios.Scenario03FinalizedNewDisc.suite,
     noLeftovers
   ) @@ Support.cowOrIgnore @@ TestAspect.sequential
