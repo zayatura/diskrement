@@ -106,9 +106,17 @@ private[pipeline] final case class PipelineLive(
       // The planner already finalizes the first disc iff the plan spilled; the
       // --finalize flag forces a seal even when everything fit.
       // Planner.plan always returns at least one disc in BurnPlan.discs.
-      head       = full.discs.head
+      // One disc per cycle: burn the first disc that actually carries new files.
+      // The planner keeps the open disc first by contract; when a new file can't
+      // top it off, that open disc is an empty finalizing placeholder — skip it so
+      // this cycle writes the new disc instead of wasting a cycle on an empty
+      // session (the skipped disc stays open). If no disc has files (a no-op, or an
+      // explicit --finalize of an empty open disc), keep the head as-is.
+      headIdx    = full.discs.indexWhere(_.files.nonEmpty)
+      idx        = if headIdx < 0 then 0 else headIdx
+      head       = full.discs(idx)
       sealedDisc = head.copy(willFinalize = head.willFinalize || finalize)
-      tail       = full.discs.tail
+      tail       = full.discs.drop(idx + 1)
       remaining  = RemainingEstimate(
                      tail.size, tail.map(_.files.size).sum, tail.flatMap(_.files).map(_.sizeBytes).sum)
       report     = PlanReport(sealedDisc, discType, full.tombstones, remaining, full.oversized)
