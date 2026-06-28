@@ -47,10 +47,20 @@ planner tops off / opens the next disc each cycle from persisted disc states.
 
 The burner clears `staging/disc-N/` before each burn. So when an *open* disc is
 topped off, `staging/disc-N/data` contains only the **latest session's** files,
-not the cumulative disc contents. The cumulative current view lives in the
-catalog (`status` / `history`). Oracle assertions account for this: they check
-the per-session staged tree and that session's manifest, and cross-check the
-cumulative current set via `status`/`history`.
+not the cumulative disc contents.
+
+**The oracle therefore runs immediately after every `burn`, before the next
+cycle.** Each disc/session is validated directly at the moment it is freshly
+staged — including intermediate sessions that a later top-off would overwrite.
+Nothing is deferred to the end of a multi-cycle test, so no disc is ever "lost"
+to a subsequent re-stage. The per-session nuance is not a limitation worked
+around with history; it is simply *what the oracle asserts at each checkpoint*:
+the session's staged tree and that session's manifest.
+
+The one thing per-session staging cannot show is the *union* of multiple sessions
+co-resident on a single physical disc. That cumulative current view lives in the
+catalog, so the oracle additionally cross-checks it via `status` / `history`
+after the relevant cycles — a corroborating check, not the primary evidence.
 
 ## Architecture
 
