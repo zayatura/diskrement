@@ -454,7 +454,7 @@ Create `cli/src/it/scala/diskrement/cli/it/scenarios/Scenario01Happy.scala`:
 package diskrement.cli.it
 package scenarios
 
-import zio.*
+import zio.ZIO
 import zio.test.*
 
 object Scenario01Happy:
@@ -496,7 +496,8 @@ object Scenario01Happy:
           man.added.map(_.relPath).toSet == Set("docs/a.txt", "img/b.bin"),
           man.deleted.isEmpty,
           proj.projectName == "p",
-          pts.pointers.nonEmpty,
+          // pointers.json holds only superseded/deleted versions; empty on a first burn
+          pts.pointers.isEmpty,
           aOk, bOk,
           tabs > 0,
           vrfy.exitCode == 0,
@@ -667,7 +668,7 @@ Create `cli/src/it/scala/diskrement/cli/it/scenarios/Scenario02AppendOpen.scala`
 package diskrement.cli.it
 package scenarios
 
-import zio.*
+import zio.ZIO
 import zio.test.*
 
 /** Disc 1 is left OPEN after cycle 1; cycle 2's changes (add/modify/delete) are
@@ -772,7 +773,7 @@ Create `cli/src/it/scala/diskrement/cli/it/scenarios/Scenario03FinalizedNewDisc.
 package diskrement.cli.it
 package scenarios
 
-import zio.*
+import zio.ZIO
 import zio.test.*
 
 /** `plan --finalize` seals disc 1 even though it has room; the next cycle's
@@ -851,7 +852,7 @@ Create `cli/src/it/scala/diskrement/cli/it/scenarios/Scenario04ThreeDisc.scala`:
 package diskrement.cli.it
 package scenarios
 
-import zio.*
+import zio.ZIO
 import zio.test.*
 
 /** Three cycles, each producing one disc under a 1000-byte capacity override.
@@ -942,7 +943,7 @@ Create `cli/src/it/scala/diskrement/cli/it/scenarios/Scenario05Spill.scala`:
 package diskrement.cli.it
 package scenarios
 
-import zio.*
+import zio.ZIO
 import zio.test.*
 
 object Scenario05Spill:
@@ -1020,7 +1021,7 @@ Create `cli/src/it/scala/diskrement/cli/it/scenarios/Scenario06Oversized.scala`:
 package diskrement.cli.it
 package scenarios
 
-import zio.*
+import zio.ZIO
 import zio.test.*
 import java.nio.file.Files
 
@@ -1082,7 +1083,7 @@ Create `cli/src/it/scala/diskrement/cli/it/scenarios/Scenario07Reset.scala`:
 package diskrement.cli.it
 package scenarios
 
-import zio.*
+import zio.ZIO
 import zio.test.*
 
 object Scenario07Reset:
@@ -1141,7 +1142,7 @@ Create `cli/src/it/scala/diskrement/cli/it/scenarios/Scenario08Idempotent.scala`
 package diskrement.cli.it
 package scenarios
 
-import zio.*
+import zio.ZIO
 import zio.test.*
 
 object Scenario08Idempotent:
