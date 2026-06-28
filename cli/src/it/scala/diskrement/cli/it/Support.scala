@@ -8,7 +8,7 @@ object Support:
   /** A scratch dir scoped to the test: created on acquire, deleted on release
     * (runs even if the test fails). */
   val scratch: ZIO[Scope, Throwable, Scratch] =
-    ZIO.acquireRelease(ZIO.attempt(Scratch.make()))(s => ZIO.succeed(Scratch.delete(s)))
+    ZIO.acquireRelease(ZIO.attempt(Scratch.make()))(s => ZIO.attempt(Scratch.delete(s)).orDie)
 
   /** Run one CLI command on the blocking pool. */
   def run(cli: Cli, args: String*): Task[CliResult] =

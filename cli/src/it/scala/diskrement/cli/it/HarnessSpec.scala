@@ -12,13 +12,19 @@ object HarnessSpec extends ZIOSpecDefault:
       ZIO.scoped {
         for
           s   <- Support.scratch
+          dir  = s.dir
           cli  = new Cli(s, discBytes = None)
           r   <- Support.run(cli, "init", "proj",
                    "--source", s.source.toString, "--work-dir", s.work.toString)
-          dirExistsDuring <- ZIO.attempt(Files.isDirectory(s.dir))
-        yield assertTrue(
-          r.exitCode == 0,
-          r.stdout.contains("Created project proj"),
-          dirExistsDuring)
+          existsDuring <- ZIO.attempt(Files.isDirectory(dir))
+        yield (r, existsDuring, dir)
+      }.flatMap { case (r, existsDuring, dir) =>
+        ZIO.attempt(Files.exists(dir)).map { existsAfter =>
+          assertTrue(
+            r.exitCode == 0,
+            r.stdout.contains("Created project proj"),
+            existsDuring,
+            !existsAfter)
+        }
       }
   ) @@ Support.cowOrIgnore @@ TestAspect.sequential
