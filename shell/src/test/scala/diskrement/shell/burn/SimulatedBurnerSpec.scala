@@ -34,7 +34,7 @@ object SimulatedBurnerSpec extends ZIOSpecDefault:
 
   private def meta(cat: Path, files: List[ScannedFile]) =
     DiscMetadata(
-      DiscIdentity("p", 1, 1, 1, ts),
+      DiscIdentity("p", 1, 1, ts),
       SessionManifest("p", 1, 1,
         files.map(f => ManifestEntry(f.relPath, f.contentHash, f.sizeBytes)), Nil, Nil),
       cat, Nil)

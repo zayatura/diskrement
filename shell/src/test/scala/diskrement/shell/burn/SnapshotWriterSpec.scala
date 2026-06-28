@@ -26,7 +26,7 @@ object SnapshotWriterSpec extends ZIOSpecDefault:
           _   <- ZIO.attempt(Files.write(catSrc, Array[Byte](1, 2, 3, 4)))
           ddir = tmp.resolve("disc/.diskrement")
           meta = DiscMetadata(
-                   identity = DiscIdentity("photos", 1, 1, 1, ts),
+                   identity = DiscIdentity("photos", 1, 1, ts),
                    manifest = SessionManifest("photos", 1, 1,
                      added = List(ManifestEntry(RelPath("a"), ContentHash("h1"), 10)),
                      modified = Nil, deleted = Nil),
@@ -39,7 +39,7 @@ object SnapshotWriterSpec extends ZIOSpecDefault:
           ptjson <- ZIO.attempt(Files.readString(ddir.resolve("pointers.json")))
           catB   <- ZIO.attempt(Files.readAllBytes(ddir.resolve("catalog.sqlite")).toList)
         yield assertTrue(
-          pjson.fromJson[ProjectJson] == Right(ProjectJson("photos", 1, 1, 1, "2026-06-01T00:00:00Z")),
+          pjson.fromJson[ProjectJson] == Right(ProjectJson("photos", 1, 1, "2026-06-01T00:00:00Z")),
           mjson.fromJson[ManifestJson] == Right(ManifestJson.from(meta.manifest)),
           ptjson.fromJson[PointersJson] == Right(PointersJson.from(meta.pointers)),
           catB == List[Byte](1, 2, 3, 4))

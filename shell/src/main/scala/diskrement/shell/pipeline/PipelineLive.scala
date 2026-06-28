@@ -123,7 +123,6 @@ private[pipeline] final case class PipelineLive(
       changeSet    = Diff.diff(view, scanned)
       now         <- Clock.instant
       existing    <- existingSessions(p.id)
-      discCount    = burnPlan.discs.map(_.ordinal).maxOption.getOrElse(0)
       lastIdx      = burnPlan.discs.size - 1
       // Per-disc data derived once, so the embedded catalog, the staged manifests,
       // and the live commit are all built from the same session ordinals/manifests.
@@ -146,7 +145,7 @@ private[pipeline] final case class PipelineLive(
       _           <- CatalogStore.applyUpdateTo(tmpCatalog, update).mapError(PipelineError.Failed(_))
       pointers    <- catalog.archivePointers(p.id).mapError(PipelineError.Failed(_))
       reports     <- ZIO.foreach(discData) { dd =>
-                       val identity = DiscIdentity(name, dd.disc.ordinal, discCount, dd.sessOrd, now)
+                       val identity = DiscIdentity(name, dd.disc.ordinal, dd.sessOrd, now)
                        val meta  = DiscMetadata(identity, dd.manifest, tmpCatalog, pointers)
                        val image = DiscImage(
                          paths.workDir.resolve("staging").resolve(s"disc-${dd.disc.ordinal}"),
