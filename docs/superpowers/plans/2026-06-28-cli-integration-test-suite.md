@@ -1204,3 +1204,71 @@ git commit -m "test(cli): scenario 8 (idempotent re-scan)"
 - **Determinism:** capacity-override scenarios use byte sizes chosen so each cycle's packing outcome is unambiguous. If you change a file size, re-check the per-disc expectations.
 - **Output coupling:** assertions match substrings of `Render`'s output (`cli/src/main/scala/diskrement/cli/Render.scala`). If `Render` wording changes, update the `.contains(...)` checks.
 ```
+
+---
+
+## Task 7a (inserted): Pipeline fix — don't burn an empty top-off when new data spills across cycles
+
+**Discovered by Scenario 4.** When a new file is added in a *later* cycle and does not
+fit the open disc's remaining space, `Planner.plan` (correctly, by its contract — see
+`PlannerPropertyTest` property 6 and `PlannerEdgeTest:54`) returns the open disc first as
+an *empty finalizing* disc, with the new file on a fresh disc behind it. But
+`PipelineLive.plan` burns `full.discs.head` — the empty disc — so the cycle:
+- prints "Nothing to burn: no changes to plan." even though a file was added,
+- writes an empty finalizing session and (via the simulated burner's clear-and-restage)
+  wipes the open disc's staging, deferring the real data to a later cycle.
+
+**Fix location: `PipelineLive.plan` (NOT `Planner`).** The planner contract ("open disc
+first") and all `core` tests stay intact. The one-disc-per-cycle pipeline should burn the
+first disc that actually carries new files; the skipped open disc stays OPEN.
+
+**Behavior change (accepted):** a partly-filled open disc that can't accept the next file
+is left open rather than empty-finalized, so the catalog may hold more than one open disc
+(the planner tops off the newest). Benign for an archiver.
+
+### Files
+- Modify: `shell/src/main/scala/diskrement/shell/pipeline/PipelineLive.scala` (`plan` head selection)
+- Modify: `cli/src/main/scala/diskrement/cli/Render.scala` (`plan` empty+willFinalize message)
+- Test: `shell/src/test/scala/diskrement/shell/pipeline/PipelineSpillSpec.scala` (new cross-cycle case)
+- Test: `cli/src/test/scala/diskrement/cli/RenderSpec.scala` (finalize-empty message)
+
+### PipelineLive.plan change
+Replace the head/tail selection:
+```scala
+      head       = full.discs.head
+      sealedDisc = head.copy(willFinalize = head.willFinalize || finalize)
+      tail       = full.discs.tail
+```
+with:
+```scala
+      // One disc per cycle: burn the first disc that actually carries new files.
+      // The planner keeps the open disc first by contract; when a new file can't
+      // top it off, that open disc is an empty finalizing placeholder — skip it so
+      // this cycle writes the new disc instead of wasting a cycle on an empty
+      // session (the skipped disc stays open). If no disc has files (a no-op, or an
+      // explicit --finalize of an empty open disc), keep the head as-is.
+      headIdx    = full.discs.indexWhere(_.files.nonEmpty)
+      idx        = if headIdx < 0 then 0 else headIdx
+      head       = full.discs(idx)
+      sealedDisc = head.copy(willFinalize = head.willFinalize || finalize)
+      tail       = full.discs.drop(idx + 1)
+```
+(`remaining`/`report` lines below are unchanged.)
+
+### Render.plan change
+Replace:
+```scala
+    if d.files.isEmpty && p.tombstones.isEmpty && p.oversized.isEmpty then
+      "Nothing to burn: no changes to plan."
+```
+with:
+```scala
+    if d.files.isEmpty && p.tombstones.isEmpty && p.oversized.isEmpty then
+      if d.willFinalize then s"Plan: finalize disc ${d.ordinal} (seal; no new files)."
+      else "Nothing to burn: no changes to plan."
+```
+
+### Result
+After this fix, Scenario 4 (Task 7) passes exactly as originally written in this plan —
+each later cycle whose file can't top off the open disc opens a fresh disc as the head,
+giving discs 1/2/3 with the correct add/modify/delete history.
