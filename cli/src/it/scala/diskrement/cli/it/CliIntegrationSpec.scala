@@ -23,5 +23,6 @@ object CliIntegrationSpec extends ZIOSpecDefault:
     scenarios.Scenario01Happy.suite,
     scenarios.Scenario02AppendOpen.suite,
     scenarios.Scenario03FinalizedNewDisc.suite,
+    scenarios.Scenario04ThreeDisc.suite,
     noLeftovers
   ) @@ Support.cowOrIgnore @@ TestAspect.sequential
