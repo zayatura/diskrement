@@ -94,8 +94,13 @@ private[pipeline] final case class PipelineLive(
                  }
       view    <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
       states  <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
-      discType = discTypeOverride.getOrElse(p.defaultDiscType)
-      cap      = Capacity.fromDiscType(discType, p.marginPercent)
+      // Test-only: DISKREMENT_DISC_BYTES overrides usable capacity directly
+      // (bypassing margin) so multi-disc scenarios are cheap and deterministic.
+      // Not documented in --help; read via zio.System so TestSystem can inject it.
+      capBytes <- zio.System.env("DISKREMENT_DISC_BYTES").mapError(PipelineError.Failed(_))
+                    .map(_.flatMap(_.toLongOption).filter(_ > 0L))
+      discType  = discTypeOverride.getOrElse(p.defaultDiscType)
+      cap       = capBytes.fold(Capacity.fromDiscType(discType, p.marginPercent))(Capacity(_))
       cs       = Diff.diff(view, scanned)
       full     = Planner.plan(cs, states, cap)
       // The planner already finalizes the first disc iff the plan spilled; the
