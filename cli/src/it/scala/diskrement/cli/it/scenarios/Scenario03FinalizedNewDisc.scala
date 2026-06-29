@@ -13,33 +13,39 @@ object Scenario03FinalizedNewDisc:
         for
           s   <- Support.scratch
           cli  = new Cli(s, discBytes = None)
-          _    = Tree.write(s.source, "a.txt", 128)
-          _   <- Support.run(cli, "init", "p",
+          _   <- ZIO.attempt(Tree.write(s.source, "a.txt", 128))
+          ini <- Support.run(cli, "init", "p",
                    "--source", s.source.toString, "--work-dir", s.work.toString)
           // cycle 1: finalize disc 1
           _   <- Support.run(cli, "scan", "p")
           pl1 <- Support.run(cli, "plan", "p", "--finalize")
           b1  <- Support.run(cli, "burn", "p", "--yes")
-          d1data = DiscOracle.dataFiles(s.discDir(1))
-          d1man  = DiscOracle.manifest(s.discDir(1))
+          d1data <- ZIO.attemptBlocking(DiscOracle.dataFiles(s.discDir(1)))
+          d1man  <- ZIO.attemptBlocking(DiscOracle.manifest(s.discDir(1)))
           // cycle 2: add b -> must be a new disc
-          _    = Tree.write(s.source, "b.txt", 128)
+          _   <- ZIO.attempt(Tree.write(s.source, "b.txt", 128))
           _   <- Support.run(cli, "scan", "p")
           pl2 <- Support.run(cli, "plan", "p")
           b2  <- Support.run(cli, "burn", "p", "--yes")
-          d2data = DiscOracle.dataFiles(s.discDir(2))
-          d2man  = DiscOracle.manifest(s.discDir(2))
+          d2data <- ZIO.attemptBlocking(DiscOracle.dataFiles(s.discDir(2)))
+          d2man  <- ZIO.attemptBlocking(DiscOracle.manifest(s.discDir(2)))
           hA  <- Support.run(cli, "history", "p", "a.txt")
         yield assertTrue(
+          ini.exitCode == 0,
+          pl1.exitCode == 0,
           pl1.stdout.contains("will FINALIZE"),
-          b1.stdout.contains("FINALIZED"),
+          b1.exitCode == 0,
+          b1.stdout.contains("Wrote disc 1") && b1.stdout.contains("FINALIZED"),
           d1data == Set("a.txt"),
           d1man.discOrdinal == 1,
+          pl2.exitCode == 0,
           pl2.stdout.contains("new disc"),
+          b2.exitCode == 0,
           b2.stdout.contains("Wrote disc 2"),
           d2data == Set("b.txt"),
           d2man.discOrdinal == 2,
           d2man.sessionOrdinal == 1,
+          hA.exitCode == 0,
           hA.stdout.contains("CURRENT"))
       }
   )

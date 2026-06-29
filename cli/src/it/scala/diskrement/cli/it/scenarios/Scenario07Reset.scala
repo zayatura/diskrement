@@ -14,12 +14,13 @@ object Scenario07Reset:
           s   <- Support.scratch
           cli  = new Cli(s, discBytes = None)
           _   <- ZIO.attempt(Tree.write(s.source, "a.txt", 64))
-          _   <- Support.run(cli, "init", "p",
+          ini <- Support.run(cli, "init", "p",
                    "--source", s.source.toString, "--work-dir", s.work.toString)
           sc  <- Support.run(cli, "scan", "p")
           rs  <- Support.run(cli, "reset", "p")
           pl  <- Support.run(cli, "plan", "p")
         yield assertTrue(
+          ini.exitCode == 0,
           sc.exitCode == 0,
           rs.exitCode == 0,
           rs.stdout.contains("Reset p."),

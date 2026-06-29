@@ -13,12 +13,13 @@ object ScenarioExitCodes:
         for
           s   <- Support.scratch
           cli  = new Cli(s, discBytes = None)
-          _    = Tree.write(s.source, "a.txt", 64)
-          _   <- Support.run(cli, "init", "p",
+          _   <- ZIO.attempt(Tree.write(s.source, "a.txt", 64))
+          ini <- Support.run(cli, "init", "p",
                    "--source", s.source.toString, "--work-dir", s.work.toString)
           vNo <- Support.run(cli, "verify", "does-not-exist")
           pNo <- Support.run(cli, "plan", "p")
         yield assertTrue(
+          ini.exitCode == 0,
           vNo.exitCode == 2,
           pNo.exitCode == 2)
       }

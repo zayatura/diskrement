@@ -15,18 +15,19 @@ object Scenario06Oversized:
           s   <- Support.scratch
           cli  = new Cli(s, discBytes = Some(1000L))
           _   <- ZIO.attempt(Tree.write(s.source, "huge.bin", 5000))
-          _   <- Support.run(cli, "init", "p",
+          ini <- Support.run(cli, "init", "p",
                    "--source", s.source.toString, "--work-dir", s.work.toString)
           _   <- Support.run(cli, "scan", "p")
           pl  <- Support.run(cli, "plan", "p")
           bn  <- Support.run(cli, "burn", "p", "--yes")
           staged <- ZIO.attempt(Files.exists(s.discDir(1)))
         yield assertTrue(
+          ini.exitCode == 0,
           pl.exitCode == 0,
           pl.stdout.contains("Oversized (cannot be placed):"),
           pl.stdout.contains("huge.bin"),
           bn.exitCode == 3,
-          bn.stderr.nonEmpty,
+          bn.stderr.contains("oversized files cannot be placed"),
           !staged)
       }
   )

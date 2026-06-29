@@ -11,25 +11,26 @@ object Scenario01Happy:
         for
           s   <- Support.scratch
           cli  = new Cli(s, discBytes = None)
-          _    = Tree.write(s.source, "docs/a.txt", 256)
-          _    = Tree.write(s.source, "img/b.bin", 512)
-          _   <- Support.run(cli, "init", "p",
+          _   <- ZIO.attempt(Tree.write(s.source, "docs/a.txt", 256))
+          _   <- ZIO.attempt(Tree.write(s.source, "img/b.bin", 512))
+          ini <- Support.run(cli, "init", "p",
                    "--source", s.source.toString, "--work-dir", s.work.toString)
           scan <- Support.run(cli, "scan", "p")
           plan <- Support.run(cli, "plan", "p")
           burn <- Support.run(cli, "burn", "p", "--yes")
           // Oracle: read the freshly-staged disc 1 right now.
           d1   = s.discDir(1)
-          data = DiscOracle.dataFiles(d1)
-          man  = DiscOracle.manifest(d1)
-          proj = DiscOracle.projectJson(d1)
-          pts  = DiscOracle.pointers(d1)
-          aOk  = DiscOracle.contentMatches(d1, s.source, "docs/a.txt")
-          bOk  = DiscOracle.contentMatches(d1, s.source, "img/b.bin")
-          tabs = DiscOracle.catalogTableCount(d1)
+          data <- ZIO.attemptBlocking(DiscOracle.dataFiles(d1))
+          man  <- ZIO.attemptBlocking(DiscOracle.manifest(d1))
+          proj <- ZIO.attemptBlocking(DiscOracle.projectJson(d1))
+          pts  <- ZIO.attemptBlocking(DiscOracle.pointers(d1))
+          aOk  <- ZIO.attemptBlocking(DiscOracle.contentMatches(d1, s.source, "docs/a.txt"))
+          bOk  <- ZIO.attemptBlocking(DiscOracle.contentMatches(d1, s.source, "img/b.bin"))
+          tabs <- ZIO.attemptBlocking(DiscOracle.catalogTableCount(d1))
           vrfy <- Support.run(cli, "verify", "p")
           stat <- Support.run(cli, "status", "p")
         yield assertTrue(
+          ini.exitCode == 0,
           scan.exitCode == 0,
           scan.stdout.contains("Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged."),
           plan.exitCode == 0,
@@ -49,6 +50,7 @@ object Scenario01Happy:
           tabs > 0,
           vrfy.exitCode == 0,
           vrfy.stdout.contains("files OK"),
+          stat.exitCode == 0,
           stat.stdout.contains("Current files: 2"))
       }
   )

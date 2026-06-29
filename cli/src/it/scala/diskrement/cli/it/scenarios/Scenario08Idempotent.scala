@@ -17,7 +17,7 @@ object Scenario08Idempotent:
                    Tree.write(s.source, "a.txt", 64)
                    Tree.write(s.source, "b.txt", 64)
                  }
-          _   <- Support.run(cli, "init", "p",
+          ini <- Support.run(cli, "init", "p",
                    "--source", s.source.toString, "--work-dir", s.work.toString)
           _   <- Support.run(cli, "scan", "p")
           _   <- Support.run(cli, "plan", "p")
@@ -26,6 +26,7 @@ object Scenario08Idempotent:
           sc2 <- Support.run(cli, "scan", "p")
           pl2 <- Support.run(cli, "plan", "p")
         yield assertTrue(
+          ini.exitCode == 0,
           sc2.exitCode == 0,
           sc2.stdout.contains("Scanned: 0 added, 0 modified, 0 deleted, 2 unchanged."),
           pl2.exitCode == 0,

@@ -117,6 +117,7 @@ private[pipeline] final case class PipelineLive(
       head       = full.discs(idx)
       sealedDisc = head.copy(willFinalize = head.willFinalize || finalize)
       tail       = full.discs.drop(idx + 1)
+      // full.tombstones are this scan's deletions, not per-disc: on a cross-cycle spill (idx > 0 skips the empty open disc) they attach to the chosen new disc's session.
       remaining  = RemainingEstimate(
                      tail.size, tail.map(_.files.size).sum, tail.flatMap(_.files).map(_.sizeBytes).sum)
       report     = PlanReport(sealedDisc, discType, full.tombstones, remaining, full.oversized)
