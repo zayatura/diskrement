@@ -28,5 +28,6 @@ object CliIntegrationSpec extends ZIOSpecDefault:
     scenarios.Scenario05Spill.suite,
     scenarios.Scenario06Oversized.suite,
     scenarios.Scenario07Reset.suite,
+    scenarios.Scenario08Idempotent.suite,
     noLeftovers
   ) @@ Support.cowOrIgnore @@ TestAspect.sequential
