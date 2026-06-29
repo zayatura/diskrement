@@ -1272,3 +1272,43 @@ with:
 After this fix, Scenario 4 (Task 7) passes exactly as originally written in this plan —
 each later cycle whose file can't top off the open disc opens a fresh disc as the head,
 giving discs 1/2/3 with the correct add/modify/delete history.
+
+---
+
+## Task 7b (inserted): Fix CLI exit-code propagation
+
+**Discovered by Scenario 4.** `Runner.run` computes correct exit codes (`Render.handle`, `Render.verifyExit`) but returns them as a success *value*. `ZIOCli.run()` runs `cliApp.run(args)` and ignores that value; `ZIOApp` exits non-zero only on failure, so every application error and verify-corruption exits 0 (only zio-cli's own arg-parse errors exit 1). This makes Scenarios 6 (oversized→3) and 7 (reset→2) unsatisfiable and Scenario 1/4 verify-exit assertions vacuous.
+
+### Fix — `cli/src/main/scala/diskrement/cli/Main.scala`
+Override `run` to propagate the handler's `ExitCode`:
+```scala
+override def run =
+  for
+    args   <- getArgs
+    result <- cliApp.run(args.toList)
+    _      <- result match
+                case code: zio.ExitCode => exit(code)
+                case _                  => ZIO.unit
+  yield ()
+```
+(`cliApp.run` returns the handler's value (`ExitCode`) for a real command, or `Unit` for built-ins like `--help`; built-ins → exit 0. Validation errors still fail the effect → exit 1.)
+
+### Test (IT level, real process) — new `cli/src/it/.../scenarios/ScenarioExitCodes.scala`
+Assert non-zero propagation: `verify <nonexistent project>` → exit 2 (ProjectNotFound); `plan p` with no staged scan → exit 2 (NoStagedScan). Register in `CliIntegrationSpec`. TDD: fails today (exit 0), passes after the Main fix.
+
+---
+
+## Task 7c (inserted): Fix `verify` to validate each disc against its own recorded contents
+
+**Discovered by Scenario 4.** `verifyDisc` hashes each disc's staged files against `view.current`, so superseded/deleted files on historical discs always mismatch; after any modify/delete, `verify` (all discs) reports false mismatches and never marks historical discs VERIFIED.
+
+### Fix
+- Add `CatalogStore.placementsForDisc(project: ProjectId, discOrdinal: Int): IO[CatalogError, Map[RelPath, ContentHash]]` returning the `relPath → contentHash` of file versions placed in that disc's LATEST session (matches what the simulated burner stages). SQL joins `placement → session → disc → file_version`, filtered to `s.ordinal = max(session.ordinal) for that disc`.
+- Change `PipelineLive.verifyDisc` to compare staged file hashes against `placementsForDisc(...)` instead of `view.current` (a staged file mismatches if the disc map lacks its relPath or records a different hash). `verify` no longer needs the global `view`.
+
+### Tests
+- New `PipelineVerifySpec` case: burn disc 1 (a), modify a + add nothing → next disc; `verify` all discs → no mismatches, both discs VERIFIED. (Mirrors Scenario 4's verify expectation at shell level.)
+- Existing 3 `PipelineVerifySpec` cases must stay green (single-disc clean/corrupt/missing-staging).
+
+### Result
+With 7b + 7c, Scenario 4 (Task 7) can assert `verify p` (all discs) is clean and `vf.exitCode == 0` is a meaningful end-to-end integrity check.
