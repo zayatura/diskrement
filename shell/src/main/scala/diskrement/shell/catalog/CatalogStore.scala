@@ -1,6 +1,6 @@
 package diskrement.shell.catalog
 
-import diskrement.core.{CatalogView, DiscState, RelPath}
+import diskrement.core.{CatalogView, ContentHash, DiscState, RelPath}
 import diskrement.shell.model._
 import zio._
 import zio.jdbc._
@@ -24,6 +24,10 @@ trait CatalogStore:
   def archivePointers(project: ProjectId): IO[CatalogError, List[ArchivePointer]]
   def fileHistory(project: ProjectId, relPath: RelPath): IO[CatalogError, List[FileHistoryEntry]]
   def markVerified(project: ProjectId, discOrdinal: Int, sessionOrdinal: Int): IO[CatalogError, Unit]
+  /** The `relPath -> contentHash` of file versions placed in `discOrdinal`'s LATEST
+    * session — i.e. exactly what the (simulated) burner stages on that disc. Used by
+    * verify to validate a disc against its own recorded contents, not the current view. */
+  def placementsForDisc(project: ProjectId, discOrdinal: Int): IO[CatalogError, Map[RelPath, ContentHash]]
 
 object CatalogStore:
   /** Build the store from a pool, running migrations once at layer construction. */

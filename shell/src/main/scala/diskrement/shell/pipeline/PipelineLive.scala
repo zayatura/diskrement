@@ -217,18 +217,18 @@ private[pipeline] final case class PipelineLive(
   def verify(name: String, discOrdinal: Option[Int]): IO[PipelineError, List[VerifyReport]] =
     for
       p        <- project(name)
-      view     <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
       states   <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
       sessions <- catalog.sessionsByState(p.id, SessionState.BURNED).mapError(PipelineError.Failed(_))
       targets   = states.map(_.ordinal).filter(o => discOrdinal.forall(_ == o))
-      reps     <- ZIO.foreach(targets)(o => verifyDisc(p.id, o, view, sessions))
+      reps     <- ZIO.foreach(targets)(o => verifyDisc(p.id, o, sessions))
     yield reps
 
   private def verifyDisc(
-      pid: ProjectId, ordinal: Int, view: CatalogView, sessions: List[Session]
+      pid: ProjectId, ordinal: Int, sessions: List[Session]
   ): IO[PipelineError, VerifyReport] =
     val dataDir = paths.workDir.resolve("staging").resolve(s"disc-$ordinal").resolve("data")
     for
+      discMap <- catalog.placementsForDisc(pid, ordinal).mapError(PipelineError.Failed(_))
       existed <- ZIO.attemptBlockingIO(Files.exists(dataDir)).mapError(PipelineError.Failed(_))
       files <- ZIO.attemptBlockingIO {
                  if existed then
@@ -240,7 +240,7 @@ private[pipeline] final case class PipelineLive(
       mismatches <- ZIO.foreach(files) { f =>
                       val rel = RelPath(dataDir.relativize(f).toString)
                       hasher.hash(f).mapError(PipelineError.Failed(_)).map { h =>
-                        Option.when(!view.current.get(rel).exists(_.contentHash == h))(rel)
+                        Option.when(!discMap.get(rel).contains(h))(rel)
                       }
                     }.map(_.flatten)
       _ <- ZIO.when(existed && mismatches.isEmpty)(
