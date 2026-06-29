@@ -26,5 +26,6 @@ object CliIntegrationSpec extends ZIOSpecDefault:
     scenarios.Scenario04ThreeDisc.suite,
     scenarios.ScenarioExitCodes.suite,
     scenarios.Scenario05Spill.suite,
+    scenarios.Scenario06Oversized.suite,
     noLeftovers
   ) @@ Support.cowOrIgnore @@ TestAspect.sequential
