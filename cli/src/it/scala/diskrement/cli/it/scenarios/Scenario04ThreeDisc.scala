@@ -52,6 +52,6 @@ object Scenario04ThreeDisc:
           hA.stdout.contains("SUPERSEDED") && hA.stdout.contains("CURRENT"),
           hB.stdout.contains("DELETED"),
           st.stdout.contains("Current files: 1"),
-          vf.exitCode == 0)
+          vf.exitCode == 4)  // disc 1 has superseded a.bin, disc 2 has deleted b.bin
       }
   )
