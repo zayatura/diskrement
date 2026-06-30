@@ -40,4 +40,19 @@ object PipelineCapacityOverrideSpec extends ZIOSpecDefault:
           plan  <- pipe.plan("q", None, finalize = false)
         yield assertTrue(plan.remaining.moreDiscs >= 1)
       }
+    ,
+    test("a value >= normal usable capacity is ignored (override only shrinks)"):
+      ZIO.scoped {
+        for
+          _     <- TestSystem.putEnv("DISKREMENT_DISC_BYTES", "999999999999") // ~1TB, far above BD_R usable
+          paths <- ZIO.service[ProjectPaths]
+          src   <- PipelineTestKit.makeSource(files)
+          pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
+          _     <- pipe.init(initOf("r", src, paths.workDir))
+          _     <- pipe.scan("r", verify = false, force = false)
+          plan  <- pipe.plan("r", None, finalize = false)
+        yield assertTrue(
+          plan.remaining.moreDiscs == 0,
+          plan.disc.usableBytes == Capacity.fromDiscType(DiscType.BD_R, 2.0).usableBytes)
+      }
   ).provideLayer(PipelineTestKit.env.orDie)

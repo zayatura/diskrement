@@ -94,13 +94,16 @@ private[pipeline] final case class PipelineLive(
                  }
       view    <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
       states  <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
-      // Test-only: DISKREMENT_DISC_BYTES overrides usable capacity directly
-      // (bypassing margin) so multi-disc scenarios are cheap and deterministic.
-      // Not documented in --help; read via zio.System so TestSystem can inject it.
+      // Test-only: DISKREMENT_DISC_BYTES may only SHRINK usable capacity (a value
+      // >= the normal margin-adjusted capacity is ignored), so it can never plan a
+      // disc past the safety margin in production. It makes multi-disc test
+      // scenarios cheap/deterministic. Not documented in --help; read via
+      // zio.System so TestSystem can inject it in unit tests.
       capBytes <- zio.System.env("DISKREMENT_DISC_BYTES").mapError(PipelineError.Failed(_))
                     .map(_.flatMap(_.toLongOption).filter(_ > 0L))
       discType  = discTypeOverride.getOrElse(p.defaultDiscType)
-      cap       = capBytes.fold(Capacity.fromDiscType(discType, p.marginPercent))(Capacity(_))
+      normalCap = Capacity.fromDiscType(discType, p.marginPercent)
+      cap       = capBytes.filter(_ < normalCap.usableBytes).fold(normalCap)(Capacity(_))
       cs       = Diff.diff(view, scanned)
       full     = Planner.plan(cs, states, cap)
       // The planner already finalizes the first disc iff the plan spilled; the
@@ -117,7 +120,8 @@ private[pipeline] final case class PipelineLive(
       head       = full.discs(idx)
       sealedDisc = head.copy(willFinalize = head.willFinalize || finalize)
       tail       = full.discs.drop(idx + 1)
-      // full.tombstones are this scan's deletions, not per-disc: on a cross-cycle spill (idx > 0 skips the empty open disc) they attach to the chosen new disc's session.
+      // full.tombstones are this scan's deletions, not per-disc: on a cross-cycle
+      // spill (idx > 0 skips the empty open disc) they attach to the chosen disc's session.
       remaining  = RemainingEstimate(
                      tail.size, tail.map(_.files.size).sum, tail.flatMap(_.files).map(_.sizeBytes).sum)
       report     = PlanReport(sealedDisc, discType, full.tombstones, remaining, full.oversized)

@@ -51,6 +51,7 @@ lazy val cli = (project in file("cli"))
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
     Defaults.itSettings,
     IntegrationTest / fork := true,
+    IntegrationTest / parallelExecution := false,
     // Build the launcher before IT runs, and hand its path to the tests.
     IntegrationTest / javaOptions += {
       val stagedDir = (Universal / stage).value
