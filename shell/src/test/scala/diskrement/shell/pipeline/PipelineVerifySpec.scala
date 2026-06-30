@@ -62,5 +62,38 @@ object PipelineVerifySpec extends ZIOSpecDefault:
         yield assertTrue(
           reps.size == 1, reps.head.filesChecked == 0, reps.head.mismatches.isEmpty,
           ver.isEmpty)
+      },
+    test("verify is clean across discs after modify/delete spreads versions over multiple discs"):
+      ZIO.scoped {
+        for
+          _     <- TestSystem.putEnv("DISKREMENT_DISC_BYTES", "1000")
+          paths <- ZIO.service[ProjectPaths]
+          src   <- PipelineTestKit.makeSource(Map("a.bin" -> ("a" * 800)))
+          pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
+          _     <- pipe.init(initOf("p", src, paths.workDir))
+          // cycle 1: a -> disc 1 (open, ~200 free)
+          _     <- pipe.scan("p", verify = false, force = false)
+          _     <- pipe.plan("p", None, finalize = false)
+          _     <- pipe.burn("p")
+          // cycle 2: add b -> disc 2 (800 can't fit disc 1's 200 free)
+          _     <- ZIO.attempt(Files.writeString(src.resolve("b.bin"), "b" * 800))
+          _     <- pipe.scan("p", verify = false, force = true)
+          _     <- pipe.plan("p", None, finalize = false)
+          _     <- pipe.burn("p")
+          // cycle 3: modify a + delete b -> disc 3 (a now superseded on disc 1, b deleted on disc 2)
+          _     <- ZIO.attempt {
+                     Files.writeString(src.resolve("a.bin"), "A" * 800)
+                     Files.deleteIfExists(src.resolve("b.bin"))
+                   }
+          _     <- pipe.scan("p", verify = false, force = true)
+          _     <- pipe.plan("p", None, finalize = false)
+          _     <- pipe.burn("p")
+          reps  <- pipe.verify("p", None)
+          proj  <- ZIO.serviceWithZIO[CatalogStore](_.findProject("p"))
+          ver   <- ZIO.serviceWithZIO[CatalogStore](_.sessionsByState(proj.get.id, SessionState.VERIFIED))
+        yield assertTrue(
+          reps.size == 3,
+          reps.forall(_.mismatches.isEmpty),
+          ver.map(_.discOrdinal).sorted == List(1, 2, 3))
       }
   ).provideLayer(PipelineTestKit.env.orDie)

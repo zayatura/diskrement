@@ -284,6 +284,18 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
               s"no BURNED session $sessionOrdinal on disc $discOrdinal"))).unit)
     }
 
+  def placementsForDisc(project: ProjectId, discOrdinal: Int): IO[CatalogError, Map[RelPath, ContentHash]] =
+    tx {
+      sql"""select fv.rel_path, fv.content_hash
+            from placement p
+            join session s   on s.id = p.session_id
+            join disc d      on d.id = s.disc_id
+            join file_version fv on fv.id = p.file_version_id
+            where d.project_id = ${project.value} and d.ordinal = ${discOrdinal}
+              and s.ordinal = (select max(s2.ordinal) from session s2 where s2.disc_id = d.id)"""
+        .query[(String, String)].selectAll
+    }.map(_.toList.map { case (rp, ch) => RelPath(rp) -> ContentHash(ch) }.toMap)
+
   def snapshotTo(dest: Path): IO[CatalogError, Unit] =
     transaction(sql"vacuum into ${dest.toString}".execute.unit)
       .provideEnvironment(ZEnvironment(pool))

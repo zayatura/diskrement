@@ -94,16 +94,34 @@ private[pipeline] final case class PipelineLive(
                  }
       view    <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
       states  <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
-      discType = discTypeOverride.getOrElse(p.defaultDiscType)
-      cap      = Capacity.fromDiscType(discType, p.marginPercent)
+      // Test-only: DISKREMENT_DISC_BYTES may only SHRINK usable capacity (a value
+      // >= the normal margin-adjusted capacity is ignored), so it can never plan a
+      // disc past the safety margin in production. It makes multi-disc test
+      // scenarios cheap/deterministic. Not documented in --help; read via
+      // zio.System so TestSystem can inject it in unit tests.
+      capBytes <- zio.System.env("DISKREMENT_DISC_BYTES").mapError(PipelineError.Failed(_))
+                    .map(_.flatMap(_.toLongOption).filter(_ > 0L))
+      discType  = discTypeOverride.getOrElse(p.defaultDiscType)
+      normalCap = Capacity.fromDiscType(discType, p.marginPercent)
+      cap       = capBytes.filter(_ < normalCap.usableBytes).fold(normalCap)(Capacity(_))
       cs       = Diff.diff(view, scanned)
       full     = Planner.plan(cs, states, cap)
       // The planner already finalizes the first disc iff the plan spilled; the
       // --finalize flag forces a seal even when everything fit.
       // Planner.plan always returns at least one disc in BurnPlan.discs.
-      head       = full.discs.head
+      // One disc per cycle: burn the first disc that actually carries new files.
+      // The planner keeps the open disc first by contract; when a new file can't
+      // top it off, that open disc is an empty finalizing placeholder — skip it so
+      // this cycle writes the new disc instead of wasting a cycle on an empty
+      // session (the skipped disc stays open). If no disc has files (a no-op, or an
+      // explicit --finalize of an empty open disc), keep the head as-is.
+      headIdx    = full.discs.indexWhere(_.files.nonEmpty)
+      idx        = if headIdx < 0 then 0 else headIdx
+      head       = full.discs(idx)
       sealedDisc = head.copy(willFinalize = head.willFinalize || finalize)
-      tail       = full.discs.tail
+      tail       = full.discs.drop(idx + 1)
+      // full.tombstones are this scan's deletions, not per-disc: on a cross-cycle
+      // spill (idx > 0 skips the empty open disc) they attach to the chosen disc's session.
       remaining  = RemainingEstimate(
                      tail.size, tail.map(_.files.size).sum, tail.flatMap(_.files).map(_.sizeBytes).sum)
       report     = PlanReport(sealedDisc, discType, full.tombstones, remaining, full.oversized)
@@ -204,18 +222,18 @@ private[pipeline] final case class PipelineLive(
   def verify(name: String, discOrdinal: Option[Int]): IO[PipelineError, List[VerifyReport]] =
     for
       p        <- project(name)
-      view     <- catalog.readView(p.id).mapError(PipelineError.Failed(_))
       states   <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
       sessions <- catalog.sessionsByState(p.id, SessionState.BURNED).mapError(PipelineError.Failed(_))
       targets   = states.map(_.ordinal).filter(o => discOrdinal.forall(_ == o))
-      reps     <- ZIO.foreach(targets)(o => verifyDisc(p.id, o, view, sessions))
+      reps     <- ZIO.foreach(targets)(o => verifyDisc(p.id, o, sessions))
     yield reps
 
   private def verifyDisc(
-      pid: ProjectId, ordinal: Int, view: CatalogView, sessions: List[Session]
+      pid: ProjectId, ordinal: Int, sessions: List[Session]
   ): IO[PipelineError, VerifyReport] =
     val dataDir = paths.workDir.resolve("staging").resolve(s"disc-$ordinal").resolve("data")
     for
+      discMap <- catalog.placementsForDisc(pid, ordinal).mapError(PipelineError.Failed(_))
       existed <- ZIO.attemptBlockingIO(Files.exists(dataDir)).mapError(PipelineError.Failed(_))
       files <- ZIO.attemptBlockingIO {
                  if existed then
@@ -227,7 +245,7 @@ private[pipeline] final case class PipelineLive(
       mismatches <- ZIO.foreach(files) { f =>
                       val rel = RelPath(dataDir.relativize(f).toString)
                       hasher.hash(f).mapError(PipelineError.Failed(_)).map { h =>
-                        Option.when(!view.current.get(rel).exists(_.contentHash == h))(rel)
+                        Option.when(!discMap.get(rel).contains(h))(rel)
                       }
                     }.map(_.flatten)
       _ <- ZIO.when(existed && mismatches.isEmpty)(

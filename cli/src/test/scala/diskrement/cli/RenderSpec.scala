@@ -51,6 +51,13 @@ object RenderSpec extends ZIOSpecDefault:
         DiscType.BD_R, Nil, RemainingEstimate(0, 0, 0), Nil)
       assertTrue(Render.plan(rep) == "Nothing to burn: no changes to plan.")
     },
+    test("plan: empty disc with willFinalize reports finalize message, not nothing-to-burn") {
+      val rep = PlanReport(
+        PlannedDisc(1, isNew = false, willFinalize = true, Nil, 0L, 25_000_000_000L),
+        DiscType.BD_R, Nil, RemainingEstimate(0, 0, 0), Nil)
+      val out = Render.plan(rep)
+      assertTrue(out == "Plan: finalize disc 1 (seal; no new files).")
+    },
     test("plan: oversized files are listed") {
       val rep = PlanReport(
         PlannedDisc(1, isNew = true, willFinalize = false, List(sf("a", 10L)), 0L, 25_000_000_000L),

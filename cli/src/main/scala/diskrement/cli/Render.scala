@@ -17,7 +17,8 @@ object Render:
   def plan(p: PlanReport): String =
     val d = p.disc
     if d.files.isEmpty && p.tombstones.isEmpty && p.oversized.isEmpty then
-      "Nothing to burn: no changes to plan."
+      if d.willFinalize then s"Plan: finalize disc ${d.ordinal} (seal; no new files)."
+      else "Nothing to burn: no changes to plan."
     else
       val kind = if d.isNew then "new disc" else s"appending to open disc ${d.ordinal}"
       val fin  = if d.willFinalize then "will FINALIZE" else "left OPEN"

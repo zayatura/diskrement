@@ -36,6 +36,7 @@ lazy val shell = (project in file("shell"))
 lazy val cli = (project in file("cli"))
   .dependsOn(shell)
   .enablePlugins(JavaAppPackaging)
+  .configs(IntegrationTest)
   .settings(
     name := "diskrement",
     executableScriptName := "diskrement",
@@ -43,9 +44,19 @@ lazy val cli = (project in file("cli"))
     libraryDependencies ++= Seq(
       "dev.zio" %% "zio-cli"      % zioCliVersion,
       "dev.zio" %% "zio-test"     % zioVersion % Test,
-      "dev.zio" %% "zio-test-sbt" % zioVersion % Test
+      "dev.zio" %% "zio-test-sbt" % zioVersion % Test,
+      "dev.zio" %% "zio-test"     % zioVersion % IntegrationTest,
+      "dev.zio" %% "zio-test-sbt" % zioVersion % IntegrationTest
     ),
-    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
+    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
+    Defaults.itSettings,
+    IntegrationTest / fork := true,
+    IntegrationTest / parallelExecution := false,
+    // Build the launcher before IT runs, and hand its path to the tests.
+    IntegrationTest / javaOptions += {
+      val stagedDir = (Universal / stage).value
+      s"-Ddiskrement.bin=${(stagedDir / "bin" / "diskrement").getAbsolutePath}"
+    }
   )
 
 lazy val root = (project in file("."))
