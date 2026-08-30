@@ -517,6 +517,14 @@ object MediaParseSpec extends ZIOSpecDefault:
     "Media summary: 3 sessions, 57 data blocks,  114k data, 0 free",
     "Media space  : 0s")
 
+  // Real captured output (2026-08-30, Pioneer BDR-UD04, a POW-formatted BD-R):
+  // such media cannot take sequential multisession burns and must be refused clearly.
+  private val unsuitableFixture = List(
+    "Media current: BD-R sequential recording, Pseudo Overwrite formatted",
+    "Media status : is unsuitable , is POW formatted",
+    "Media summary: unsuitable Pseudo Overwrite formatted BD-R",
+    "Media space  : 248768s")
+
   def spec = suite("MediaParseSpec")(
     test("blank media") {
       assertTrue(MediaParse.parse(blankFixture) ==
@@ -528,6 +536,10 @@ object MediaParseSpec extends ZIOSpecDefault:
     },
     test("written but not appendable parses as Closed") {
       assertTrue(MediaParse.parse(closedFixture) == Right(RawMediaInfo(RawStatus.Closed, 3, 0L)))
+    },
+    test("POW-formatted BD-R parses as Unsuitable") {
+      assertTrue(MediaParse.parse(unsuitableFixture) ==
+        Right(RawMediaInfo(RawStatus.Unsuitable, 0, 248768L * 2048)))
     },
     test("no recognizable status is an error") {
       assertTrue(MediaParse.parse(List("Drive current: ...")).isLeft)
@@ -552,7 +564,7 @@ Expected: compile FAILURE.
 ```scala
 package diskrement.shell.burn
 
-enum RawStatus { case Blank, Appendable, Closed }
+enum RawStatus { case Blank, Appendable, Closed, Unsuitable }
 final case class RawMediaInfo(status: RawStatus, sessions: Int, freeBytes: Long)
 
 enum FailureKind { case NoMediaKind, PermissionKind, NotFoundKind, OtherKind }
@@ -568,6 +580,7 @@ object MediaParse:
   def parse(lines: List[String]): Either[String, RawMediaInfo] =
     val status = lines.collectFirst {
       case l if l.contains("Media status") && l.contains("is blank")      => RawStatus.Blank
+      case l if l.contains("Media status") && l.contains("is unsuitable") => RawStatus.Unsuitable
       case l if l.contains("Media status") && l.contains("is appendable") => RawStatus.Appendable
       case l if l.contains("Media status") && l.contains("is written")    => RawStatus.Closed
     }
@@ -707,6 +720,8 @@ enum MediaStatus:
   case Blank(freeBytes: Long)
   case Appendable(freeBytes: Long, sessions: Int, identity: Option[DiscIdentity])
   case Closed(identity: Option[DiscIdentity])
+  /** Media libburn refuses to write sequentially, e.g. a POW-formatted BD-R. */
+  case Unsuitable
 
 /** Interrogates the medium in a device: state, free space, and — for written
   * diskrement discs — the identity embedded in the last session. */
@@ -734,6 +749,8 @@ final case class XorrisoMediaInspectorLive(runner: CmdRunner) extends MediaInspe
             readIdentity(device).map(MediaStatus.Appendable(free, sessions, _))
           case Right(RawMediaInfo(RawStatus.Closed, _, _)) =>
             readIdentity(device).map(MediaStatus.Closed(_))
+          case Right(RawMediaInfo(RawStatus.Unsuitable, _, _)) =>
+            ZIO.succeed(MediaStatus.Unsuitable)
     }
 
   def readIdentity(device: BurnDevice): IO[BurnError, Option[DiscIdentity]] =
@@ -1017,6 +1034,8 @@ final case class XorrisoBurnerLive(
             Left(s"disc '${found.projectName}' #${found.discOrdinal} at session ${found.sessionOrdinal}")
           case (MediaStatus.Appendable(_, _, None), _) => Left("a written non-diskrement disc")
           case (MediaStatus.Closed(_), _)              => Left("a finalized (closed) disc")
+          case (MediaStatus.Unsuitable, _) =>
+            Left("unsuitable media (e.g. a POW-formatted BD-R) — use a plain unformatted BD-R")
       }
 
     def loop: IO[BurnError, Long] =
@@ -2217,6 +2236,9 @@ Run on the dev machine (Pioneer BD-RW BDR-UD04, /dev/sr0) with one expendable
 BD-R (or BD-RE for repeatable drills) before declaring cycle 2 done.
 Prereq: `sudo usermod -aG optical $USER` + re-login (else expect the
 DevicePermissionDenied message — which is itself checklist item 0).
+Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
+"is unsuitable" to libburn and is refused (one such disc was in the drive on
+2026-08-30 — swap it out first).
 
 - [ ] 0. Without group membership: `diskrement burn ...` prints the
       optical-group hint and exits 6.
