@@ -2,7 +2,7 @@ package diskrement.shell.burn
 
 import zio._
 import zio.json._
-import java.nio.file.{Files, Path}
+import java.nio.file.Files
 
 enum MediaStatus:
   case NoMedia
