@@ -1,6 +1,7 @@
 package diskrement.cli
 
 import diskrement.core.RelPath
+import diskrement.shell.burn.BurnError
 import diskrement.shell.pipeline.*
 import zio.ExitCode
 import zio.test.*
@@ -26,6 +27,13 @@ object ExitMappingSpec extends ZIOSpecDefault:
     },
     test("Failed -> exit 5") {
       assertTrue(Render.handle(PipelineError.Failed(new RuntimeException("boom")))._2 == ExitCode(5))
+    },
+    test("Burn -> exit 6; an operator abort is a clean exit 0") {
+      val (abortMsg, abortCode) = Render.handle(PipelineError.Burn(BurnError.Aborted))
+      val (burnMsg, burnCode)   = Render.handle(PipelineError.Burn(BurnError.NoMedia("/dev/sr0")))
+      assertTrue(
+        abortCode == ExitCode(0), abortMsg == "Aborted.",
+        burnCode == ExitCode(6), burnMsg.contains("no disc in /dev/sr0"))
     },
     test("verifyExit: clean reports -> 0, any mismatch -> 4") {
       val clean = List(VerifyReport(1, 10, Nil))

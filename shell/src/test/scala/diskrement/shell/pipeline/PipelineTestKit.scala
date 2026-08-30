@@ -1,6 +1,6 @@
 package diskrement.shell.pipeline
 
-import diskrement.shell.burn.{Burner, SimulatedBurner, SnapshotWriter}
+import diskrement.shell.burn.{Burner, DiscVerifier, SimulatedBurner, SnapshotWriter}
 import diskrement.shell.catalog.{CatalogStore, Db, DbPath}
 import diskrement.shell.fs.*
 import zio.*
@@ -46,7 +46,7 @@ object PipelineTestKit:
   /** Fresh temp catalog + work dir per test, plus all real adapters except
     * SourceSnapshot (tests supply a FakeSnapshot via `mkPipeline`). */
   val env: ZLayer[Any, Throwable,
-      ProjectPaths & CatalogStore & FileScanner & Burner & StagedStore & Hasher] =
+      ProjectPaths & CatalogStore & FileScanner & Burner & DiscVerifier & StagedStore & Hasher] =
     val paths: ZLayer[Any, Throwable, ProjectPaths] =
       ZLayer.scoped {
         ZIO.acquireRelease(
@@ -56,25 +56,27 @@ object PipelineTestKit:
           })(p => ZIO.attempt(deleteRecursive(p.workDir.getParent)).orDie)
       }
     ZLayer.make[
-      ProjectPaths & CatalogStore & FileScanner & Burner & StagedStore & Hasher](
+      ProjectPaths & CatalogStore & FileScanner & Burner & DiscVerifier & StagedStore & Hasher](
       paths,
       ZLayer.fromFunction((p: ProjectPaths) => DbPath(p.catalogPath)),
       Db.poolLayer,
       FileSystem.live, Hasher.live, FileScanner.live,
-      SnapshotWriter.live, SimulatedBurner.live,
+      SnapshotWriter.live, SimulatedBurner.live, StagingDiscVerifier.live,
       StagedStore.live, CatalogStore.live
     )
 
   def mkPipeline(snapshot: SourceSnapshot): URIO[
-      ProjectPaths & CatalogStore & FileScanner & Burner & StagedStore & Hasher, Pipeline] =
+      ProjectPaths & CatalogStore & FileScanner & Burner & DiscVerifier & StagedStore & Hasher,
+      Pipeline] =
     for
-      paths   <- ZIO.service[ProjectPaths]
-      catalog <- ZIO.service[CatalogStore]
-      scanner <- ZIO.service[FileScanner]
-      burner  <- ZIO.service[Burner]
-      staged  <- ZIO.service[StagedStore]
-      hasher  <- ZIO.service[Hasher]
-    yield PipelineLive(catalog, scanner, snapshot, burner, staged, hasher, paths)
+      paths    <- ZIO.service[ProjectPaths]
+      catalog  <- ZIO.service[CatalogStore]
+      scanner  <- ZIO.service[FileScanner]
+      burner   <- ZIO.service[Burner]
+      verifier <- ZIO.service[DiscVerifier]
+      staged   <- ZIO.service[StagedStore]
+      hasher   <- ZIO.service[Hasher]
+    yield PipelineLive(catalog, scanner, snapshot, burner, verifier, staged, hasher, paths)
 
   /** A temp source tree on the same filesystem as the work dir (both under the system temp dir). */
   def makeSource(files: Map[String, String]): ZIO[Scope, Throwable, Path] =

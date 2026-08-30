@@ -1,6 +1,7 @@
 package diskrement.shell.pipeline
 
 import diskrement.core.RelPath
+import diskrement.shell.burn.BurnError
 import java.nio.file.Path
 
 /** Expected pipeline failures. Mirrors the other shell error ADTs. */
@@ -17,4 +18,5 @@ object PipelineError:
       extends PipelineError(s"work dir is not CoW-capable: $workDir [$detail]")
   final case class OversizedFiles(paths: List[RelPath])
       extends PipelineError(s"oversized files cannot be placed: ${paths.map(_.value).mkString(", ")}")
+  final case class Burn(cause: BurnError) extends PipelineError(cause.getMessage, cause)
   final case class Failed(cause: Throwable) extends PipelineError("pipeline failure", cause)

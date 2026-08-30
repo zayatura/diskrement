@@ -126,6 +126,7 @@ object Runner:
       Db.poolLayer,
       FileSystem.live, Hasher.live, FileScanner.live,
       SnapshotWriter.live, SimulatedBurner.live, SourceSnapshot.live,
+      StagingDiscVerifier.live,
       StagedStore.live, CatalogStore.live,
       Pipeline.live)
     ZIO.serviceWithZIO[Pipeline](use)

@@ -2,7 +2,7 @@ package diskrement.shell.pipeline
 
 import diskrement.core.*
 import diskrement.shell.catalog.CatalogStore
-import diskrement.shell.burn.Burner
+import diskrement.shell.burn.{Burner, DiscVerifier}
 import diskrement.shell.fs.{FileScanner, Hasher, SourceSnapshot}
 import diskrement.shell.model.*
 import zio.*
@@ -35,7 +35,8 @@ final case class BurnReport(disc: DiscBurn, remaining: RemainingEstimate)
 final case class StatusReport(
     discs: List[DiscState], openDiscOrdinal: Option[Int],
     totalCurrentFiles: Int, lastBurnAt: Option[Instant])
-final case class VerifyReport(discOrdinal: Int, filesChecked: Int, mismatches: List[RelPath])
+final case class VerifyReport(
+    discOrdinal: Int, filesChecked: Int, mismatches: List[RelPath], skipped: Boolean = false)
 
 /** Staged orchestration of the whole workflow. Methods return data; the CLI (3b)
   * renders it. Grows across Plan 3a tasks. */
@@ -51,7 +52,8 @@ trait Pipeline:
 
 object Pipeline:
   val live: ZLayer[
-    ProjectPaths & CatalogStore & FileScanner & SourceSnapshot & Burner & StagedStore & Hasher,
+    ProjectPaths & CatalogStore & FileScanner & SourceSnapshot & Burner & DiscVerifier &
+      StagedStore & Hasher,
     Nothing, Pipeline] =
     ZLayer {
       for
@@ -60,7 +62,8 @@ object Pipeline:
         scanner  <- ZIO.service[FileScanner]
         snapshot <- ZIO.service[SourceSnapshot]
         burner   <- ZIO.service[Burner]
+        verifier <- ZIO.service[DiscVerifier]
         staged   <- ZIO.service[StagedStore]
         hasher   <- ZIO.service[Hasher]
-      yield PipelineLive(catalog, scanner, snapshot, burner, staged, hasher, paths)
+      yield PipelineLive(catalog, scanner, snapshot, burner, verifier, staged, hasher, paths)
     }
