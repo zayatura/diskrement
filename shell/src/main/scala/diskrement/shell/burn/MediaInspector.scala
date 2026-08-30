@@ -40,6 +40,8 @@ final case class XorrisoMediaInspectorLive(runner: CmdRunner) extends MediaInspe
             readIdentity(device).map(MediaStatus.Closed(_))
           case Right(RawMediaInfo(RawStatus.Unsuitable, _, _)) =>
             ZIO.succeed(MediaStatus.Unsuitable)
+          case Right(RawMediaInfo(RawStatus.NotPresent, _, _)) =>
+            ZIO.succeed(MediaStatus.NoMedia)
     }
 
   def readIdentity(device: BurnDevice): IO[BurnError, Option[DiscIdentity]] =

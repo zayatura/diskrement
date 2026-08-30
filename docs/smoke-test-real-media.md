@@ -22,13 +22,14 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       re-prompt, then decline: "Aborted.", exit 0, catalog unchanged.
 - [ ] 5. `verify` again: with a version superseded in-disc (the modified file),
       confirm Tier 2 ran (superseded version extracted and OK).
-- [ ] 6. `plan --finalize` + `burn`: confirm the disc closes. Record the exact
-      `Media status` line of the closed disc here: ________________ and update
-      `MediaParseSpec`'s closedFixture if it differs from `is written , is closed`.
+- [x] 6. `plan --finalize` + `burn`: confirm the disc closes. Record the exact
+      `Media status` line of the closed disc here: `Media status : is written , is closed`
+      (captured 2026-08-30; matches closedFixture verbatim — no parser change needed).
 - [ ] 7. Attempt a top-off of the finalized disc: confirm DiscClosed refusal.
-- [ ] 8. Empty tray: run `burn` with no disc; record the exact failure text:
-      ________________ and update `MediaParse.classifyFailure` candidates if it
-      is not matched.
+- [x] 8. Empty tray: run `burn` with no disc; record the exact failure text:
+      NOT a failure — xorriso exits 0 with `Media status : is not present`
+      (captured 2026-08-30). Fixed in `MediaParse.parse` (RawStatus.NotPresent →
+      MediaStatus.NoMedia); `classifyFailure` unchanged.
 - [ ] 9. `verify` with the disc in another machine's drive or after remount —
       optional bit-rot drill.
 

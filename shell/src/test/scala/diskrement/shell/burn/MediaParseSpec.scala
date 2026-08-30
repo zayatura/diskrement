@@ -35,6 +35,15 @@ object MediaParseSpec extends ZIOSpecDefault:
     "Media summary: unsuitable Pseudo Overwrite formatted BD-R",
     "Media space  : 248768s")
 
+  // Real captured output (2026-08-30, Pioneer BDR-UD04, empty tray): xorriso
+  // exits 0 — an absent disc is a media status, not a failure.
+  private val emptyTrayFixture = List(
+    "xorriso : NOTE : Disc status unsuitable for writing",
+    "Drive current: -outdev '/dev/sr0'",
+    "Media current: is not recognizable",
+    "Media status : is not present",
+    "Media space  : 0s")
+
   def spec = suite("MediaParseSpec")(
     test("blank media") {
       assertTrue(MediaParse.parse(blankFixture) ==
@@ -50,6 +59,10 @@ object MediaParseSpec extends ZIOSpecDefault:
     test("POW-formatted BD-R parses as Unsuitable") {
       assertTrue(MediaParse.parse(unsuitableFixture) ==
         Right(RawMediaInfo(RawStatus.Unsuitable, 0, 248768L * 2048)))
+    },
+    test("empty tray (exit 0) parses as NotPresent") {
+      assertTrue(MediaParse.parse(emptyTrayFixture) ==
+        Right(RawMediaInfo(RawStatus.NotPresent, 0, 0L)))
     },
     test("no recognizable status is an error") {
       assertTrue(MediaParse.parse(List("Drive current: ...")).isLeft)

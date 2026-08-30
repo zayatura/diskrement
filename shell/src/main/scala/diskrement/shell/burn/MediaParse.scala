@@ -1,6 +1,6 @@
 package diskrement.shell.burn
 
-enum RawStatus { case Blank, Appendable, Closed, Unsuitable }
+enum RawStatus { case Blank, Appendable, Closed, Unsuitable, NotPresent }
 final case class RawMediaInfo(status: RawStatus, sessions: Int, freeBytes: Long)
 
 enum FailureKind { case NoMediaKind, PermissionKind, NotFoundKind, OtherKind }
@@ -15,6 +15,7 @@ object MediaParse:
 
   def parse(lines: List[String]): Either[String, RawMediaInfo] =
     val status = lines.collectFirst {
+      case l if l.contains("Media status") && l.contains("is not present") => RawStatus.NotPresent
       case l if l.contains("Media status") && l.contains("is blank")      => RawStatus.Blank
       case l if l.contains("Media status") && l.contains("is unsuitable") => RawStatus.Unsuitable
       case l if l.contains("Media status") && l.contains("is appendable") => RawStatus.Appendable

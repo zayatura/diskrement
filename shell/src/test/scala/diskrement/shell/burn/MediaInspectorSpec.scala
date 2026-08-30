@@ -48,6 +48,11 @@ object MediaInspectorSpec extends ZIOSpecDefault:
         case other                              => assertNever(s"unexpected: $other")
       }
     },
+    test("empty tray with exit 0 and 'is not present' maps to NoMedia") {
+      val runner = FakeCmdRunner(_ => ZIO.succeed(CmdResult(0, List(
+        "Media current: is not recognizable", "Media status : is not present", "Media space  : 0s"))))
+      XorrisoMediaInspectorLive(runner).inspect(dev).map(s => assertTrue(s == MediaStatus.NoMedia))
+    },
     test("empty tray maps to NoMedia") {
       val runner = FakeCmdRunner(_ => ZIO.succeed(CmdResult(5, List("libburn : SORRY : No disc loaded, not ready"))))
       XorrisoMediaInspectorLive(runner).inspect(dev).map(s => assertTrue(s == MediaStatus.NoMedia))
