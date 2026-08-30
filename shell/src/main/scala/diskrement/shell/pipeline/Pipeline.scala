@@ -2,7 +2,7 @@ package diskrement.shell.pipeline
 
 import diskrement.core.*
 import diskrement.shell.catalog.CatalogStore
-import diskrement.shell.burn.SimulatedBurner
+import diskrement.shell.burn.Burner
 import diskrement.shell.fs.{FileScanner, Hasher, SourceSnapshot}
 import diskrement.shell.model.*
 import zio.*
@@ -51,7 +51,7 @@ trait Pipeline:
 
 object Pipeline:
   val live: ZLayer[
-    ProjectPaths & CatalogStore & FileScanner & SourceSnapshot & SimulatedBurner & StagedStore & Hasher,
+    ProjectPaths & CatalogStore & FileScanner & SourceSnapshot & Burner & StagedStore & Hasher,
     Nothing, Pipeline] =
     ZLayer {
       for
@@ -59,7 +59,7 @@ object Pipeline:
         catalog  <- ZIO.service[CatalogStore]
         scanner  <- ZIO.service[FileScanner]
         snapshot <- ZIO.service[SourceSnapshot]
-        burner   <- ZIO.service[SimulatedBurner]
+        burner   <- ZIO.service[Burner]
         staged   <- ZIO.service[StagedStore]
         hasher   <- ZIO.service[Hasher]
       yield PipelineLive(catalog, scanner, snapshot, burner, staged, hasher, paths)

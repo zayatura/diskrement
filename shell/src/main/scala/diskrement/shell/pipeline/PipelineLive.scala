@@ -2,7 +2,7 @@ package diskrement.shell.pipeline
 
 import diskrement.core.*
 import diskrement.shell.catalog.CatalogStore
-import diskrement.shell.burn.{DiscIdentity, DiscImage, DiscMetadata, ManifestJson, SimulatedBurner}
+import diskrement.shell.burn.{Burner, DiscIdentity, DiscImage, DiscMetadata, ManifestJson}
 import zio.json.*
 import diskrement.shell.fs.{FileScanner, Hasher, SnapshotHandle, SourceSnapshot}
 import diskrement.shell.model.*
@@ -14,7 +14,7 @@ private[pipeline] final case class PipelineLive(
     catalog: CatalogStore,
     scanner: FileScanner,
     snapshot: SourceSnapshot,
-    burner: SimulatedBurner,
+    burner: Burner,
     staged: StagedStore,
     hasher: Hasher,
     paths: ProjectPaths
@@ -166,7 +166,7 @@ private[pipeline] final case class PipelineLive(
       meta       = DiscMetadata(identity, manifest, tmpCatalog, pointers)
       image      = DiscImage(
                      paths.workDir.resolve("staging").resolve(s"disc-${disc.ordinal}"),
-                     snapRoot, disc.files, meta)
+                     snapRoot, disc.files, meta, closeDisc = disc.willFinalize)
       burned    <- burner.burn(image).mapError(PipelineError.Failed(_))
       // Commit the single session only after the disc is staged — the crash-safe
       // commit point. The committed state equals the embedded snapshot.

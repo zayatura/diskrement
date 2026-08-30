@@ -1,6 +1,6 @@
 package diskrement.shell.pipeline
 
-import diskrement.shell.burn.{SimulatedBurner, SnapshotWriter}
+import diskrement.shell.burn.{Burner, SimulatedBurner, SnapshotWriter}
 import diskrement.shell.catalog.{CatalogStore, Db, DbPath}
 import diskrement.shell.fs.*
 import zio.*
@@ -46,7 +46,7 @@ object PipelineTestKit:
   /** Fresh temp catalog + work dir per test, plus all real adapters except
     * SourceSnapshot (tests supply a FakeSnapshot via `mkPipeline`). */
   val env: ZLayer[Any, Throwable,
-      ProjectPaths & CatalogStore & FileScanner & SimulatedBurner & StagedStore & Hasher] =
+      ProjectPaths & CatalogStore & FileScanner & Burner & StagedStore & Hasher] =
     val paths: ZLayer[Any, Throwable, ProjectPaths] =
       ZLayer.scoped {
         ZIO.acquireRelease(
@@ -56,7 +56,7 @@ object PipelineTestKit:
           })(p => ZIO.attempt(deleteRecursive(p.workDir.getParent)).orDie)
       }
     ZLayer.make[
-      ProjectPaths & CatalogStore & FileScanner & SimulatedBurner & StagedStore & Hasher](
+      ProjectPaths & CatalogStore & FileScanner & Burner & StagedStore & Hasher](
       paths,
       ZLayer.fromFunction((p: ProjectPaths) => DbPath(p.catalogPath)),
       Db.poolLayer,
@@ -66,12 +66,12 @@ object PipelineTestKit:
     )
 
   def mkPipeline(snapshot: SourceSnapshot): URIO[
-      ProjectPaths & CatalogStore & FileScanner & SimulatedBurner & StagedStore & Hasher, Pipeline] =
+      ProjectPaths & CatalogStore & FileScanner & Burner & StagedStore & Hasher, Pipeline] =
     for
       paths   <- ZIO.service[ProjectPaths]
       catalog <- ZIO.service[CatalogStore]
       scanner <- ZIO.service[FileScanner]
-      burner  <- ZIO.service[SimulatedBurner]
+      burner  <- ZIO.service[Burner]
       staged  <- ZIO.service[StagedStore]
       hasher  <- ZIO.service[Hasher]
     yield PipelineLive(catalog, scanner, snapshot, burner, staged, hasher, paths)
