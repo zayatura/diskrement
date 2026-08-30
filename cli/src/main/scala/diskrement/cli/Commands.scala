@@ -22,8 +22,13 @@ object Commands:
   // --- global options, parsed by the parent command ---
   private val catalogOpt: Options[Option[Path]] = Options.text("catalog").map(path).optional
   private val dataDirOpt: Options[Option[Path]] = Options.text("data-dir").map(path).optional
+  private val deviceOpt:  Options[Option[String]] = Options.text("device").optional
+  private val burnerOpt:  Options[Option[BurnerKind]] =
+    Options.enumeration("burner")("real" -> BurnerKind.Real, "simulated" -> BurnerKind.Simulated).optional
   private val globalOpts: Options[GlobalOpts] =
-    (catalogOpt ++ dataDirOpt).map { case (c, d) => GlobalOpts(c, d) }
+    (catalogOpt ++ dataDirOpt ++ deviceOpt ++ burnerOpt).map { case (c, d, dev, b) =>
+      GlobalOpts(c, d, dev, b)
+    }
 
   // --- init ---
   private val init: Command[DiskrementCommand] =
