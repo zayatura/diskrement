@@ -22,6 +22,7 @@ final class Cli(scratch: Scratch, discBytes: Option[Long]):
     env.put("HOME", scratch.home.toString)
     env.put("XDG_DATA_HOME", scratch.xdg.toString)
     env.put("STATE_DIRECTORY", scratch.state.toString)
+    env.put("DISKREMENT_BURNER", "simulated")
     discBytes match
       case Some(b) => env.put("DISKREMENT_DISC_BYTES", b.toString)
       case None    => env.remove("DISKREMENT_DISC_BYTES")

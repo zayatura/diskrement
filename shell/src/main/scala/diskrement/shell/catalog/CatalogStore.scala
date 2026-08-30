@@ -28,6 +28,11 @@ trait CatalogStore:
     * session — i.e. exactly what the (simulated) burner stages on that disc. Used by
     * verify to validate a disc against its own recorded contents, not the current view. */
   def placementsForDisc(project: ProjectId, discOrdinal: Int): IO[CatalogError, Map[RelPath, ContentHash]]
+  /** Everything recorded as physically on `discOrdinal`: the merged view a mount
+    * of the disc shows (later sessions hide same-path versions from earlier
+    * ones), plus those hidden ("superseded within disc") versions with the
+    * session that recorded them. Powers two-tier read-back verify. */
+  def discRecordedContents(project: ProjectId, discOrdinal: Int): IO[CatalogError, DiscRecordedContents]
 
 object CatalogStore:
   /** Build the store from a pool, running migrations once at layer construction. */

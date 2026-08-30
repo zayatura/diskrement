@@ -44,7 +44,8 @@ object CliSmokeSpec extends ZIOSpecDefault:
                          })(b => ZIO.attempt(deleteRecursive(b)).orDie).orDie
             src      = base.resolve("src").toString
             work     = base.resolve("work").toString
-            global   = GlobalOpts(catalog = Some(base.resolve("data/photos.sqlite")), dataDir = None)
+            global   = GlobalOpts(catalog = Some(base.resolve("data/photos.sqlite")), dataDir = None,
+                         burner = Some(BurnerKind.Simulated))
 
             c1      <- Runner.run(global, DiskrementCommand.Init("photos", java.nio.file.Paths.get(src),
                          java.nio.file.Paths.get(work), diskrement.core.DiscType.BD_R, 2.0, 1))
@@ -70,7 +71,8 @@ object CliSmokeSpec extends ZIOSpecDefault:
         for
           base  <- ZIO.acquireRelease(
                      ZIO.attempt(Files.createTempDirectory("cli-missing")))(p => ZIO.attempt(deleteRecursive(p)).orDie).orDie
-          global = GlobalOpts(catalog = Some(base.resolve("nope.sqlite")), dataDir = None)
+          global = GlobalOpts(catalog = Some(base.resolve("nope.sqlite")), dataDir = None,
+                     burner = Some(BurnerKind.Simulated))
           code  <- Runner.run(global, DiskrementCommand.Status("ghost"))
         yield assertTrue(code == ExitCode(2))
       }

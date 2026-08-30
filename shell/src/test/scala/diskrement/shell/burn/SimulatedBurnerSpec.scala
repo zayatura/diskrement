@@ -48,8 +48,8 @@ object SimulatedBurnerSpec extends ZIOSpecDefault:
           files = List(
             ScannedFile(RelPath("a.txt"), ContentHash(sha256("aaa")), 3, ts),
             ScannedFile(RelPath("sub/b.txt"), ContentHash(sha256("bbbb")), 4, ts))
-          image = DiscImage(staging, snap, files, meta(cat, files))
-          res   <- ZIO.serviceWithZIO[SimulatedBurner](_.burn(image))
+          image = DiscImage(staging, snap, files, meta(cat, files), closeDisc = false)
+          res   <- ZIO.serviceWithZIO[Burner](_.burn(image))
           aTxt  <- ZIO.attempt(Files.readString(staging.resolve("data/a.txt")))
           bTxt  <- ZIO.attempt(Files.readString(staging.resolve("data/sub/b.txt")))
           hasManifest <- ZIO.attempt(Files.exists(staging.resolve(".diskrement/manifest.json")))
@@ -62,8 +62,8 @@ object SimulatedBurnerSpec extends ZIOSpecDefault:
           world <- makeWorld
           (snap, staging, cat) = world
           files = List(ScannedFile(RelPath("a.txt"), ContentHash("deadbeef"), 3, ts))
-          image = DiscImage(staging, snap, files, meta(cat, files))
-          err   <- ZIO.serviceWithZIO[SimulatedBurner](_.burn(image)).flip
+          image = DiscImage(staging, snap, files, meta(cat, files), closeDisc = false)
+          err   <- ZIO.serviceWithZIO[Burner](_.burn(image)).flip
         yield assertTrue(err.isInstanceOf[BurnError.HashMismatch])
       },
     test("aborts with SourceFileMissing when a planned file is absent"):
@@ -72,8 +72,8 @@ object SimulatedBurnerSpec extends ZIOSpecDefault:
           world <- makeWorld
           (snap, staging, cat) = world
           files = List(ScannedFile(RelPath("ghost.txt"), ContentHash(sha256("x")), 1, ts))
-          image = DiscImage(staging, snap, files, meta(cat, files))
-          err   <- ZIO.serviceWithZIO[SimulatedBurner](_.burn(image)).flip
+          image = DiscImage(staging, snap, files, meta(cat, files), closeDisc = false)
+          err   <- ZIO.serviceWithZIO[Burner](_.burn(image)).flip
         yield assertTrue(err.isInstanceOf[BurnError.SourceFileMissing])
       }
   ).provideLayer((Hasher.live ++ SnapshotWriter.live) >>> SimulatedBurner.live)

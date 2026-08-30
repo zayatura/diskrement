@@ -1,6 +1,7 @@
 package diskrement.cli
 
 import diskrement.core.*
+import diskrement.shell.burn.BurnError
 import diskrement.shell.model.*
 import diskrement.shell.pipeline.*
 import zio.ExitCode
@@ -57,7 +58,8 @@ object Render:
   def verify(reports: List[VerifyReport]): String =
     if reports.isEmpty then "Nothing to verify: no burned discs."
     else reports.map { v =>
-      if v.mismatches.isEmpty then s"disc ${v.discOrdinal}: ${v.filesChecked} files OK ✓"
+      if v.skipped then s"disc ${v.discOrdinal}: skipped (not checked)"
+      else if v.mismatches.isEmpty then s"disc ${v.discOrdinal}: ${v.filesChecked} files OK ✓"
       else s"disc ${v.discOrdinal}: ${v.filesChecked} checked, ${v.mismatches.size} MISMATCH:\n" +
         v.mismatches.map(p => s"  ${p.value}").mkString("\n")
     }.mkString("\n")
@@ -83,8 +85,11 @@ object Render:
       case _: PipelineError.NotSameFilesystem => ExitCode(3)
       case _: PipelineError.NotCowCapable     => ExitCode(3)
       case _: PipelineError.OversizedFiles    => ExitCode(3)
+      case PipelineError.Burn(BurnError.Aborted) => ExitCode(0)
+      case _: PipelineError.Burn              => ExitCode(6)
       case _: PipelineError.Failed            => ExitCode(5)
     val message = e match
+      case PipelineError.Burn(BurnError.Aborted) => "Aborted."
       case PipelineError.Failed(cause) =>
         val detail = Option(cause.getMessage).getOrElse(cause.getClass.getSimpleName)
         s"internal error: $detail (this is a bug)"

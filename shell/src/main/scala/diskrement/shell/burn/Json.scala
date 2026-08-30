@@ -14,6 +14,10 @@ object ProjectJson:
   given JsonCodec[ProjectJson] = DeriveJsonCodec.gen[ProjectJson]
   def from(id: DiscIdentity): ProjectJson =
     ProjectJson(id.projectName, id.discOrdinal, id.sessionOrdinal, id.createdAt.toString)
+  def toIdentity(p: ProjectJson): Either[String, DiscIdentity] =
+    try Right(DiscIdentity(p.projectName, p.discOrdinal, p.sessionOrdinal,
+      java.time.Instant.parse(p.createdAt)))
+    catch case e: Exception => Left(s"bad createdAt in project.json: ${e.getMessage}")
 
 final case class ManifestEntryJson(relPath: String, contentHash: String, sizeBytes: Long)
 object ManifestEntryJson:

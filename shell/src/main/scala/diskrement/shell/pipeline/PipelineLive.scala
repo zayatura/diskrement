@@ -2,19 +2,20 @@ package diskrement.shell.pipeline
 
 import diskrement.core.*
 import diskrement.shell.catalog.CatalogStore
-import diskrement.shell.burn.{DiscIdentity, DiscImage, DiscMetadata, ManifestJson, SimulatedBurner}
+import diskrement.shell.burn.{
+  Burner, DiscExpectation, DiscIdentity, DiscImage, DiscMetadata, DiscVerifier, ManifestJson}
 import zio.json.*
 import diskrement.shell.fs.{FileScanner, Hasher, SnapshotHandle, SourceSnapshot}
 import diskrement.shell.model.*
 import zio.*
 import java.nio.file.{Files, Path}
-import scala.jdk.StreamConverters.*
 
 private[pipeline] final case class PipelineLive(
     catalog: CatalogStore,
     scanner: FileScanner,
     snapshot: SourceSnapshot,
-    burner: SimulatedBurner,
+    burner: Burner,
+    verifier: DiscVerifier,
     staged: StagedStore,
     hasher: Hasher,
     paths: ProjectPaths
@@ -166,8 +167,8 @@ private[pipeline] final case class PipelineLive(
       meta       = DiscMetadata(identity, manifest, tmpCatalog, pointers)
       image      = DiscImage(
                      paths.workDir.resolve("staging").resolve(s"disc-${disc.ordinal}"),
-                     snapRoot, disc.files, meta)
-      burned    <- burner.burn(image).mapError(PipelineError.Failed(_))
+                     snapRoot, disc.files, meta, closeDisc = disc.willFinalize)
+      burned    <- burner.burn(image).mapError(PipelineError.Burn(_))
       // Commit the single session only after the disc is staged — the crash-safe
       // commit point. The committed state equals the embedded snapshot.
       _         <- catalog.applyUpdate(update).mapError(PipelineError.Failed(_))
@@ -225,31 +226,20 @@ private[pipeline] final case class PipelineLive(
       states   <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
       sessions <- catalog.sessionsByState(p.id, SessionState.BURNED).mapError(PipelineError.Failed(_))
       targets   = states.map(_.ordinal).filter(o => discOrdinal.forall(_ == o))
-      reps     <- ZIO.foreach(targets)(o => verifyDisc(p.id, o, sessions))
+      reps     <- ZIO.foreach(targets)(o => verifyDisc(p, o, sessions))
     yield reps
 
   private def verifyDisc(
-      pid: ProjectId, ordinal: Int, sessions: List[Session]
+      p: Project, ordinal: Int, sessions: List[Session]
   ): IO[PipelineError, VerifyReport] =
-    val dataDir = paths.workDir.resolve("staging").resolve(s"disc-$ordinal").resolve("data")
     for
-      discMap <- catalog.placementsForDisc(pid, ordinal).mapError(PipelineError.Failed(_))
-      existed <- ZIO.attemptBlockingIO(Files.exists(dataDir)).mapError(PipelineError.Failed(_))
-      files <- ZIO.attemptBlockingIO {
-                 if existed then
-                   val s = Files.walk(dataDir)
-                   try s.toScala(List).filter(p => Files.isRegularFile(p))
-                   finally s.close()
-                 else Nil
-               }.mapError(PipelineError.Failed(_))
-      mismatches <- ZIO.foreach(files) { f =>
-                      val rel = RelPath(dataDir.relativize(f).toString)
-                      hasher.hash(f).mapError(PipelineError.Failed(_)).map { h =>
-                        Option.when(!discMap.get(rel).contains(h))(rel)
-                      }
-                    }.map(_.flatten)
-      _ <- ZIO.when(existed && mismatches.isEmpty)(
-             sessions.filter(_.discOrdinal == ordinal).lastOption match
-               case Some(s) => catalog.markVerified(pid, ordinal, s.ordinal).mapError(PipelineError.Failed(_))
-               case None    => ZIO.unit)
-    yield VerifyReport(ordinal, files.size, mismatches)
+      latest   <- catalog.placementsForDisc(p.id, ordinal).mapError(PipelineError.Failed(_))
+      recorded <- catalog.discRecordedContents(p.id, ordinal).mapError(PipelineError.Failed(_))
+      exp       = DiscExpectation(p.name, ordinal, latest, recorded.visible, recorded.superseded)
+      out      <- verifier.verify(exp).mapError(PipelineError.Burn(_))
+      _        <- ZIO.when(!out.skipped && out.mismatches.isEmpty)(
+                    sessions.filter(_.discOrdinal == ordinal).lastOption match
+                      case Some(s) => catalog.markVerified(p.id, ordinal, s.ordinal)
+                                        .mapError(PipelineError.Failed(_))
+                      case None    => ZIO.unit)
+    yield VerifyReport(ordinal, out.filesChecked, out.mismatches, out.skipped)

@@ -86,7 +86,8 @@ self-describing discs — all of these follow directly from "you can never undo 
 | Disc staging, `/.diskrement` layout, simulated burner | Done |
 | Pipeline orchestration (all 8 operations) | Done |
 | CLI adapter (argument parsing, prompts, output formatting) | Done |
-| Real disc burning (`xorriso` / `growisofs`) | Planned (Cycle 2) |
+| Real disc burning (xorriso, BD-R multisession) | Done (burn + read-back verify) |
+| Coaster workflow (mark-dead + re-plan) | Planned (Plan 4b) |
 
 The pipeline orchestration layer is fully tested with integration tests against
 real temp directories and a full scan → plan → burn → verify → history loop. The
@@ -108,6 +109,15 @@ diskrement history photos some/file.jpg
 
 The per-project catalog defaults to `$XDG_DATA_HOME/diskrement/<name>.sqlite`
 (or systemd's `$STATE_DIRECTORY`), overridable with `--catalog`.
+
+### Real burning
+
+The default backend burns real media via `xorriso` (ISO 9660 level 3 + Rock Ridge,
+multisession). Select the device and backend with `--device /dev/sr0` /
+`--burner real|simulated` (env: `DISKREMENT_DEVICE`, `DISKREMENT_BURNER`).
+Your user must be able to open the drive — on most distros that means membership
+in the `optical` group. `verify` mounts the disc via `udisks2` and re-hashes every
+file, including versions superseded by later sessions on the same disc.
 
 ---
 

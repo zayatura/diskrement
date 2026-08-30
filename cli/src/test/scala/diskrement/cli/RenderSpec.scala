@@ -102,6 +102,10 @@ object RenderSpec extends ZIOSpecDefault:
       val out = Render.verify(List(VerifyReport(1, 10, Nil)))
       assertTrue(out.contains("disc 1"), out.contains("10 files OK"), out.contains("✓"))
     },
+    test("verify: a skipped disc is reported as not checked") {
+      val out = Render.verify(List(VerifyReport(3, 0, Nil, skipped = true)))
+      assertTrue(out == "disc 3: skipped (not checked)")
+    },
     test("verify: mismatches are listed") {
       val out = Render.verify(List(VerifyReport(2, 5, List(RelPath("bad/file.jpg")))))
       assertTrue(out.contains("disc 2"), out.contains("MISMATCH"), out.contains("bad/file.jpg"))

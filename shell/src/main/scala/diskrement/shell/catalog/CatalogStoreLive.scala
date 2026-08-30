@@ -296,6 +296,25 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
         .query[(String, String)].selectAll
     }.map(_.toList.map { case (rp, ch) => RelPath(rp) -> ContentHash(ch) }.toMap)
 
+  def discRecordedContents(project: ProjectId, discOrdinal: Int): IO[CatalogError, DiscRecordedContents] =
+    tx {
+      sql"""select rp, ch, sess_ord, rn from (
+              select fv.rel_path as rp, fv.content_hash as ch, s.ordinal as sess_ord,
+                     row_number() over (partition by fv.rel_path order by s.ordinal desc, p.id desc) as rn
+              from placement p
+              join session s on s.id = p.session_id
+              join disc d on d.id = s.disc_id
+              join file_version fv on fv.id = p.file_version_id
+              where d.project_id = ${project.value} and d.ordinal = $discOrdinal
+            ) order by rp, rn"""
+        .query[(String, String, Int, Int)].selectAll
+    }.map { rows =>
+      val (vis, sup) = rows.toList.partition(_._4 == 1)
+      DiscRecordedContents(
+        visible = vis.map { case (rp, ch, _, _) => RelPath(rp) -> ContentHash(ch) }.toMap,
+        superseded = sup.map { case (rp, ch, sOrd, _) => SupersededVersion(sOrd, RelPath(rp), ContentHash(ch)) })
+    }
+
   def snapshotTo(dest: Path): IO[CatalogError, Unit] =
     transaction(sql"vacuum into ${dest.toString}".execute.unit)
       .provideEnvironment(ZEnvironment(pool))
