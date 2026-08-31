@@ -38,5 +38,7 @@ object HashParallelismSpec extends ZIOSpecDefault:
         a <- resolved
         _ <- TestSystem.putEnv("DISKREMENT_HASH_PARALLELISM", "100000")
         b <- resolved
-      yield assertTrue(a == 3, b == 64)
+        _ <- TestSystem.putEnv("DISKREMENT_HASH_PARALLELISM", "  ")
+        c <- resolved
+      yield assertTrue(a == 3, b == 64, c == 6)
   )

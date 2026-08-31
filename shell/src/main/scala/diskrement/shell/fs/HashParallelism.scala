@@ -14,15 +14,19 @@ object HashParallelism:
 
   /** Values above this are almost certainly a misunderstanding of the knob
     * (each hashing fiber holds an open stream and a 64 KiB buffer). */
-  private val MaxValue = 64
+  private val MaxParallelism = 64
 
   val fromEnv: ZLayer[Any, Nothing, HashParallelism] =
     ZLayer {
       zio.System.env("DISKREMENT_HASH_PARALLELISM").orElseSucceed(None).flatMap {
         case None => ZIO.succeed(default)
+        case Some(raw) if raw.trim.isEmpty => ZIO.succeed(default)
         case Some(raw) =>
           raw.trim.toIntOption.filter(_ > 0) match
-            case Some(n) => ZIO.succeed(HashParallelism(n min MaxValue))
+            case Some(n) if n > MaxParallelism =>
+              ZIO.logWarning(s"clamping DISKREMENT_HASH_PARALLELISM $n to $MaxParallelism")
+                .as(HashParallelism(MaxParallelism))
+            case Some(n) => ZIO.succeed(HashParallelism(n))
             case None =>
               ZIO.logWarning(
                 s"ignoring unusable DISKREMENT_HASH_PARALLELISM '$raw' (want a positive int); using ${default.value}")
