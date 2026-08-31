@@ -103,8 +103,12 @@ trait ProgressSink:
   def start(label: String, totalBytes: Long, totalFiles: Int): UIO[Unit]
   def advance(deltaBytes: Long, deltaFiles: Int): UIO[Unit]  // called per completed file
   def done: UIO[Unit]
+  // Consumers wrap each phase in this bracket: start before the work, done on
+  // ANY exit (success, failure, interrupt). [Added during Task 2 review.]
+  final def phase[R, E, A](label: String, totalBytes: Long, totalFiles: Int)(
+      work: ZIO[R, E, A]): ZIO[R, E, A]
 object ProgressSink:
-  val noop: ULayer[ProgressSink]
+  val noop: ZLayer[Any, Nothing, ProgressSink]
 ```
 
 CLI implementation (`diskrement.cli`): TTY → one carriage-return-refreshed stderr line,

@@ -598,14 +598,16 @@ final case class FileScannerLive(
       reused  = hits.map { case (_, rel, st) =>
                   ScannedFile(rel, prior(rel).contentHash, st.sizeBytes, st.mtime)
                 }
-      _      <- sink.start("hashing", misses.map(_._3.sizeBytes).sum, misses.size)
-      hashed <- ZIO.foreachPar(misses) { case (abs, rel, st) =>
-                  hasher.hash(abs)
-                    .mapBoth(ScanError.FileFailed(rel, _),
-                             h => ScannedFile(rel, h, st.sizeBytes, st.mtime))
-                    .zipLeft(sink.advance(st.sizeBytes, 1))
-                }.withParallelism(parallelism)
-      _      <- sink.done
+      // phase() brackets the hash work: start before, done on ANY exit
+      // (success, failure, interrupt) — never leave the TTY line half-drawn.
+      hashed <- sink.phase("hashing", misses.map(_._3.sizeBytes).sum, misses.size) {
+                  ZIO.foreachPar(misses) { case (abs, rel, st) =>
+                    hasher.hash(abs)
+                      .mapBoth(ScanError.FileFailed(rel, _),
+                               h => ScannedFile(rel, h, st.sizeBytes, st.mtime))
+                      .zipLeft(sink.advance(st.sizeBytes, 1))
+                  }.withParallelism(parallelism)
+                }
     yield ScanOutput((reused ++ hashed).sortBy(_.relPath), hashed.size)
 
 object FileScanner:
@@ -1157,10 +1159,10 @@ object Stager:
       _     <- clearAndCreate(dataDir)
       _     <- ZIO.foreachDiscard(image.files)(checkExists(image, _))
       _     <- copyAll(image, dataDir)
-      _     <- sink.start("staging", image.files.map(_.sizeBytes).sum, image.files.size)
-      _     <- ZIO.foreachParDiscard(image.files)(verifyOne(dataDir, hasher, sink, _))
-                 .withParallelism(parallelism)
-      _     <- sink.done
+      _     <- sink.phase("staging", image.files.map(_.sizeBytes).sum, image.files.size) {
+                 ZIO.foreachParDiscard(image.files)(verifyOne(dataDir, hasher, sink, _))
+                   .withParallelism(parallelism)
+               }
       _     <- writer.write(image.stagingDir.resolve(".diskrement"), image.metadata)
       bytes <- totalBytes(image.stagingDir)
     yield BurnResult(image.stagingDir, bytes)
