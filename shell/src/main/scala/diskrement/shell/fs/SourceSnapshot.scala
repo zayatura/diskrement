@@ -28,24 +28,22 @@ private[fs] trait Cloner:
 private[fs] final case class CpCloner() extends Cloner:
   def reflinkCopy(src: Path, dst: Path): IO[SnapshotError, Unit] =
     ZIO.attemptBlockingIO {
-      val proc = new ProcessBuilder(
-        "cp", "--reflink=always", "-a", src.toString, dst.toString).start()
+      val pb = new ProcessBuilder(
+        "cp", "--reflink=always", "-a", src.toString, dst.toString)
+      pb.environment().put("LC_ALL", "C")
+      val proc = pb.start()
       val stderr = new String(proc.getErrorStream.readAllBytes(), "UTF-8")
       val code   = proc.waitFor()
       (code, stderr)
     }.mapError(SnapshotError.SnapshotIoError(_))
       .flatMap { case (code, stderr) =>
         if code == 0 then ZIO.unit
-        else if isCloneUnsupported(stderr) then
+        else if Reflink.cloneUnsupported(stderr) then
           ZIO.fail(SnapshotError.NotCowCapable(dst.getParent, stderr.trim))
         else
           ZIO.fail(SnapshotError.SnapshotIoError(
             new RuntimeException(s"cp exited $code: ${stderr.trim}")))
       }
-
-  private def isCloneUnsupported(stderr: String): Boolean =
-    val s = stderr.toLowerCase
-    s.contains("failed to clone") || s.contains("operation not supported")
 
 /** Freezes the source tree by reflinking it to a deterministic dir under the
   * work dir. Lifecycle is explicit (create/release) and on-disk so it can span

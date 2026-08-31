@@ -1,13 +1,19 @@
 package diskrement.shell.pipeline
 
+import diskrement.core.RelPath
+import diskrement.shell.ProgressSink
 import diskrement.shell.burn.{Burner, DiscVerifier, SimulatedBurner, SnapshotWriter}
 import diskrement.shell.catalog.{CatalogStore, Db, DbPath}
 import diskrement.shell.fs.*
+import diskrement.shell.model.FileFingerprint
 import zio.*
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, StandardCopyOption}
 
 /** A fake SourceSnapshot that plain-copies the source tree (no CoW needed), so
-  * pipeline tests run anywhere. `cowOk` controls the init CoW check. */
+  * pipeline tests run anywhere. `cowOk` controls the init CoW check.
+  * Copies preserve mtime (COPY_ATTRIBUTES) to mirror the real cloner's
+  * `cp --reflink=always -a`, which is load-bearing for the fingerprint cache's
+  * fast path: a rescan must see the same (size, mtime) for an untouched file. */
 final case class FakeSnapshot(cowOk: Boolean = true) extends SourceSnapshot:
   def create(sourceRoot: Path, workDir: Path): IO[SnapshotError, SnapshotHandle] =
     ZIO.attemptBlockingIO {
@@ -22,7 +28,7 @@ final case class FakeSnapshot(cowOk: Boolean = true) extends SourceSnapshot:
         val rel = sourceRoot.relativize(p)
         val target = dst.resolve(rel.toString)
         if Files.isDirectory(p) then Files.createDirectories(target)
-        else { Files.createDirectories(target.getParent); Files.copy(p, target) }
+        else { Files.createDirectories(target.getParent); Files.copy(p, target, StandardCopyOption.COPY_ATTRIBUTES) }
       } finally s.close()
       SnapshotHandle(dst)
     }.mapError(SnapshotError.SnapshotIoError(_))
@@ -61,11 +67,14 @@ object PipelineTestKit:
       ZLayer.fromFunction((p: ProjectPaths) => DbPath(p.catalogPath)),
       Db.poolLayer,
       FileSystem.live, Hasher.live, FileScanner.live,
+      ProgressSink.noop, ZLayer.succeed(HashParallelism(4)),
       SnapshotWriter.live, SimulatedBurner.live, StagingDiscVerifier.live,
       StagedStore.live, CatalogStore.live
     )
 
-  def mkPipeline(snapshot: SourceSnapshot): URIO[
+  def mkPipeline(
+      snapshot: SourceSnapshot, failRead: Boolean = false, failWrite: Boolean = false
+  ): URIO[
       ProjectPaths & CatalogStore & FileScanner & Burner & DiscVerifier & StagedStore & Hasher,
       Pipeline] =
     for
@@ -76,7 +85,9 @@ object PipelineTestKit:
       verifier <- ZIO.service[DiscVerifier]
       staged   <- ZIO.service[StagedStore]
       hasher   <- ZIO.service[Hasher]
-    yield PipelineLive(catalog, scanner, snapshot, burner, verifier, staged, hasher, paths)
+      cacheRef <- Ref.make(Map.empty[RelPath, FileFingerprint])
+    yield PipelineLive(catalog, scanner, snapshot, burner, verifier, staged, hasher,
+      FakeFingerprintCache(cacheRef, failRead, failWrite), paths)
 
   /** A temp source tree on the same filesystem as the work dir (both under the system temp dir). */
   def makeSource(files: Map[String, String]): ZIO[Scope, Throwable, Path] =

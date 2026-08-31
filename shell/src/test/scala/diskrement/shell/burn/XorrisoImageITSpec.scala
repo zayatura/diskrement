@@ -48,7 +48,8 @@ object XorrisoImageITSpec extends ZIOSpecDefault:
       dev  = BurnDevice.ImageFile(iso)
       run  = CmdRunnerLive()
       insp = XorrisoMediaInspectorLive(run)
-      b    = XorrisoBurnerLive(dev, run, insp, ScriptedOperator(ans, log), hasher, SnapshotWriterLive())
+      b    = XorrisoBurnerLive(dev, run, insp, ScriptedOperator(ans, log), hasher, SnapshotWriterLive(),
+               diskrement.shell.ProgressSink.Noop, 2)
     yield (b, dev, run, insp)
 
   private def realSuite = suite("XorrisoImageITSpec")(

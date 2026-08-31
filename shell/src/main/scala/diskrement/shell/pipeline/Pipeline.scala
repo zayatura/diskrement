@@ -3,7 +3,7 @@ package diskrement.shell.pipeline
 import diskrement.core.*
 import diskrement.shell.catalog.CatalogStore
 import diskrement.shell.burn.{Burner, DiscVerifier}
-import diskrement.shell.fs.{FileScanner, Hasher, SourceSnapshot}
+import diskrement.shell.fs.{FileScanner, FingerprintCache, Hasher, SourceSnapshot}
 import diskrement.shell.model.*
 import zio.*
 import java.nio.file.Path
@@ -16,7 +16,13 @@ import java.time.Instant
 /** Where a project's catalog DB and work dir live (resolved by the CLI in 3b). */
 final case class ProjectPaths(catalogPath: Path, workDir: Path)
 
-final case class ScanResult(added: Int, modified: Int, deleted: Int, unchanged: Int)
+final case class ScanResult(
+    added: Int, modified: Int, deleted: Int, unchanged: Int,
+    /** Files freshly hashed this run; None when a staged scan was reused
+      * (no scan ran, so nothing was hashed or reused). */
+    hashed: Option[Int],
+    /** Total files in the scan (the denominator for `hashed`). */
+    scannedFiles: Int)
 
 /** How much outstanding change did NOT fit on the disc planned this cycle. */
 final case class RemainingEstimate(moreDiscs: Int, moreFiles: Int, moreBytes: Long)
@@ -53,7 +59,7 @@ trait Pipeline:
 object Pipeline:
   val live: ZLayer[
     ProjectPaths & CatalogStore & FileScanner & SourceSnapshot & Burner & DiscVerifier &
-      StagedStore & Hasher,
+      StagedStore & Hasher & FingerprintCache,
     Nothing, Pipeline] =
     ZLayer {
       for
@@ -65,5 +71,6 @@ object Pipeline:
         verifier <- ZIO.service[DiscVerifier]
         staged   <- ZIO.service[StagedStore]
         hasher   <- ZIO.service[Hasher]
-      yield PipelineLive(catalog, scanner, snapshot, burner, verifier, staged, hasher, paths)
+        cache    <- ZIO.service[FingerprintCache]
+      yield PipelineLive(catalog, scanner, snapshot, burner, verifier, staged, hasher, cache, paths)
     }

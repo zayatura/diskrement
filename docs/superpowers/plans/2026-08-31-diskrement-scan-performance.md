@@ -332,12 +332,22 @@ import zio._
 /** Operator-facing progress for long byte-crunching phases (scan hashing, burn
   * staging). The pipeline reports through this port so it stays free of
   * console I/O; the CLI provides a stderr renderer, tests use the no-op.
-  * `advance` is called from parallel fibers — implementations must be
-  * thread-safe and cheap. */
+  *
+  * Lifecycle: wrap each phase in `phase(...)` — it calls `start` before the
+  * work and guarantees `done` on success, failure, AND interrupt (so a TTY
+  * renderer can always terminate its in-place line). One sink instance may run
+  * several phases in sequence (e.g. scan hashing, then burn staging); `start`
+  * resets any accumulated state. `advance` is called from parallel fibers —
+  * implementations must be thread-safe and cheap. */
 trait ProgressSink:
   def start(label: String, totalBytes: Long, totalFiles: Int): UIO[Unit]
   def advance(deltaBytes: Long, deltaFiles: Int): UIO[Unit]
   def done: UIO[Unit]
+
+  /** Bracket one phase: `start` before `work`, `done` on any exit. */
+  final def phase[R, E, A](label: String, totalBytes: Long, totalFiles: Int)(
+      work: ZIO[R, E, A]): ZIO[R, E, A] =
+    start(label, totalBytes, totalFiles) *> work.ensuring(done)
 
 object ProgressSink:
   object Noop extends ProgressSink:
@@ -345,7 +355,7 @@ object ProgressSink:
     def advance(deltaBytes: Long, deltaFiles: Int): UIO[Unit]              = ZIO.unit
     def done: UIO[Unit]                                                    = ZIO.unit
 
-  val noop: ULayer[ProgressSink] = ZLayer.succeed(Noop)
+  val noop: ZLayer[Any, Nothing, ProgressSink] = ZLayer.succeed(Noop)
 ```
 
 Create `shell/src/main/scala/diskrement/shell/fs/HashParallelism.scala`:
@@ -357,17 +367,34 @@ import zio._
 
 /** Bounded fiber count for hashing phases (scan + staging re-hash).
   * `DISKREMENT_HASH_PARALLELISM` overrides the default of 6; non-numeric or
-  * non-positive values are ignored. Read via zio.System so tests can inject. */
+  * non-positive values are ignored. Read via zio.System so tests can inject.
+  * The value is read once at layer construction and fixed for the process;
+  * values are trimmed and clamped to 64. */
 final case class HashParallelism(value: Int)
 
 object HashParallelism:
-  val default = 6
+  val default: HashParallelism = HashParallelism(6)
+
+  /** Values above this are almost certainly a misunderstanding of the knob
+    * (each hashing fiber holds an open stream and a 64 KiB buffer). */
+  private val MaxParallelism = 64
 
   val fromEnv: ZLayer[Any, Nothing, HashParallelism] =
     ZLayer {
-      zio.System.env("DISKREMENT_HASH_PARALLELISM").orDie
-        .map(_.flatMap(_.toIntOption).filter(_ > 0)
-          .fold(HashParallelism(default))(HashParallelism(_)))
+      zio.System.env("DISKREMENT_HASH_PARALLELISM").orElseSucceed(None).flatMap {
+        case None => ZIO.succeed(default)
+        case Some(raw) if raw.trim.isEmpty => ZIO.succeed(default)
+        case Some(raw) =>
+          raw.trim.toIntOption.filter(_ > 0) match
+            case Some(n) if n > MaxParallelism =>
+              ZIO.logWarning(s"clamping DISKREMENT_HASH_PARALLELISM $n to $MaxParallelism")
+                .as(HashParallelism(MaxParallelism))
+            case Some(n) => ZIO.succeed(HashParallelism(n))
+            case None =>
+              ZIO.logWarning(
+                s"ignoring unusable DISKREMENT_HASH_PARALLELISM '$raw' (want a positive int); using ${default.value}")
+                .as(default)
+      }
     }
 ```
 
@@ -469,7 +496,7 @@ object FileScannerSpec extends ZIOSpecDefault:
       run(files, prior, verify = false).map { case (out, hashed) =>
         assertTrue(
           hashed == 0,
-          out.hashedFiles == 0,
+          out.hashed == 0,
           out.files.map(f => (f.relPath.value, f.contentHash.value)) ==
             List(("a", "old-a"), ("b", "old-b")))
       }
@@ -480,7 +507,7 @@ object FileScannerSpec extends ZIOSpecDefault:
         RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")),
         RelPath("b") -> FileFingerprint(20, mt1, ContentHash("old-b")))
       run(files, prior, verify = false).map { case (out, hashed) =>
-        assertTrue(hashed == 2, out.hashedFiles == 2,
+        assertTrue(hashed == 2, out.hashed == 2,
           out.files.map(_.contentHash.value) == List("H:a", "H:b"))
       }
     ,
@@ -488,7 +515,7 @@ object FileScannerSpec extends ZIOSpecDefault:
       val files = Map("a" -> FileStat(10, mt1))
       val prior = Map(RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")))
       run(files, prior, verify = true).map { case (out, hashed) =>
-        assertTrue(hashed == 1, out.hashedFiles == 1,
+        assertTrue(hashed == 1, out.hashed == 1,
           out.files.head.contentHash.value == "H:a")
       }
     ,
@@ -501,7 +528,7 @@ object FileScannerSpec extends ZIOSpecDefault:
     test("many files hash to the same sorted result under parallelism"):
       val files = (1 to 100).map(i => f"f$i%03d" -> FileStat(i.toLong, mt1)).toMap
       run(files, Map.empty, verify = false).map { case (out, hashed) =>
-        assertTrue(hashed == 100, out.hashedFiles == 100,
+        assertTrue(hashed == 100, out.hashed == 100,
           out.files.map(_.relPath.value) == (1 to 100).map(i => f"f$i%03d").toList)
       }
     ,
@@ -560,7 +587,7 @@ object ScanError:
 
 /** The scanner's result: hashed files plus how many actually got hashed this
   * run (fast-path fingerprint hits are the difference). */
-final case class ScanOutput(files: List[ScannedFile], hashedFiles: Int)
+final case class ScanOutput(files: List[ScannedFile], hashed: Int)
 
 /** Walks a frozen snapshot and produces fully-hashed ScannedFiles, reusing a
   * stored hash when size+mtime match (fast path) unless `verify` is set.
@@ -589,23 +616,26 @@ final case class FileScannerLive(
                   val rel = RelPath(snapshotRoot.relativize(abs).toString)
                   fs.stat(abs).mapBoth(ScanError.FileFailed(rel, _), st => (abs, rel, st))
                 }
-      parts   = stats.partition { case (_, rel, st) =>
-                  !verify && prior.get(rel)
-                    .exists(fp => fp.sizeBytes == st.sizeBytes && fp.mtime == st.mtime)
+      split   = stats.map { case (abs, rel, st) =>
+                  prior.get(rel)
+                    .filter(fp => !verify && fp.sizeBytes == st.sizeBytes && fp.mtime == st.mtime)
+                    .toRight((abs, rel, st))
+                    .map(fp => ScannedFile(rel, fp.contentHash, st.sizeBytes, st.mtime))
                 }
-      hits    = parts._1
-      misses  = parts._2
-      reused  = hits.map { case (_, rel, st) =>
-                  ScannedFile(rel, prior(rel).contentHash, st.sizeBytes, st.mtime)
-                }
-      _      <- sink.start("hashing", misses.map(_._3.sizeBytes).sum, misses.size)
-      hashed <- ZIO.foreachPar(misses) { case (abs, rel, st) =>
-                  hasher.hash(abs)
-                    .mapBoth(ScanError.FileFailed(rel, _),
-                             h => ScannedFile(rel, h, st.sizeBytes, st.mtime))
-                    .zipLeft(sink.advance(st.sizeBytes, 1))
-                }.withParallelism(parallelism)
-      _      <- sink.done
+      reused  = split.collect { case Right(f) => f }
+      misses  = split.collect { case Left(m)  => m }
+      hashed <- if misses.isEmpty then ZIO.succeed(List.empty[ScannedFile])
+                else
+                  // phase() brackets the hash work: start before, done on ANY exit
+                  // (success, failure, interrupt) — never leave the TTY line half-drawn.
+                  sink.phase("hashing", misses.map(_._3.sizeBytes).sum, misses.size) {
+                    ZIO.foreachPar(misses) { case (abs, rel, st) =>
+                      hasher.hash(abs)
+                        .mapBoth(ScanError.FileFailed(rel, _),
+                                 h => ScannedFile(rel, h, st.sizeBytes, st.mtime))
+                        .zipLeft(sink.advance(st.sizeBytes, 1))
+                    }.withParallelism(parallelism max 1)
+                  }
     yield ScanOutput((reused ++ hashed).sortBy(_.relPath), hashed.size)
 
 object FileScanner:
@@ -631,7 +661,7 @@ object FileScanner:
       res     <- countOf(p.id, scanned.files)
 ```
 
-(The `hashedFiles` count is wired into `ScanResult` in Task 5; ignore it here.)
+(The `hashed` count is wired into `ScanResult` in Task 5; ignore it here.)
 
 `cli/src/main/scala/diskrement/cli/Runner.scala` — add to BOTH backend stacks in
 `withPipeline` (imports: `diskrement.shell.ProgressSink`; `HashParallelism` comes
@@ -979,7 +1009,7 @@ object Pipeline:
                      f.relPath -> FileFingerprint(f.sizeBytes, f.mtime, f.contentHash)).toMap)
                    .catchAll(e =>
                      ZIO.logWarning(s"fingerprint cache write failed: ${e.getMessage}"))
-      res     <- countOf(p.id, scanned.files, scanned.hashedFiles)
+      res     <- countOf(p.id, scanned.files, scanned.hashed)
     yield res
 ```
 
@@ -1157,10 +1187,10 @@ object Stager:
       _     <- clearAndCreate(dataDir)
       _     <- ZIO.foreachDiscard(image.files)(checkExists(image, _))
       _     <- copyAll(image, dataDir)
-      _     <- sink.start("staging", image.files.map(_.sizeBytes).sum, image.files.size)
-      _     <- ZIO.foreachParDiscard(image.files)(verifyOne(dataDir, hasher, sink, _))
-                 .withParallelism(parallelism)
-      _     <- sink.done
+      _     <- sink.phase("staging", image.files.map(_.sizeBytes).sum, image.files.size) {
+                 ZIO.foreachParDiscard(image.files)(verifyOne(dataDir, hasher, sink, _))
+                   .withParallelism(parallelism)
+               }
       _     <- writer.write(image.stagingDir.resolve(".diskrement"), image.metadata)
       bytes <- totalBytes(image.stagingDir)
     yield BurnResult(image.stagingDir, bytes)
@@ -1516,12 +1546,30 @@ tiny fixture and compare). At minimum verify `scan2` reports
 
 - [ ] **Step 3: Record results against targets**
 
-| metric | baseline | target | measured |
-|---|---|---|---|
-| scan #1 | 450 s | ≤ 180 s | |
-| scan #2 (post-burn rescan) | 410 s | ≤ 30 s | |
-| burn staging | 38 s | ≤ 25 s | |
-| scan #2 bytes read | 388.6 GB | ~0 | |
+**RESULT (2026-08-31, commit 241fb37, cold cache via `DROP_CACHES=1`).** Library at
+run time: 75,623 files / 413.641 GB (5 files more than the baseline's 75,618 — Immich
+added them during the day; immaterial to the comparison).
+
+| metric | baseline | target | measured | verdict |
+|---|---|---|---|---|
+| scan #1 | 450 s | ≤ 180 s | **132.4 s** | ✅ 3.4× faster |
+| scan #2 (post-burn rescan) | 410 s | ≤ 30 s | **4.0 s** | ✅ 103× faster |
+| burn staging (24.5 GB) | 38 s | ≤ 25 s | **14.8 s** | ✅ 2.6× faster |
+| scan #2 bytes read | 388.6 GB | ~0 | **0.012 GB** (rchar 0.064 GB) | ✅ |
+
+Supporting evidence from the same run: `scan1: Hashed 75623 of 75623 files (0
+fingerprints reused)` vs `scan2: Hashed 0 of 75623 files (75623 fingerprints reused)`;
+burn `write_bytes = 0.076 GB` for a 24.5 GB disc, confirming reflink staging rather
+than a silent plain-copy fallback; scan #1 sustained ~3.1 GB/s at ~290% CPU (baseline
+was ~920 MB/s at ~68% of one core), so the bottleneck moved from a single hashing
+thread to the LUKS+zstd storage path.
+
+Correctness cross-checks (separate run over the library's `2009/` subtree, 939 files):
+10 randomly sampled staged files had `recorded manifest hash == independent
+sha256(source)` **10/10** and `staged bytes == source bytes` **10/10**; and a
+cache-backed scan (`Hashed 0 of 939`) produced a **byte-identical** staged scan to a
+full `--verify` re-hash (`Hashed 939 of 939`), demonstrating the fingerprint cache
+returns truth rather than merely returning fast.
 
 If a target is missed, investigate before merging (parallelism tuning,
 progress-throttle overhead, cache read path) — do not relax targets silently.

@@ -5,7 +5,7 @@ import diskrement.shell.catalog.CatalogStore
 import diskrement.shell.burn.{
   Burner, DiscExpectation, DiscIdentity, DiscImage, DiscMetadata, DiscVerifier, ManifestJson}
 import zio.json.*
-import diskrement.shell.fs.{FileScanner, Hasher, SnapshotHandle, SourceSnapshot}
+import diskrement.shell.fs.{FileScanner, FingerprintCache, Hasher, SnapshotHandle, SourceSnapshot}
 import diskrement.shell.model.*
 import zio.*
 import java.nio.file.{Files, Path}
@@ -18,6 +18,7 @@ private[pipeline] final case class PipelineLive(
     verifier: DiscVerifier,
     staged: StagedStore,
     hasher: Hasher,
+    cache: FingerprintCache,
     paths: ProjectPaths
 ) extends Pipeline:
 
@@ -65,8 +66,8 @@ private[pipeline] final case class PipelineLive(
       p      <- project(name)
       reuse  <- staged.readScan(paths.workDir)
       result <- reuse match
-                  case Some(s) if !force => countOf(p.id, s)
-                  case _                 => freshScan(p, verify)
+                  case Some(s) if !force && !verify => countOf(p.id, s, hashed = None, scannedFiles = s.size)
+                  case _                             => freshScan(p, verify)
     yield result
 
   private def freshScan(p: Project, verify: Boolean): IO[PipelineError, ScanResult] =
@@ -75,15 +76,28 @@ private[pipeline] final case class PipelineLive(
       handle  <- snapshot.create(srcPath, paths.workDir)
                    .mapError(e => PipelineError.Failed(e))
       prior   <- catalog.fingerprints(p.id).mapError(PipelineError.Failed(_))
-      scanned <- scanner.scan(handle.root, prior, verify).mapError(PipelineError.Failed(_))
-      _       <- staged.writeScan(paths.workDir, scanned)
-      res     <- countOf(p.id, scanned)
+      // FingerprintCacheLive already logged the failure (with the path); a cache
+      // failure must never fail a scan, so fall back to an empty cache silently.
+      cached  <- cache.readAll.catchAll(_ => ZIO.succeed(Map.empty[RelPath, FileFingerprint]))
+      // The cache wins on conflict: it is fresher (it re-fingerprints
+      // touched-but-identical files so later scans fast-path them).
+      scanned <- scanner.scan(handle.root, prior ++ cached, verify)
+                   .mapError(PipelineError.Failed(_))
+      _       <- staged.writeScan(paths.workDir, scanned.files)
+      // FingerprintCacheLive already logged the failure (with the path); a cache
+      // failure must never fail a scan, so ignore it and move on.
+      _       <- cache.putAll(scanned.files.map(f =>
+                     f.relPath -> FileFingerprint(f.sizeBytes, f.mtime, f.contentHash)))
+                   .catchAll(_ => ZIO.unit)
+      res     <- countOf(p.id, scanned.files, Some(scanned.hashed), scanned.files.size)
     yield res
 
-  private def countOf(pid: ProjectId, scanned: List[ScannedFile]): IO[PipelineError, ScanResult] =
+  private def countOf(
+      pid: ProjectId, scanned: List[ScannedFile], hashed: Option[Int], scannedFiles: Int
+  ): IO[PipelineError, ScanResult] =
     catalog.readView(pid).mapError(PipelineError.Failed(_)).map { view =>
       val cs = Diff.diff(view, scanned)
-      ScanResult(cs.added.size, cs.modified.size, cs.deleted.size, cs.unchanged.size)
+      ScanResult(cs.added.size, cs.modified.size, cs.deleted.size, cs.unchanged.size, hashed, scannedFiles)
     }
 
   def plan(name: String, discTypeOverride: Option[DiscType], finalize: Boolean): IO[PipelineError, PlanReport] =

@@ -39,7 +39,8 @@ object DiscReaderSpec extends ZIOSpecDefault:
             ans <- Ref.make(List(true))
             log <- Ref.make(List.empty[String])
             b    = XorrisoBurnerLive(dev, run, XorrisoMediaInspectorLive(run),
-                     ScriptedOperator(ans, log), HasherLive(), SnapshotWriterLive())
+                     ScriptedOperator(ans, log), HasherLive(), SnapshotWriterLive(),
+                     diskrement.shell.ProgressSink.Noop, 2)
             snap = base.resolve(s"snap$n")
             _    = Files.createDirectories(snap)
             _    = Files.writeString(snap.resolve("a.txt"), content)

@@ -5,6 +5,22 @@ import zio.cli.*
 import zio.cli.HelpDoc.Span.text
 
 object Main extends ZIOCliDefault:
+  /** ZIO's default logger writes to stdout, which is the CLI's data channel
+    * (the IT suite parses it). Operator-facing diagnostics belong on stderr.
+    * For unhandled errors/defects, ZIO logs an EMPTY `message` and puts the
+    * entire payload in `cause` — so `cause` must never be dropped, or the
+    * stderr line is left with nothing useful in it. */
+  private[cli] def logLine(level: LogLevel, message: String, cause: Cause[Any]): Option[String] =
+    if level >= LogLevel.Info then
+      val detail = if cause.isEmpty then "" else s"\n${cause.prettyPrint}"
+      Some(s"[${level.label.toLowerCase}] $message$detail")
+    else None
+
+  override val bootstrap: ZLayer[Any, Nothing, Unit] =
+    Runtime.removeDefaultLoggers >>> Runtime.addLogger(
+      (_, _, level: LogLevel, message: () => String, cause: Cause[Any], _, _, _) =>
+        logLine(level, message(), cause).foreach(java.lang.System.err.println))
+
   val cliApp = CliApp.make(
     name = "diskrement",
     version = "0.1.0",

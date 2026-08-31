@@ -1,6 +1,7 @@
 package diskrement.shell.burn
 
-import diskrement.shell.fs.Hasher
+import diskrement.shell.ProgressSink
+import diskrement.shell.fs.{Hasher, HashParallelism}
 import zio._
 
 /** The real burner: prompts for the disc, inspects it (strict identity check),
@@ -13,7 +14,9 @@ final case class XorrisoBurnerLive(
     inspector: MediaInspector,
     operator: BurnOperator,
     hasher: Hasher,
-    writer: SnapshotWriter
+    writer: SnapshotWriter,
+    sink: ProgressSink,
+    parallelism: Int
 ) extends Burner:
 
   private val fixedOverheadBytes = 32L * 1024 * 1024
@@ -24,7 +27,7 @@ final case class XorrisoBurnerLive(
     for
       _      <- preflight
       free   <- awaitCorrectMedia(image)
-      staged <- Stager.stage(image, hasher, writer)
+      staged <- Stager.stage(image, hasher, writer, sink, parallelism)
       _      <- checkCapacity(staged.imageBytes, free)
       _      <- doBurn(image, firstSession)
       _      <- postBurnCheck(id)
@@ -119,7 +122,8 @@ final case class XorrisoBurnerLive(
 
 object XorrisoBurner:
   val live: ZLayer[
-    BurnDevice & CmdRunner & MediaInspector & BurnOperator & Hasher & SnapshotWriter,
+    BurnDevice & CmdRunner & MediaInspector & BurnOperator & Hasher & SnapshotWriter &
+      ProgressSink & HashParallelism,
     Nothing, Burner] =
     ZLayer {
       for
@@ -129,5 +133,7 @@ object XorrisoBurner:
         op   <- ZIO.service[BurnOperator]
         h    <- ZIO.service[Hasher]
         w    <- ZIO.service[SnapshotWriter]
-      yield XorrisoBurnerLive(dev, run, insp, op, h, w)
+        sink <- ZIO.service[ProgressSink]
+        par  <- ZIO.service[HashParallelism]
+      yield XorrisoBurnerLive(dev, run, insp, op, h, w, sink, par.value)
     }

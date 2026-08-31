@@ -1,6 +1,7 @@
 package diskrement.shell.fs
 
 import diskrement.core.{ContentHash, RelPath}
+import diskrement.shell.ProgressSink
 import diskrement.shell.model.FileFingerprint
 import zio._
 import zio.test._
@@ -9,8 +10,8 @@ import java.nio.file.{Path, Paths}
 import java.time.Instant
 
 object FileScannerSpec extends ZIOSpecDefault:
-  private val mt1 = Instant.parse("2026-05-01T00:00:00Z")
-  private val mt2 = Instant.parse("2026-05-02T00:00:00Z")
+  private val mt1  = Instant.parse("2026-05-01T00:00:00Z")
+  private val mt2  = Instant.parse("2026-05-02T00:00:00Z")
   private val root = Paths.get("/snap")
 
   /** In-memory FileSystem: a fixed relpath -> stat map under `root`. */
@@ -27,12 +28,26 @@ object FileScannerSpec extends ZIOSpecDefault:
     def hash(p: Path): IO[IOException, ContentHash] =
       ref.update(_ + 1).as(ContentHash("H:" + p.getFileName.toString))
 
+  /** Hasher that fails for one specific file name. */
+  private final case class FailingHasher(bad: String) extends Hasher:
+    def hash(p: Path): IO[IOException, ContentHash] =
+      if p.getFileName.toString == bad then ZIO.fail(new IOException("boom"))
+      else ZIO.succeed(ContentHash("H:" + p.getFileName.toString))
+
+  /** Records start/advance/done calls. */
+  private final case class RecordingSink(ref: Ref[List[String]]) extends ProgressSink:
+    def start(label: String, totalBytes: Long, totalFiles: Int): UIO[Unit] =
+      ref.update(_ :+ s"start:$label:$totalBytes:$totalFiles")
+    def advance(deltaBytes: Long, deltaFiles: Int): UIO[Unit] =
+      ref.update(_ :+ s"advance:$deltaBytes:$deltaFiles")
+    def done: UIO[Unit] = ref.update(_ :+ "done")
+
   private def run(files: Map[String, FileStat],
                   prior: Map[RelPath, FileFingerprint],
-                  verify: Boolean): UIO[(List[diskrement.core.ScannedFile], Int)] =
+                  verify: Boolean): UIO[(ScanOutput, Int)] =
     for
       counter <- Ref.make(0)
-      scanner  = FileScannerLive(FakeFs(files), CountingHasher(counter))
+      scanner  = FileScannerLive(FakeFs(files), CountingHasher(counter), ProgressSink.Noop, 4)
       out     <- scanner.scan(root, prior, verify).orDie
       hashed  <- counter.get
     yield (out, hashed)
@@ -46,7 +61,8 @@ object FileScannerSpec extends ZIOSpecDefault:
       run(files, prior, verify = false).map { case (out, hashed) =>
         assertTrue(
           hashed == 0,
-          out.map(f => (f.relPath.value, f.contentHash.value)) ==
+          out.hashed == 0,
+          out.files.map(f => (f.relPath.value, f.contentHash.value)) ==
             List(("a", "old-a"), ("b", "old-b")))
       }
     ,
@@ -56,19 +72,75 @@ object FileScannerSpec extends ZIOSpecDefault:
         RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")),
         RelPath("b") -> FileFingerprint(20, mt1, ContentHash("old-b")))
       run(files, prior, verify = false).map { case (out, hashed) =>
-        assertTrue(hashed == 2, out.map(_.contentHash.value) == List("H:a", "H:b"))
+        assertTrue(hashed == 2, out.hashed == 2,
+          out.files.map(_.contentHash.value) == List("H:a", "H:b"))
       }
     ,
     test("verify forces a re-hash even when the fingerprint matches"):
       val files = Map("a" -> FileStat(10, mt1))
       val prior = Map(RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")))
       run(files, prior, verify = true).map { case (out, hashed) =>
-        assertTrue(hashed == 1, out.head.contentHash.value == "H:a")
+        assertTrue(hashed == 1, out.hashed == 1,
+          out.files.head.contentHash.value == "H:a")
       }
     ,
     test("a file absent from prior is hashed; output is sorted by relPath"):
       val files = Map("z" -> FileStat(1, mt1), "a" -> FileStat(2, mt1))
       run(files, Map.empty, verify = false).map { case (out, hashed) =>
-        assertTrue(hashed == 2, out.map(_.relPath.value) == List("a", "z"))
+        assertTrue(hashed == 2, out.files.map(_.relPath.value) == List("a", "z"))
       }
+    ,
+    test("a mixed hit/miss scan merges and sorts across both partitions"):
+      val files = Map("z" -> FileStat(10, mt1), "a" -> FileStat(20, mt1))
+      val prior = Map(RelPath("z") -> FileFingerprint(10, mt1, ContentHash("old-z")))
+      run(files, prior, verify = false).map { case (out, hashed) =>
+        assertTrue(hashed == 1, out.hashed == 1,
+          out.files.map(f => (f.relPath.value, f.contentHash.value)) ==
+            List(("a", "H:a"), ("z", "old-z")))
+      }
+    ,
+    test("many files hash to the same sorted result under parallelism"):
+      val files = (1 to 100).map(i => f"f$i%03d" -> FileStat(i.toLong, mt1)).toMap
+      run(files, Map.empty, verify = false).map { case (out, hashed) =>
+        assertTrue(hashed == 100, out.hashed == 100,
+          out.files.map(_.relPath.value) == (1 to 100).map(i => f"f$i%03d").toList)
+      }
+    ,
+    test("a hash failure fails the scan with FileFailed for that file"):
+      val files = Map("good" -> FileStat(1, mt1), "bad" -> FileStat(2, mt1))
+      val scanner = FileScannerLive(FakeFs(files), FailingHasher("bad"), ProgressSink.Noop, 4)
+      scanner.scan(root, Map.empty, verify = false).exit.map {
+        case Exit.Failure(c) =>
+          assertTrue(c.failureOption.exists {
+            case ScanError.FileFailed(rel, _) => rel.value == "bad"
+            case _                             => false
+          })
+        case Exit.Success(_) => assertTrue(false)
+      }
+    ,
+    test("progress covers only the files that are actually hashed"):
+      val files = Map("hit" -> FileStat(10, mt1), "miss" -> FileStat(32, mt1))
+      val prior = Map(RelPath("hit") -> FileFingerprint(10, mt1, ContentHash("old")))
+      for
+        counter <- Ref.make(0)
+        events  <- Ref.make(List.empty[String])
+        scanner  = FileScannerLive(FakeFs(files), CountingHasher(counter), RecordingSink(events), 4)
+        _       <- scanner.scan(root, prior, verify = false).orDie
+        evs     <- events.get
+      yield assertTrue(
+        evs.head == "start:hashing:32:1",
+        evs.count(_.startsWith("advance:")) == 1,
+        evs.contains("advance:32:1"),
+        evs.last == "done")
+    ,
+    test("a scan with no misses emits no progress events at all"):
+      val files = Map("a" -> FileStat(10, mt1))
+      val prior = Map(RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")))
+      for
+        counter <- Ref.make(0)
+        events  <- Ref.make(List.empty[String])
+        scanner  = FileScannerLive(FakeFs(files), CountingHasher(counter), RecordingSink(events), 4)
+        out     <- scanner.scan(root, prior, verify = false).orDie
+        evs     <- events.get
+      yield assertTrue(out.hashed == 0, out.files.size == 1, evs.isEmpty)
   )
