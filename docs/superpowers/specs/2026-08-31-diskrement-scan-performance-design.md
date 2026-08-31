@@ -53,7 +53,8 @@ All changes live in `diskrement.shell` (fs, burn, pipeline) and `diskrement.cli`
 functional core is untouched.
 
 1. **The catalog stays pure history.** The fingerprint cache is a **sidecar database**
-   (`<name>.scancache.sqlite` next to the catalog), never embedded on discs, exempt from
+   (`<catalog-stem>.<project>.scancache.sqlite` next to the catalog — see §4.4), never
+   embedded on discs, exempt from
    append-only rules because it is disposable: deleting it costs one re-hash, nothing
    else. Rejected alternatives: an upsert table inside the catalog (mutable state in an
    archival, disc-embedded DB) and an append-only observation log (unbounded growth,
@@ -134,8 +135,15 @@ trait FingerprintCache:
   def putAll(entries: Iterable[(RelPath, FileFingerprint)]): IO[CacheError, Unit]
 ```
 
-- File: `<catalog-stem>.scancache.sqlite` in the catalog's directory, path derived in
-  `PathResolver` and passed to the layer. One project per catalog file ⇒ no project id.
+- File: `<catalog-stem>.<project>.scancache.sqlite` in the catalog's directory, path
+  derived in `PathResolver` and passed to the layer. The table is keyed by `rel_path`
+  alone, so the *filename* carries the project scoping: a single catalog file can hold
+  several projects, and sharing one cache between them would let one project's
+  fingerprints shadow another's. [Amended during Task 5 review — the original text
+  assumed one project per catalog file and omitted the project from the name, which a
+  reviewer reproduced as cross-project cache poisoning: the resulting burn fails the
+  staging re-hash (safe — nothing is archived or committed) but `scan --force` cannot
+  clear it, only `scan --verify` can.]
 - Schema: `fingerprint(rel_path TEXT PRIMARY KEY, size_bytes INTEGER, mtime TEXT,
   content_hash TEXT, updated_at TEXT)`; `PRAGMA user_version = 1`. Created on demand;
   a future incompatible version or a corrupt/unreadable file is **warned about,
@@ -161,11 +169,20 @@ _       = cache.putAll(all scanned fingerprints)        // total write-back
 ```
 
 Cache read/write failures degrade, never fail: an unreadable cache yields an empty
-prior map, a failed write-back logs a warning; the scan itself succeeds either way.
+prior map, a failed write-back is skipped; the adapter logs the warning (with the
+path) and the scan itself succeeds either way. Those logs go to **stderr** — ZIO's
+default logger writes to stdout, which is this CLI's data channel, so `Main`
+installs a stderr logger via `bootstrap`.
 
-`ScanResult` gains a `hashed: Int` field (files actually hashed, i.e. fast-path
-misses) and `Render.scan` reports it (`… 61391 hashed, 14227 reused`) — user-visible
-evidence of cache effectiveness and the observable ITs assert on.
+`ScanResult` gains `hashed: Option[Int]` (files actually hashed, i.e. fast-path
+misses) and `scannedFiles: Int` (the denominator); `Render.scan` reports them on a
+second line (`Hashed 61391 of 75618 files (14227 fingerprints reused).`) — the
+user-visible evidence of cache effectiveness that the ITs assert on. `hashed` is
+`None` when a staged scan is reused, because no scan ran and nothing was hashed *or*
+reused; the second line is then omitted rather than claiming a misleading zero.
+[`Option`/`scannedFiles` added during Task 5 review — the original `hashed: Int`
+reported "0 hashed, N reused" on the staged-reuse path, which is untrue and would
+have let a warm-rescan IT pass for the wrong reason.]
 
 ### 4.6 Benchmark script (new, `scripts/perf-bench.sh`)
 
