@@ -12,6 +12,7 @@ object ConsoleProgress:
 
   /** Renders one progress line.
     *
+    * @param label phase label shown at the start of the line
     * @param doneBytes bytes completed so far
     * @param totalBytes total bytes for the phase
     * @param doneFiles files completed so far
@@ -31,14 +32,26 @@ object ConsoleProgress:
   /** Best-effort "is stderr a terminal": JDK 22+'s Console.isTerminal() is
     * authoritative (pre-22, a non-null Console already implies a terminal);
     * TERM=dumb opts out explicitly (also the escape hatch for `2> log`, which
-    * the JDK cannot detect — Console reflects stdin/stdout, not stderr). */
-  private[cli] def stderrIsTty(): Boolean =
-    sys.env.get("TERM").forall(_ != "dumb") && (
-      java.lang.System.console() match
+    * the JDK cannot detect — Console reflects stdin/stdout, not stderr).
+    *
+    * @param env environment lookup, injectable for testing (default: real process env)
+    * @param console Console supplier, injectable for testing (default: `System.console()`)
+    */
+  private[cli] def stderrIsTty(
+      env: Map[String, String] = sys.env,
+      console: () => java.io.Console = () => java.lang.System.console()
+  ): Boolean =
+    env.get("TERM").forall(_ != "dumb") && (
+      console() match
         case null => false
         case c =>
-          try c.getClass.getMethod("isTerminal").invoke(c).asInstanceOf[Boolean]
-          catch case _: NoSuchMethodException => true
+          // Look isTerminal up on the PUBLIC Console type: the runtime class
+          // (ProxyingConsole) is package-private and direct reflection on it
+          // throws IllegalAccessException on JDK 22+. TTY detection must never
+          // be fatal — any reflection failure falls back to "assume terminal"
+          // (correct pre-22, where a non-null Console implies one).
+          try classOf[java.io.Console].getMethod("isTerminal").invoke(c).asInstanceOf[Boolean]
+          catch case _: Throwable => true
     )
 
   private final case class State(
@@ -84,7 +97,8 @@ object ConsoleProgress:
 
     private def emit(s: State, now: Long): UIO[Unit] =
       ZIO.succeed {
-        val elapsedSec = math.max((now - s.startedNanos) / 1e9, 1e-9) // unreachable in practice (first emit needs a full interval); kept for safety
+        // unreachable in practice (first emit needs a full interval); kept for safety
+        val elapsedSec = math.max((now - s.startedNanos) / 1e9, 1e-9)
         val rate       = s.doneBytes / elapsedSec
         val eta        = if rate > 0 then ((s.totalBytes - s.doneBytes) / rate).toLong else -1L
         val line       = format(s.label, s.doneBytes, s.totalBytes,

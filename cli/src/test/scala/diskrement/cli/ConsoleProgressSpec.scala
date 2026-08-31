@@ -19,6 +19,13 @@ object ConsoleProgressSpec extends ZIOSpecDefault:
         val line = ConsoleProgress.format("hashing", 0L, 0L, 0, 0, 0d, -1L)
         assertTrue(line == "hashing 0.0/0.0 GB · 0/0 files · 0 MB/s · ETA --")
     ),
+    suite("stderrIsTty")(
+      test("TERM=dumb disables TTY detection"):
+        assertTrue(
+          !ConsoleProgress.stderrIsTty(env = Map("TERM" -> "dumb")),
+          !ConsoleProgress.stderrIsTty(env = Map.empty, console = () => null)
+        )
+    ),
     suite("Live")(
       test("throttles: nothing before the interval, one emit after"):
         val q = new ConcurrentLinkedQueue[String]()
@@ -65,5 +72,32 @@ object ConsoleProgressSpec extends ZIOSpecDefault:
           _    <- sink.advance(5, 1) // clock never advanced → below interval, no emit
           _    <- sink.done
         yield assertTrue(q.isEmpty)
+      ,
+      test("concurrent advances emit exactly once per interval"):
+        val q = new ConcurrentLinkedQueue[String]()
+        for
+          sink <- ConsoleProgress.unsafeMake(tty = true, write = s => { q.add(s); () })
+          _    <- sink.start("p", 200, 200)
+          _    <- TestClock.adjust(5.seconds)
+          _    <- ZIO.foreachParDiscard(1 to 200)(_ => sink.advance(1, 1)).withParallelism(64)
+        yield assertTrue(q.size == 1)
+      ,
+      test("non-TTY chunks are self-terminating lines"):
+        val q = new ConcurrentLinkedQueue[String]()
+        for
+          sink <- ConsoleProgress.unsafeMake(tty = false, write = s => { q.add(s); () })
+          _    <- sink.start("p", 100, 10)
+          _    <- TestClock.adjust(11.seconds)
+          _    <- sink.advance(5, 1)
+          _    <- TestClock.adjust(11.seconds)
+          _    <- sink.advance(5, 1)
+          _    <- sink.done
+          chunks = q.asScala.toVector
+        yield assertTrue(
+          chunks.nonEmpty,
+          chunks.forall(_.endsWith("\n")),
+          chunks.forall(_ != "\n"),
+          chunks.last.contains("2/10 files")
+        )
     )
   )
