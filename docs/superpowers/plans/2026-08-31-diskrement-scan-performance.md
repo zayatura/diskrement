@@ -496,7 +496,7 @@ object FileScannerSpec extends ZIOSpecDefault:
       run(files, prior, verify = false).map { case (out, hashed) =>
         assertTrue(
           hashed == 0,
-          out.hashedFiles == 0,
+          out.hashed == 0,
           out.files.map(f => (f.relPath.value, f.contentHash.value)) ==
             List(("a", "old-a"), ("b", "old-b")))
       }
@@ -507,7 +507,7 @@ object FileScannerSpec extends ZIOSpecDefault:
         RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")),
         RelPath("b") -> FileFingerprint(20, mt1, ContentHash("old-b")))
       run(files, prior, verify = false).map { case (out, hashed) =>
-        assertTrue(hashed == 2, out.hashedFiles == 2,
+        assertTrue(hashed == 2, out.hashed == 2,
           out.files.map(_.contentHash.value) == List("H:a", "H:b"))
       }
     ,
@@ -515,7 +515,7 @@ object FileScannerSpec extends ZIOSpecDefault:
       val files = Map("a" -> FileStat(10, mt1))
       val prior = Map(RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")))
       run(files, prior, verify = true).map { case (out, hashed) =>
-        assertTrue(hashed == 1, out.hashedFiles == 1,
+        assertTrue(hashed == 1, out.hashed == 1,
           out.files.head.contentHash.value == "H:a")
       }
     ,
@@ -528,7 +528,7 @@ object FileScannerSpec extends ZIOSpecDefault:
     test("many files hash to the same sorted result under parallelism"):
       val files = (1 to 100).map(i => f"f$i%03d" -> FileStat(i.toLong, mt1)).toMap
       run(files, Map.empty, verify = false).map { case (out, hashed) =>
-        assertTrue(hashed == 100, out.hashedFiles == 100,
+        assertTrue(hashed == 100, out.hashed == 100,
           out.files.map(_.relPath.value) == (1 to 100).map(i => f"f$i%03d").toList)
       }
     ,
@@ -587,7 +587,7 @@ object ScanError:
 
 /** The scanner's result: hashed files plus how many actually got hashed this
   * run (fast-path fingerprint hits are the difference). */
-final case class ScanOutput(files: List[ScannedFile], hashedFiles: Int)
+final case class ScanOutput(files: List[ScannedFile], hashed: Int)
 
 /** Walks a frozen snapshot and produces fully-hashed ScannedFiles, reusing a
   * stored hash when size+mtime match (fast path) unless `verify` is set.
@@ -616,25 +616,26 @@ final case class FileScannerLive(
                   val rel = RelPath(snapshotRoot.relativize(abs).toString)
                   fs.stat(abs).mapBoth(ScanError.FileFailed(rel, _), st => (abs, rel, st))
                 }
-      parts   = stats.partition { case (_, rel, st) =>
-                  !verify && prior.get(rel)
-                    .exists(fp => fp.sizeBytes == st.sizeBytes && fp.mtime == st.mtime)
+      split   = stats.map { case (abs, rel, st) =>
+                  prior.get(rel)
+                    .filter(fp => !verify && fp.sizeBytes == st.sizeBytes && fp.mtime == st.mtime)
+                    .toRight((abs, rel, st))
+                    .map(fp => ScannedFile(rel, fp.contentHash, st.sizeBytes, st.mtime))
                 }
-      hits    = parts._1
-      misses  = parts._2
-      reused  = hits.map { case (_, rel, st) =>
-                  ScannedFile(rel, prior(rel).contentHash, st.sizeBytes, st.mtime)
-                }
-      // phase() brackets the hash work: start before, done on ANY exit
-      // (success, failure, interrupt) — never leave the TTY line half-drawn.
-      hashed <- sink.phase("hashing", misses.map(_._3.sizeBytes).sum, misses.size) {
-                  ZIO.foreachPar(misses) { case (abs, rel, st) =>
-                    hasher.hash(abs)
-                      .mapBoth(ScanError.FileFailed(rel, _),
-                               h => ScannedFile(rel, h, st.sizeBytes, st.mtime))
-                      .zipLeft(sink.advance(st.sizeBytes, 1))
-                  }.withParallelism(parallelism)
-                }
+      reused  = split.collect { case Right(f) => f }
+      misses  = split.collect { case Left(m)  => m }
+      hashed <- if misses.isEmpty then ZIO.succeed(List.empty[ScannedFile])
+                else
+                  // phase() brackets the hash work: start before, done on ANY exit
+                  // (success, failure, interrupt) — never leave the TTY line half-drawn.
+                  sink.phase("hashing", misses.map(_._3.sizeBytes).sum, misses.size) {
+                    ZIO.foreachPar(misses) { case (abs, rel, st) =>
+                      hasher.hash(abs)
+                        .mapBoth(ScanError.FileFailed(rel, _),
+                                 h => ScannedFile(rel, h, st.sizeBytes, st.mtime))
+                        .zipLeft(sink.advance(st.sizeBytes, 1))
+                    }.withParallelism(parallelism max 1)
+                  }
     yield ScanOutput((reused ++ hashed).sortBy(_.relPath), hashed.size)
 
 object FileScanner:
@@ -660,7 +661,7 @@ object FileScanner:
       res     <- countOf(p.id, scanned.files)
 ```
 
-(The `hashedFiles` count is wired into `ScanResult` in Task 5; ignore it here.)
+(The `hashed` count is wired into `ScanResult` in Task 5; ignore it here.)
 
 `cli/src/main/scala/diskrement/cli/Runner.scala` — add to BOTH backend stacks in
 `withPipeline` (imports: `diskrement.shell.ProgressSink`; `HashParallelism` comes
@@ -1008,7 +1009,7 @@ object Pipeline:
                      f.relPath -> FileFingerprint(f.sizeBytes, f.mtime, f.contentHash)).toMap)
                    .catchAll(e =>
                      ZIO.logWarning(s"fingerprint cache write failed: ${e.getMessage}"))
-      res     <- countOf(p.id, scanned.files, scanned.hashedFiles)
+      res     <- countOf(p.id, scanned.files, scanned.hashed)
     yield res
 ```
 
