@@ -72,7 +72,9 @@ object PipelineTestKit:
       StagedStore.live, CatalogStore.live
     )
 
-  def mkPipeline(snapshot: SourceSnapshot): URIO[
+  def mkPipeline(
+      snapshot: SourceSnapshot, failRead: Boolean = false, failWrite: Boolean = false
+  ): URIO[
       ProjectPaths & CatalogStore & FileScanner & Burner & DiscVerifier & StagedStore & Hasher,
       Pipeline] =
     for
@@ -85,7 +87,7 @@ object PipelineTestKit:
       hasher   <- ZIO.service[Hasher]
       cacheRef <- Ref.make(Map.empty[RelPath, FileFingerprint])
     yield PipelineLive(catalog, scanner, snapshot, burner, verifier, staged, hasher,
-      FakeFingerprintCache(cacheRef), paths)
+      FakeFingerprintCache(cacheRef, failRead, failWrite), paths)
 
   /** A temp source tree on the same filesystem as the work dir (both under the system temp dir). */
   def makeSource(files: Map[String, String]): ZIO[Scope, Throwable, Path] =

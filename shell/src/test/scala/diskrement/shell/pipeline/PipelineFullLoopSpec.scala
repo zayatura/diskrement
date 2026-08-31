@@ -42,8 +42,8 @@ object PipelineFullLoopSpec extends ZIOSpecDefault:
           view  <- ZIO.serviceWithZIO[CatalogStore](_.readView(proj.get.id))
           ver   <- ZIO.serviceWithZIO[CatalogStore](_.sessionsByState(proj.get.id, SessionState.VERIFIED))
         yield assertTrue(
-          s1 == ScanResult(2, 0, 0, 0, hashed = 2),
-          s2 == ScanResult(added = 1, modified = 1, deleted = 1, unchanged = 0, hashed = 2),
+          s1 == ScanResult(2, 0, 0, 0, hashed = Some(2), scannedFiles = 2),
+          s2 == ScanResult(added = 1, modified = 1, deleted = 1, unchanged = 0, hashed = Some(2), scannedFiles = 2),
           view.current.keySet.map(_.value) == Set("a.txt", "c.txt"),
           reps.forall(_.mismatches.isEmpty),
           hA.map(_.status) == List(VersionStatus.SUPERSEDED, VersionStatus.CURRENT),

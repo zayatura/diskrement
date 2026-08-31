@@ -16,7 +16,13 @@ import java.time.Instant
 /** Where a project's catalog DB and work dir live (resolved by the CLI in 3b). */
 final case class ProjectPaths(catalogPath: Path, workDir: Path)
 
-final case class ScanResult(added: Int, modified: Int, deleted: Int, unchanged: Int, hashed: Int)
+final case class ScanResult(
+    added: Int, modified: Int, deleted: Int, unchanged: Int,
+    /** Files freshly hashed this run; None when a staged scan was reused
+      * (no scan ran, so nothing was hashed or reused). */
+    hashed: Option[Int],
+    /** Total files in the scan (the denominator for `hashed`). */
+    scannedFiles: Int)
 
 /** How much outstanding change did NOT fit on the disc planned this cycle. */
 final case class RemainingEstimate(moreDiscs: Int, moreFiles: Int, moreBytes: Long)

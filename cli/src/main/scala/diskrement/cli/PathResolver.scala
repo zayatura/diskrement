@@ -22,7 +22,7 @@ object PathResolver:
         // agree even when --catalog is given as a relative path.
         val abs    = catalogPath.toAbsolutePath
         val parent = Option(abs.getParent).getOrElse(Paths.get("."))
-        ResolvedPaths(abs, parent, cacheFor(abs))
+        ResolvedPaths(abs, parent, cacheFor(abs, projectName))
       case None =>
         // A set-but-empty env var (e.g. STATE_DIRECTORY="") would otherwise resolve
         // to the JVM working dir via Paths.get(""); treat empty as unset.
@@ -31,10 +31,13 @@ object PathResolver:
           .orElse(env("XDG_DATA_HOME").filter(_.nonEmpty).map(d => Paths.get(d).resolve("diskrement")))
           .getOrElse(homeDir.resolve(".local/share/diskrement"))
         val catalogPath = dataDir.resolve(s"$projectName.sqlite")
-        ResolvedPaths(catalogPath, dataDir, cacheFor(catalogPath))
+        ResolvedPaths(catalogPath, dataDir, cacheFor(catalogPath, projectName))
 
-  /** `<catalog-stem>.scancache.sqlite`, resolved next to the catalog file. */
-  private def cacheFor(catalog: Path): Path =
+  /** Sidecar scan-fingerprint cache, namespaced by BOTH catalog and project:
+    * one catalog file may hold several projects, and the cache is keyed by
+    * relPath alone, so sharing it across projects would let one project's
+    * fingerprints shadow another's. */
+  private def cacheFor(catalog: Path, projectName: String): Path =
     val n    = catalog.getFileName.toString
     val stem = if n.endsWith(".sqlite") then n.dropRight(".sqlite".length) else n
-    catalog.resolveSibling(s"$stem.scancache.sqlite")
+    catalog.resolveSibling(s"$stem.$projectName.scancache.sqlite")

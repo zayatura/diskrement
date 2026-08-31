@@ -17,10 +17,14 @@ object RenderSpec extends ZIOSpecDefault:
     ScannedFile(RelPath(path), ContentHash("h"), size, Instant.parse("2026-06-21T00:00:00Z"))
 
   def spec = suite("Render")(
-    test("scan summary") {
-      assertTrue(Render.scan(ScanResult(2, 1, 0, 3, hashed = 3)) ==
+    test("scan summary: a fresh scan reports hashed/reused") {
+      assertTrue(Render.scan(ScanResult(2, 1, 0, 3, hashed = Some(3), scannedFiles = 6)) ==
         "Scanned: 2 added, 1 modified, 0 deleted, 3 unchanged.\n" +
         "Hashed 3 of 6 files (3 fingerprints reused).")
+    },
+    test("scan summary: a reused staged scan omits the hashed line") {
+      assertTrue(Render.scan(ScanResult(2, 1, 0, 3, hashed = None, scannedFiles = 6)) ==
+        "Scanned: 2 added, 1 modified, 0 deleted, 3 unchanged.")
     },
     test("plan: single disc with remaining estimate") {
       val rep = PlanReport(

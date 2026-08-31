@@ -13,10 +13,10 @@ object Render:
   private def gb(bytes: Long): String = f"${bytes / 1.0e9}%.1f GB"
 
   def scan(r: ScanResult): String =
-    val total  = r.added + r.modified + r.unchanged
-    val reused = total - r.hashed
-    s"Scanned: ${r.added} added, ${r.modified} modified, ${r.deleted} deleted, ${r.unchanged} unchanged.\n" +
-      s"Hashed ${r.hashed} of $total files ($reused fingerprints reused)."
+    val first = s"Scanned: ${r.added} added, ${r.modified} modified, ${r.deleted} deleted, ${r.unchanged} unchanged."
+    r.hashed match
+      case Some(h) => first + s"\nHashed $h of ${r.scannedFiles} files (${r.scannedFiles - h} fingerprints reused)."
+      case None    => first
 
   def plan(p: PlanReport): String =
     val d = p.disc

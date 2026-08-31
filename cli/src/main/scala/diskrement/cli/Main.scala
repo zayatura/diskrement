@@ -5,6 +5,13 @@ import zio.cli.*
 import zio.cli.HelpDoc.Span.text
 
 object Main extends ZIOCliDefault:
+  /** ZIO's default logger writes to stdout, which is the CLI's data channel
+    * (the IT suite parses it). Operator-facing diagnostics belong on stderr. */
+  override val bootstrap: ZLayer[Any, Nothing, Unit] =
+    Runtime.removeDefaultLoggers >>> Runtime.addLogger(
+      (_, _, level: LogLevel, message: () => String, _, _, _, _) =>
+        java.lang.System.err.println(s"[${level.label.toLowerCase}] ${message()}"))
+
   val cliApp = CliApp.make(
     name = "diskrement",
     version = "0.1.0",
