@@ -136,8 +136,14 @@ trait FingerprintCache:
   content_hash TEXT, updated_at TEXT)`; `PRAGMA user_version = 1`. Created on demand;
   a future incompatible version or a corrupt/unreadable file is **warned about,
   deleted, and recreated empty** — never fatal to a scan.
-- Implementation reuses the `Db` pool helpers, including the `setAutoCommit(false)`
-  transaction pattern (xerial autoCommit gotcha).
+- Implementation is raw JDBC with a per-call connection (WAL, busy_timeout,
+  transactional batched upsert) rather than the catalog's `Db` pool: the
+  wipe-and-recreate recovery must delete and reopen the file, which a live
+  pooled connection would fight, and two connections per scan are negligible.
+  Only genuine corruption (NOTADB/CORRUPT/MALFORMED, or a schema-version
+  mismatch) triggers the wipe; transient failures (locked, disk full) surface
+  as warnings without destroying a healthy cache. [Amended during Task 1
+  review — originally said "reuses the `Db` pool helpers".]
 - Lifecycle: `reset` does **not** touch it (it is not staged state); it survives
   arbitrarily and may reference deleted paths (harmless — `prior` lookups are by
   scanned path only).
