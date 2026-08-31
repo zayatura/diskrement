@@ -46,7 +46,8 @@ object XorrisoBurnerSpec extends ZIOSpecDefault:
       log <- Ref.make(List.empty[String])
       b    = XorrisoBurnerLive(BurnDevice.RealDevice("/dev/sr0"), FakeCmdRunner(runnerScript),
                FakeInspector(st, postBurnIdentity), ScriptedOperator(ans, log),
-               diskrement.shell.fs.HasherLive(), SnapshotWriterLive())
+               diskrement.shell.fs.HasherLive(), SnapshotWriterLive(),
+               diskrement.shell.ProgressSink.Noop, 2)
     yield (b, log)
 
   private val versionOk: List[String] => UIO[CmdResult] = cmd =>

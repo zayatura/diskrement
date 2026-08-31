@@ -36,16 +36,12 @@ private[fs] final case class CpCloner() extends Cloner:
     }.mapError(SnapshotError.SnapshotIoError(_))
       .flatMap { case (code, stderr) =>
         if code == 0 then ZIO.unit
-        else if isCloneUnsupported(stderr) then
+        else if Reflink.cloneUnsupported(stderr) then
           ZIO.fail(SnapshotError.NotCowCapable(dst.getParent, stderr.trim))
         else
           ZIO.fail(SnapshotError.SnapshotIoError(
             new RuntimeException(s"cp exited $code: ${stderr.trim}")))
       }
-
-  private def isCloneUnsupported(stderr: String): Boolean =
-    val s = stderr.toLowerCase
-    s.contains("failed to clone") || s.contains("operation not supported")
 
 /** Freezes the source tree by reflinking it to a deterministic dir under the
   * work dir. Lifecycle is explicit (create/release) and on-disk so it can span

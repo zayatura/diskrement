@@ -1,7 +1,8 @@
 package diskrement.shell.burn
 
 import diskrement.core._
-import diskrement.shell.fs.Hasher
+import diskrement.shell.ProgressSink
+import diskrement.shell.fs.{Hasher, HashParallelism}
 import zio._
 import zio.test._
 import java.nio.file.{Files, Path}
@@ -75,5 +76,19 @@ object SimulatedBurnerSpec extends ZIOSpecDefault:
           image = DiscImage(staging, snap, files, meta(cat, files), closeDisc = false)
           err   <- ZIO.serviceWithZIO[Burner](_.burn(image)).flip
         yield assertTrue(err.isInstanceOf[BurnError.SourceFileMissing])
+      },
+    test("staging preserves the source mtimes on the staged tree"):
+      ZIO.scoped {
+        for
+          world <- makeWorld
+          (snap, staging, cat) = world
+          srcMtime <- ZIO.attempt(Files.getLastModifiedTime(snap.resolve("a.txt")))
+          files = List(ScannedFile(RelPath("a.txt"), ContentHash(sha256("aaa")), 3, ts))
+          image = DiscImage(staging, snap, files, meta(cat, files), closeDisc = false)
+          _     <- ZIO.serviceWithZIO[Burner](_.burn(image))
+          dstMtime <- ZIO.attempt(Files.getLastModifiedTime(staging.resolve("data/a.txt")))
+        yield assertTrue(dstMtime == srcMtime)
       }
-  ).provideLayer((Hasher.live ++ SnapshotWriter.live) >>> SimulatedBurner.live)
+  ).provideLayer(
+    (Hasher.live ++ SnapshotWriter.live ++ ProgressSink.noop ++
+      ZLayer.succeed(HashParallelism(2))) >>> SimulatedBurner.live)
