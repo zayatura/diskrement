@@ -9,6 +9,7 @@ import diskrement.shell.catalog.{CatalogStore, Db, DbPath}
 import diskrement.shell.fs.*
 import diskrement.shell.model.{Project, ProjectInit}
 import diskrement.shell.pipeline.*
+import diskrement.shell.ProgressSink
 import zio.*
 import java.nio.file.{Files, Path, Paths}
 
@@ -137,6 +138,7 @@ object Runner:
           ZLayer.fromFunction((p: ProjectPaths) => DbPath(p.catalogPath)),
           Db.poolLayer,
           FileSystem.live, Hasher.live, FileScanner.live,
+          ProgressSink.noop, HashParallelism.fromEnv,
           SnapshotWriter.live, SimulatedBurner.live, SourceSnapshot.live,
           StagedStore.live, CatalogStore.live, StagingDiscVerifier.live,
           Pipeline.live)
@@ -146,6 +148,7 @@ object Runner:
           ZLayer.fromFunction((p: ProjectPaths) => DbPath(p.catalogPath)),
           Db.poolLayer,
           FileSystem.live, Hasher.live, FileScanner.live,
+          ProgressSink.noop, HashParallelism.fromEnv,
           SnapshotWriter.live, SourceSnapshot.live,
           StagedStore.live, CatalogStore.live,
           ZLayer.succeed(device: BurnDevice),

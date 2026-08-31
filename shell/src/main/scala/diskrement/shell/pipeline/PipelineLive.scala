@@ -76,8 +76,8 @@ private[pipeline] final case class PipelineLive(
                    .mapError(e => PipelineError.Failed(e))
       prior   <- catalog.fingerprints(p.id).mapError(PipelineError.Failed(_))
       scanned <- scanner.scan(handle.root, prior, verify).mapError(PipelineError.Failed(_))
-      _       <- staged.writeScan(paths.workDir, scanned)
-      res     <- countOf(p.id, scanned)
+      _       <- staged.writeScan(paths.workDir, scanned.files)
+      res     <- countOf(p.id, scanned.files)
     yield res
 
   private def countOf(pid: ProjectId, scanned: List[ScannedFile]): IO[PipelineError, ScanResult] =
