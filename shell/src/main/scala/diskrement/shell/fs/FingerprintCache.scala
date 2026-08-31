@@ -24,13 +24,17 @@ object CacheError:
   * corrupt or version-incompatible file is deleted and recreated empty. */
 trait FingerprintCache:
   def readAll: IO[CacheError, Map[RelPath, FileFingerprint]]
-  def putAll(entries: Map[RelPath, FileFingerprint]): IO[CacheError, Unit]
+  def putAll(entries: Iterable[(RelPath, FileFingerprint)]): IO[CacheError, Unit]
 
+/** Uses raw JDBC with a per-call connection rather than the catalog's `Db` pool:
+  * the wipe-and-retry recovery path must be able to delete and reopen the file
+  * out from under any open connection, which a live pooled connection would
+  * fight; two connections per scan (read + write) is negligible overhead. */
 final case class FingerprintCacheLive(path: Path) extends FingerprintCache:
   import FingerprintCacheLive.SchemaVersion
 
   def readAll: IO[CacheError, Map[RelPath, FileFingerprint]] =
-    guarded { conn =>
+    guarded("read") { conn =>
       val st = conn.createStatement()
       try
         val rs = st.executeQuery(
@@ -43,8 +47,8 @@ final case class FingerprintCacheLive(path: Path) extends FingerprintCache:
       finally st.close()
     }
 
-  def putAll(entries: Map[RelPath, FileFingerprint]): IO[CacheError, Unit] =
-    guarded { conn =>
+  def putAll(entries: Iterable[(RelPath, FileFingerprint)]): IO[CacheError, Unit] =
+    guarded("write") { conn =>
       conn.setAutoCommit(false)
       val ps = conn.prepareStatement(
         """insert into fingerprint (rel_path, size_bytes, mtime, content_hash, updated_at)
@@ -53,27 +57,44 @@ final case class FingerprintCacheLive(path: Path) extends FingerprintCache:
              size_bytes = excluded.size_bytes, mtime = excluded.mtime,
              content_hash = excluded.content_hash, updated_at = excluded.updated_at""")
       try
-        val now = Instant.now().toString
-        entries.foreach { case (rel, fp) =>
-          ps.setString(1, rel.value)
-          ps.setLong(2, fp.sizeBytes)
-          ps.setString(3, fp.mtime.toString)
-          ps.setString(4, fp.contentHash.value)
-          ps.setString(5, now)
-          ps.addBatch()
-        }
-        ps.executeBatch()
-        conn.commit()
+        try
+          val now = Instant.now().toString
+          entries.foreach { case (rel, fp) =>
+            ps.setString(1, rel.value)
+            ps.setLong(2, fp.sizeBytes)
+            ps.setString(3, fp.mtime.toString)
+            ps.setString(4, fp.contentHash.value)
+            ps.setString(5, now)
+            ps.addBatch()
+          }
+          ps.executeBatch()
+          conn.commit()
+        catch
+          case e: Throwable =>
+            conn.rollback()
+            throw e
       finally ps.close()
     }.unit
 
-  /** Run `use` on a fresh connection; on ANY failure assume the cache file is
-    * unusable, warn, wipe it, and retry once against a fresh empty cache. */
-  private def guarded[A](use: Connection => A): IO[CacheError, A] =
-    attempt(use).catchAll { e =>
-      ZIO.logWarning(
-        s"fingerprint cache at $path unreadable (${e.getMessage}); recreating empty") *>
-        wipe *> attempt(use).mapError(CacheError.CacheIoError(_))
+  /** Only these mean the FILE is bad; anything else (locked, disk full, perms)
+    * must not destroy a healthy cache. */
+  private def isCorrupt(e: Throwable): Boolean = e match
+    case _: IllegalStateException => true // schema-version mismatch from openConn
+    case s: java.sql.SQLException =>
+      val m = Option(s.getMessage).getOrElse("").toUpperCase
+      m.contains("SQLITE_NOTADB") || m.contains("SQLITE_CORRUPT") ||
+        m.contains("NOT A DATABASE") || m.contains("MALFORMED")
+    case _ => false
+
+  private def guarded[A](op: String)(use: Connection => A): IO[CacheError, A] =
+    attempt(use).catchAll {
+      case e if isCorrupt(e) =>
+        ZIO.logWarning(
+          s"fingerprint cache at $path is corrupt (${e.getMessage}); recreating empty") *>
+          wipe *> attempt(use).mapError(CacheError.CacheIoError(_))
+      case e =>
+        ZIO.logWarning(s"fingerprint cache $op failed at $path: ${e.getMessage}") *>
+          ZIO.fail(CacheError.CacheIoError(e))
     }
 
   private def attempt[A](use: Connection => A): Task[A] =
@@ -92,6 +113,7 @@ final case class FingerprintCacheLive(path: Path) extends FingerprintCache:
       val st = conn.createStatement()
       try
         st.execute("PRAGMA busy_timeout=5000")
+        st.execute("PRAGMA journal_mode=WAL")
         val rs  = st.executeQuery("PRAGMA user_version")
         val ver = { rs.next(); rs.getInt(1) }
         if ver == 0 then
@@ -117,6 +139,7 @@ final case class FingerprintCacheLive(path: Path) extends FingerprintCache:
       Files.deleteIfExists(path)
       Files.deleteIfExists(Path.of(path.toString + "-wal"))
       Files.deleteIfExists(Path.of(path.toString + "-shm"))
+      Files.deleteIfExists(Path.of(path.toString + "-journal"))
     }.ignoreLogged
 
 object FingerprintCacheLive:
