@@ -119,6 +119,40 @@ Your user must be able to open the drive — on most distros that means membersh
 in the `optical` group. `verify` mounts the disc via `udisks2` and re-hashes every
 file, including versions superseded by later sessions on the same disc.
 
+### Performance
+
+`scan` hashes new or changed content with up to 6 workers in parallel; override with
+`DISKREMENT_HASH_PARALLELISM` (a positive integer, clamped to 64 — an unusable value
+falls back to 6 with a warning). Long hashing or staging phases report progress on
+**stderr** (a refreshed line on a TTY, a periodic line otherwise), so `stdout` stays
+clean for data; diagnostics and warnings go to stderr too.
+
+`scan` also keeps a fingerprint cache: a sidecar SQLite file next to the catalog,
+named `<catalog-stem>.<project>.scancache.sqlite` (with the default catalog location
+that reads a little oddly, e.g. `photos.photos.scancache.sqlite` — deliberate, since
+one catalog file can hold several projects and the cache must not be shared between
+them). The first scan of a large library is the expensive one; later scans hash only
+what changed, and the scan output reports the split, e.g. `Hashed 12 of 75618 files
+(75606 fingerprints reused).` (omitted when a previously staged scan is reused, since
+no scan ran). The cache is disposable — deleting it is always safe and merely costs
+one full re-hash on the next scan. It is never embedded on a disc and `reset` does
+not touch it. `scan --verify` re-hashes everything regardless of the cache; this is
+also the escape hatch for the cache's one real caveat: it extends the same size+mtime
+trust burned files already get to *scanned* files, so an in-place edit that preserves
+both size and mtime goes unnoticed where an uncached scan would have re-hashed it.
+
+`burn` stages the disc tree with copy-on-write reflink clones where the filesystem
+supports them (the btrfs/XFS/bcachefs `init` already requires), falling back to a
+plain copy otherwise, then re-hashes the staged tree as the integrity gate before
+burning.
+
+`scripts/perf-bench.sh SOURCE_DIR WORK_AREA` runs a full init → scan → plan → burn →
+scan cycle against a throwaway project and reports per-step wall time alongside I/O
+(`rchar`/`read_bytes`/`write_bytes`) from `/proc/<pid>/io`, so a rescan's savings are
+visible directly. Set `DROP_CACHES=1` to drop the page cache before the first scan for
+cold-cache comparability. `SOURCE_DIR` and `WORK_AREA` must be on the same filesystem,
+since the benchmark's staging step relies on the same reflink support `burn` does.
+
 ---
 
 ## Building
