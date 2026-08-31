@@ -122,8 +122,8 @@ file, including versions superseded by later sessions on the same disc.
 ### Performance
 
 `scan` hashes new or changed content with up to 6 workers in parallel; override with
-`DISKREMENT_HASH_PARALLELISM` (a positive integer, clamped to 64 — an unusable value
-falls back to 6 with a warning). Long hashing or staging phases report progress on
+`DISKREMENT_HASH_PARALLELISM` (a positive integer, clamped to 64 — an unusable
+non-empty value falls back to 6 with a warning; an empty value is treated as unset). Long hashing or staging phases report progress on
 **stderr** (a refreshed line on a TTY, a periodic line otherwise), so `stdout` stays
 clean for data; diagnostics and warnings go to stderr too.
 
@@ -134,7 +134,7 @@ one catalog file can hold several projects and the cache must not be shared betw
 them). The first scan of a large library is the expensive one; later scans hash only
 what changed, and the scan output reports the split, e.g. `Hashed 12 of 75618 files
 (75606 fingerprints reused).` (omitted when a previously staged scan is reused, since
-no scan ran). The cache is disposable — deleting it is always safe and merely costs
+no scan ran — `scan --force` rescans instead of reusing it). The cache is disposable — deleting it is always safe and merely costs
 one full re-hash on the next scan. It is never embedded on a disc and `reset` does
 not touch it. `scan --verify` re-hashes everything regardless of the cache; this is
 also the escape hatch for the cache's one real caveat: it extends the same size+mtime
