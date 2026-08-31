@@ -28,8 +28,10 @@ private[fs] trait Cloner:
 private[fs] final case class CpCloner() extends Cloner:
   def reflinkCopy(src: Path, dst: Path): IO[SnapshotError, Unit] =
     ZIO.attemptBlockingIO {
-      val proc = new ProcessBuilder(
-        "cp", "--reflink=always", "-a", src.toString, dst.toString).start()
+      val pb = new ProcessBuilder(
+        "cp", "--reflink=always", "-a", src.toString, dst.toString)
+      pb.environment().put("LC_ALL", "C")
+      val proc = pb.start()
       val stderr = new String(proc.getErrorStream.readAllBytes(), "UTF-8")
       val code   = proc.waitFor()
       (code, stderr)

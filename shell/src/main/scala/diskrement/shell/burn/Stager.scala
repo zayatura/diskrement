@@ -25,6 +25,7 @@ object Stager:
     for
       _     <- clearAndCreate(dataDir)
       _     <- ZIO.foreachDiscard(image.files)(checkExists(image, _))
+      _     <- createDirs(dataDir, image.files)
       _     <- copyAll(image, dataDir)
       _     <- sink.phase("staging", image.files.map(_.sizeBytes).sum, image.files.size) {
                  ZIO.foreachParDiscard(image.files)(verifyOne(dataDir, hasher, sink, _))
@@ -50,6 +51,19 @@ object Stager:
       .mapError(BurnError.BurnIoError(_))
       .flatMap(e => ZIO.unless(e)(ZIO.fail(BurnError.SourceFileMissing(f.relPath))).unit)
 
+  /** Pre-create every destination directory so `cp --parents -p` never applies
+    * SOURCE directory modes/mtimes to the staged tree: a read-only source dir
+    * would break a later batch writing into it, and directory mtimes would
+    * otherwise depend on which batch created them. Staged directories keep the
+    * default permissions and creation-time mtimes that burned discs already
+    * carry; only FILE metadata is preserved from the source. */
+  private def createDirs(dataDir: Path, files: List[ScannedFile]): IO[BurnError, Unit] =
+    ZIO.attemptBlockingIO {
+      files.map(f => dataDir.resolve(f.relPath.value).getParent).distinct.foreach { parent =>
+        if parent != null then Files.createDirectories(parent)
+      }
+    }.mapError(BurnError.BurnIoError(_))
+
   /** Copy every planned file into dataDir, preserving structure and mtimes.
     * Tries batched reflink clones; on the first "cannot clone" it switches to
     * plain copies for the rest of the run. */
@@ -71,9 +85,11 @@ object Stager:
   private def reflinkBatch(
       image: DiscImage, dataDir: Path, rels: List[String]): IO[BurnError, Boolean] =
     ZIO.attemptBlockingIO {
-      val cmd = List("cp", "--reflink=always", "--parents", "-p", "-t", dataDir.toString) ++ rels
+      val cmd = List("cp", "--reflink=always", "--parents", "-p",
+                     "-t", dataDir.toAbsolutePath.toString, "--") ++ rels
       val pb  = new ProcessBuilder(cmd*)
-      pb.directory(image.snapshotRoot.toFile)
+      pb.directory(image.snapshotRoot.toAbsolutePath.toFile)
+      pb.environment().put("LC_ALL", "C")
       val proc   = pb.start()
       val stderr = new String(proc.getErrorStream.readAllBytes(), "UTF-8")
       (proc.waitFor(), stderr)
@@ -93,7 +109,7 @@ object Stager:
         val src = image.snapshotRoot.resolve(rel)
         val dst = dataDir.resolve(rel)
         Files.createDirectories(dst.getParent)
-        Files.copy(src, dst, StandardCopyOption.COPY_ATTRIBUTES)
+        Files.copy(src, dst, StandardCopyOption.COPY_ATTRIBUTES, StandardCopyOption.REPLACE_EXISTING)
         ()
       }.mapError(BurnError.BurnIoError(_))
     }
