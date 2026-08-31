@@ -1546,12 +1546,30 @@ tiny fixture and compare). At minimum verify `scan2` reports
 
 - [ ] **Step 3: Record results against targets**
 
-| metric | baseline | target | measured |
-|---|---|---|---|
-| scan #1 | 450 s | ≤ 180 s | |
-| scan #2 (post-burn rescan) | 410 s | ≤ 30 s | |
-| burn staging | 38 s | ≤ 25 s | |
-| scan #2 bytes read | 388.6 GB | ~0 | |
+**RESULT (2026-08-31, commit 241fb37, cold cache via `DROP_CACHES=1`).** Library at
+run time: 75,623 files / 413.641 GB (5 files more than the baseline's 75,618 — Immich
+added them during the day; immaterial to the comparison).
+
+| metric | baseline | target | measured | verdict |
+|---|---|---|---|---|
+| scan #1 | 450 s | ≤ 180 s | **132.4 s** | ✅ 3.4× faster |
+| scan #2 (post-burn rescan) | 410 s | ≤ 30 s | **4.0 s** | ✅ 103× faster |
+| burn staging (24.5 GB) | 38 s | ≤ 25 s | **14.8 s** | ✅ 2.6× faster |
+| scan #2 bytes read | 388.6 GB | ~0 | **0.012 GB** (rchar 0.064 GB) | ✅ |
+
+Supporting evidence from the same run: `scan1: Hashed 75623 of 75623 files (0
+fingerprints reused)` vs `scan2: Hashed 0 of 75623 files (75623 fingerprints reused)`;
+burn `write_bytes = 0.076 GB` for a 24.5 GB disc, confirming reflink staging rather
+than a silent plain-copy fallback; scan #1 sustained ~3.1 GB/s at ~290% CPU (baseline
+was ~920 MB/s at ~68% of one core), so the bottleneck moved from a single hashing
+thread to the LUKS+zstd storage path.
+
+Correctness cross-checks (separate run over the library's `2009/` subtree, 939 files):
+10 randomly sampled staged files had `recorded manifest hash == independent
+sha256(source)` **10/10** and `staged bytes == source bytes` **10/10**; and a
+cache-backed scan (`Hashed 0 of 939`) produced a **byte-identical** staged scan to a
+full `--verify` re-hash (`Hashed 939 of 939`), demonstrating the fingerprint cache
+returns truth rather than merely returning fast.
 
 If a target is missed, investigate before merging (parallelism tuning,
 progress-throttle overhead, cache read path) — do not relax targets silently.
