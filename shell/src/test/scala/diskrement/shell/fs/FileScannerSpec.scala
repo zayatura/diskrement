@@ -61,7 +61,7 @@ object FileScannerSpec extends ZIOSpecDefault:
       run(files, prior, verify = false).map { case (out, hashed) =>
         assertTrue(
           hashed == 0,
-          out.hashedFiles == 0,
+          out.hashed == 0,
           out.files.map(f => (f.relPath.value, f.contentHash.value)) ==
             List(("a", "old-a"), ("b", "old-b")))
       }
@@ -72,7 +72,7 @@ object FileScannerSpec extends ZIOSpecDefault:
         RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")),
         RelPath("b") -> FileFingerprint(20, mt1, ContentHash("old-b")))
       run(files, prior, verify = false).map { case (out, hashed) =>
-        assertTrue(hashed == 2, out.hashedFiles == 2,
+        assertTrue(hashed == 2, out.hashed == 2,
           out.files.map(_.contentHash.value) == List("H:a", "H:b"))
       }
     ,
@@ -80,7 +80,7 @@ object FileScannerSpec extends ZIOSpecDefault:
       val files = Map("a" -> FileStat(10, mt1))
       val prior = Map(RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")))
       run(files, prior, verify = true).map { case (out, hashed) =>
-        assertTrue(hashed == 1, out.hashedFiles == 1,
+        assertTrue(hashed == 1, out.hashed == 1,
           out.files.head.contentHash.value == "H:a")
       }
     ,
@@ -90,10 +90,19 @@ object FileScannerSpec extends ZIOSpecDefault:
         assertTrue(hashed == 2, out.files.map(_.relPath.value) == List("a", "z"))
       }
     ,
+    test("a mixed hit/miss scan merges and sorts across both partitions"):
+      val files = Map("z" -> FileStat(10, mt1), "a" -> FileStat(20, mt1))
+      val prior = Map(RelPath("z") -> FileFingerprint(10, mt1, ContentHash("old-z")))
+      run(files, prior, verify = false).map { case (out, hashed) =>
+        assertTrue(hashed == 1, out.hashed == 1,
+          out.files.map(f => (f.relPath.value, f.contentHash.value)) ==
+            List(("a", "H:a"), ("z", "old-z")))
+      }
+    ,
     test("many files hash to the same sorted result under parallelism"):
       val files = (1 to 100).map(i => f"f$i%03d" -> FileStat(i.toLong, mt1)).toMap
       run(files, Map.empty, verify = false).map { case (out, hashed) =>
-        assertTrue(hashed == 100, out.hashedFiles == 100,
+        assertTrue(hashed == 100, out.hashed == 100,
           out.files.map(_.relPath.value) == (1 to 100).map(i => f"f$i%03d").toList)
       }
     ,
@@ -104,6 +113,7 @@ object FileScannerSpec extends ZIOSpecDefault:
         case Exit.Failure(c) =>
           assertTrue(c.failureOption.exists {
             case ScanError.FileFailed(rel, _) => rel.value == "bad"
+            case _                             => false
           })
         case Exit.Success(_) => assertTrue(false)
       }
@@ -122,4 +132,15 @@ object FileScannerSpec extends ZIOSpecDefault:
         evs.count(_.startsWith("advance:")) == 1,
         evs.contains("advance:32:1"),
         evs.last == "done")
+    ,
+    test("a scan with no misses emits no progress events at all"):
+      val files = Map("a" -> FileStat(10, mt1))
+      val prior = Map(RelPath("a") -> FileFingerprint(10, mt1, ContentHash("old-a")))
+      for
+        counter <- Ref.make(0)
+        events  <- Ref.make(List.empty[String])
+        scanner  = FileScannerLive(FakeFs(files), CountingHasher(counter), RecordingSink(events), 4)
+        out     <- scanner.scan(root, prior, verify = false).orDie
+        evs     <- events.get
+      yield assertTrue(out.hashed == 0, out.files.size == 1, evs.isEmpty)
   )

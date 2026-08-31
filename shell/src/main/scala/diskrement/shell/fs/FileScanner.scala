@@ -13,9 +13,10 @@ object ScanError:
   final case class FileFailed(relPath: RelPath, cause: Throwable)
       extends ScanError(s"failed scanning ${relPath.value}", cause)
 
-/** The scanner's result: hashed files plus how many actually got hashed this
-  * run (fast-path fingerprint hits are the difference). */
-final case class ScanOutput(files: List[ScannedFile], hashedFiles: Int)
+/** Every file in the snapshot, fully hashed (reused or freshly computed) and
+  * sorted by relPath, plus how many were freshly hashed this run — the rest
+  * were fast-path fingerprint hits. */
+final case class ScanOutput(files: List[ScannedFile], hashed: Int)
 
 /** Walks a frozen snapshot and produces fully-hashed ScannedFiles, reusing a
   * stored hash when size+mtime match (fast path) unless `verify` is set.
@@ -44,25 +45,26 @@ final case class FileScannerLive(
                   val rel = RelPath(snapshotRoot.relativize(abs).toString)
                   fs.stat(abs).mapBoth(ScanError.FileFailed(rel, _), st => (abs, rel, st))
                 }
-      parts   = stats.partition { case (_, rel, st) =>
-                  !verify && prior.get(rel)
-                    .exists(fp => fp.sizeBytes == st.sizeBytes && fp.mtime == st.mtime)
+      split   = stats.map { case (abs, rel, st) =>
+                  prior.get(rel)
+                    .filter(fp => !verify && fp.sizeBytes == st.sizeBytes && fp.mtime == st.mtime)
+                    .toRight((abs, rel, st))
+                    .map(fp => ScannedFile(rel, fp.contentHash, st.sizeBytes, st.mtime))
                 }
-      hits    = parts._1
-      misses  = parts._2
-      reused  = hits.map { case (_, rel, st) =>
-                  ScannedFile(rel, prior(rel).contentHash, st.sizeBytes, st.mtime)
-                }
-      // phase() brackets the hash work: start before, done on ANY exit
-      // (success, failure, interrupt) — never leave the TTY line half-drawn.
-      hashed <- sink.phase("hashing", misses.map(_._3.sizeBytes).sum, misses.size) {
-                  ZIO.foreachPar(misses) { case (abs, rel, st) =>
-                    hasher.hash(abs)
-                      .mapBoth(ScanError.FileFailed(rel, _),
-                               h => ScannedFile(rel, h, st.sizeBytes, st.mtime))
-                      .zipLeft(sink.advance(st.sizeBytes, 1))
-                  }.withParallelism(parallelism)
-                }
+      reused  = split.collect { case Right(f) => f }
+      misses  = split.collect { case Left(m)  => m }
+      hashed <- if misses.isEmpty then ZIO.succeed(List.empty[ScannedFile])
+                else
+                  // phase() brackets the hash work: start before, done on ANY exit
+                  // (success, failure, interrupt) — never leave the TTY line half-drawn.
+                  sink.phase("hashing", misses.map(_._3.sizeBytes).sum, misses.size) {
+                    ZIO.foreachPar(misses) { case (abs, rel, st) =>
+                      hasher.hash(abs)
+                        .mapBoth(ScanError.FileFailed(rel, _),
+                                 h => ScannedFile(rel, h, st.sizeBytes, st.mtime))
+                        .zipLeft(sink.advance(st.sizeBytes, 1))
+                    }.withParallelism(parallelism max 1)
+                  }
     yield ScanOutput((reused ++ hashed).sortBy(_.relPath), hashed.size)
 
 object FileScanner:

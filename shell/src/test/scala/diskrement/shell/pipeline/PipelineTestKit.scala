@@ -1,5 +1,6 @@
 package diskrement.shell.pipeline
 
+import diskrement.shell.ProgressSink
 import diskrement.shell.burn.{Burner, DiscVerifier, SimulatedBurner, SnapshotWriter}
 import diskrement.shell.catalog.{CatalogStore, Db, DbPath}
 import diskrement.shell.fs.*
@@ -61,7 +62,7 @@ object PipelineTestKit:
       ZLayer.fromFunction((p: ProjectPaths) => DbPath(p.catalogPath)),
       Db.poolLayer,
       FileSystem.live, Hasher.live, FileScanner.live,
-      diskrement.shell.ProgressSink.noop, ZLayer.succeed(HashParallelism(4)),
+      ProgressSink.noop, ZLayer.succeed(HashParallelism(4)),
       SnapshotWriter.live, SimulatedBurner.live, StagingDiscVerifier.live,
       StagedStore.live, CatalogStore.live
     )
