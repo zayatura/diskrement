@@ -23,7 +23,7 @@ object PipelineScanResetSpec extends ZIOSpecDefault:
           res   <- pipe.scan("p", verify = false, force = false)
           staged<- ZIO.serviceWithZIO[StagedStore](_.readScan(paths.workDir))
         yield assertTrue(
-          res == ScanResult(added = 2, modified = 0, deleted = 0, unchanged = 0),
+          res == ScanResult(added = 2, modified = 0, deleted = 0, unchanged = 0, hashed = 2),
           staged.map(_.size) == Some(2))
       },
     test("reset clears staged scan and the staging dir"):

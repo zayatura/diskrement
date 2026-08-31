@@ -42,7 +42,7 @@ object Runner:
       resolved  = PathResolver.resolve(name, global, env, home)
       backend   = BackendResolver.resolve(global, env)
       _        <- ZIO.attempt(Files.createDirectories(resolved.dataDir)).mapError(PipelineError.Failed(_))
-      code     <- dispatch(cmd, resolved.catalogPath, backend)
+      code     <- dispatch(cmd, resolved.catalogPath, resolved.scanCachePath, backend)
     yield code
 
   private def projectName(cmd: DiskrementCommand): String = cmd match
@@ -55,22 +55,24 @@ object Runner:
     case c: DiskrementCommand.Verify  => c.name
     case c: DiskrementCommand.History => c.name
 
-  private def dispatch(cmd: DiskrementCommand, catalogPath: Path, backend: Backend): IO[PipelineError, ExitCode] =
+  private def dispatch(
+      cmd: DiskrementCommand, catalogPath: Path, cachePath: Path, backend: Backend
+  ): IO[PipelineError, ExitCode] =
     cmd match
       case c: DiskrementCommand.Init =>
         ZIO.attempt(Files.createDirectories(c.workDir)).mapError(PipelineError.Failed(_)) *>
-          withPipeline(catalogPath, c.workDir, backend) { pipeline =>
+          withPipeline(catalogPath, cachePath, c.workDir, backend) { pipeline =>
             val pi = ProjectInit(c.name, c.source.toString, c.workDir.toString, c.discType, c.marginPercent, c.copies, java.time.Instant.now())
             pipeline.init(pi).flatMap(id => printOut(Render.init(c.name, id))).as(ExitCode.success)
           }
 
       case c: DiskrementCommand.Scan =>
-        withProject(catalogPath, c.name, backend) { (_, pipeline) =>
+        withProject(catalogPath, cachePath, c.name, backend) { (_, pipeline) =>
           pipeline.scan(c.name, c.verify, c.force).flatMap(r => printOut(Render.scan(r))).as(ExitCode.success)
         }
 
       case c: DiskrementCommand.Plan =>
-        withProject(catalogPath, c.name, backend) { (_, pipeline) =>
+        withProject(catalogPath, cachePath, c.name, backend) { (_, pipeline) =>
           pipeline.plan(c.name, c.discType, c.willFinalize).flatMap(r => printOut(Render.plan(r))).as(ExitCode.success)
         }
 
@@ -80,7 +82,7 @@ object Runner:
         // overwrite the staged plan with the project's default disc type, silently
         // discarding a `plan --disc-type ...` choice. The user saw the plan when they
         // ran `plan`; `Render.burn` then reports what was actually written.
-        withProject(catalogPath, c.name, backend) { (_, pipeline) =>
+        withProject(catalogPath, cachePath, c.name, backend) { (_, pipeline) =>
           for
             ok   <- Prompt.confirm(s"Burn the staged plan for ${c.name}?", c.assumeYes)
             code <- if !ok then printOut("Aborted.").as(ExitCode.success)
@@ -89,22 +91,22 @@ object Runner:
         }
 
       case c: DiskrementCommand.Reset =>
-        withProject(catalogPath, c.name, backend) { (_, pipeline) =>
+        withProject(catalogPath, cachePath, c.name, backend) { (_, pipeline) =>
           pipeline.reset(c.name) *> printOut(s"Reset ${c.name}.").as(ExitCode.success)
         }
 
       case c: DiskrementCommand.Status =>
-        withProject(catalogPath, c.name, backend) { (project, pipeline) =>
+        withProject(catalogPath, cachePath, c.name, backend) { (project, pipeline) =>
           pipeline.status(c.name).flatMap(r => printOut(Render.status(project, r))).as(ExitCode.success)
         }
 
       case c: DiskrementCommand.Verify =>
-        withProject(catalogPath, c.name, backend) { (_, pipeline) =>
+        withProject(catalogPath, cachePath, c.name, backend) { (_, pipeline) =>
           pipeline.verify(c.name, c.disc).flatMap(rs => printOut(Render.verify(rs)).as(Render.verifyExit(rs)))
         }
 
       case c: DiskrementCommand.History =>
-        withProject(catalogPath, c.name, backend) { (_, pipeline) =>
+        withProject(catalogPath, cachePath, c.name, backend) { (_, pipeline) =>
           val rel = RelPath(c.relPath)
           pipeline.history(c.name, rel).flatMap(es => printOut(Render.history(rel, es))).as(ExitCode.success)
         }
@@ -112,10 +114,10 @@ object Runner:
   private def printOut(s: String): UIO[Unit] = Console.printLine(s).orDie
 
   /** Load the project row (for workDir + metadata), then run with a wired Pipeline. */
-  private def withProject[A](catalogPath: Path, name: String, backend: Backend)(
+  private def withProject[A](catalogPath: Path, cachePath: Path, name: String, backend: Backend)(
       use: (Project, Pipeline) => IO[PipelineError, A]): IO[PipelineError, A] =
     loadProject(catalogPath, name).flatMap { project =>
-      withPipeline(catalogPath, Paths.get(project.workDir), backend)(pipeline => use(project, pipeline))
+      withPipeline(catalogPath, cachePath, Paths.get(project.workDir), backend)(pipeline => use(project, pipeline))
     }
 
   private def loadProject(catalogPath: Path, name: String): IO[PipelineError, Project] =
@@ -128,7 +130,7 @@ object Runner:
       }
 
   /** Build the full Pipeline layer stack for one (catalog, workDir) pair and run `use`. */
-  private def withPipeline[A](catalogPath: Path, workDir: Path, backend: Backend)(
+  private def withPipeline[A](catalogPath: Path, cachePath: Path, workDir: Path, backend: Backend)(
       use: Pipeline => IO[PipelineError, A]): IO[PipelineError, A] =
     val layer = backend match
       case Backend.Simulated =>
@@ -140,6 +142,7 @@ object Runner:
           ConsoleProgress.live, HashParallelism.fromEnv,
           SnapshotWriter.live, SimulatedBurner.live, SourceSnapshot.live,
           StagedStore.live, CatalogStore.live, StagingDiscVerifier.live,
+          ZLayer.succeed(CachePath(cachePath)), FingerprintCache.live,
           Pipeline.live)
       case Backend.Real(device) =>
         ZLayer.make[Pipeline](
@@ -154,6 +157,7 @@ object Runner:
           CmdRunner.live, MediaInspector.live, DiscReader.live,
           ConsoleBurnOperator.live,
           XorrisoBurner.live, RealDiscVerifier.live,
+          ZLayer.succeed(CachePath(cachePath)), FingerprintCache.live,
           Pipeline.live)
     ZIO.serviceWithZIO[Pipeline](use)
       .provideLayer(layer)

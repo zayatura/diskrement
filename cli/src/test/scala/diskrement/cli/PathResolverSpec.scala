@@ -42,5 +42,13 @@ object PathResolverSpec extends ZIOSpecDefault:
     test("--catalog with a relative path is normalized to absolute") {
       val r = PathResolver.resolve("photos", GlobalOpts(Some(Paths.get("rel/my.sqlite")), None), env(Map.empty), home)
       assertTrue(r.catalogPath.isAbsolute, r.dataDir.isAbsolute, r.catalogPath.endsWith(Paths.get("rel/my.sqlite")))
+    },
+    test("scanCachePath is derived next to the catalog file") {
+      val r = PathResolver.resolve("proj", GlobalOpts(Some(Paths.get("/data/cat/proj.sqlite")), None), env(Map.empty), home)
+      assertTrue(r.scanCachePath == Paths.get("/data/cat/proj.scancache.sqlite"))
+    },
+    test("scanCachePath defaults next to the default catalog") {
+      val r = PathResolver.resolve("photos", GlobalOpts(None, None), env(Map.empty), home)
+      assertTrue(r.scanCachePath == Paths.get("/home/u/.local/share/diskrement/photos.scancache.sqlite"))
     }
   )

@@ -18,8 +18,9 @@ object RenderSpec extends ZIOSpecDefault:
 
   def spec = suite("Render")(
     test("scan summary") {
-      assertTrue(Render.scan(ScanResult(12, 3, 1, 540)) ==
-        "Scanned: 12 added, 3 modified, 1 deleted, 540 unchanged.")
+      assertTrue(Render.scan(ScanResult(2, 1, 0, 3, hashed = 3)) ==
+        "Scanned: 2 added, 1 modified, 0 deleted, 3 unchanged.\n" +
+        "Hashed 3 of 6 files (3 fingerprints reused).")
     },
     test("plan: single disc with remaining estimate") {
       val rep = PlanReport(

@@ -2,7 +2,7 @@ package diskrement.cli
 
 import java.nio.file.{Path, Paths}
 
-final case class ResolvedPaths(catalogPath: Path, dataDir: Path)
+final case class ResolvedPaths(catalogPath: Path, dataDir: Path, scanCachePath: Path)
 
 /** Pure resolution of the catalog file location. Precedence:
   *   --catalog  >  --data-dir  >  $STATE_DIRECTORY  >  $XDG_DATA_HOME/diskrement
@@ -22,7 +22,7 @@ object PathResolver:
         // agree even when --catalog is given as a relative path.
         val abs    = catalogPath.toAbsolutePath
         val parent = Option(abs.getParent).getOrElse(Paths.get("."))
-        ResolvedPaths(abs, parent)
+        ResolvedPaths(abs, parent, cacheFor(abs))
       case None =>
         // A set-but-empty env var (e.g. STATE_DIRECTORY="") would otherwise resolve
         // to the JVM working dir via Paths.get(""); treat empty as unset.
@@ -30,4 +30,11 @@ object PathResolver:
           .orElse(env("STATE_DIRECTORY").map(_.split(':').head).filter(_.nonEmpty).map(Paths.get(_)))
           .orElse(env("XDG_DATA_HOME").filter(_.nonEmpty).map(d => Paths.get(d).resolve("diskrement")))
           .getOrElse(homeDir.resolve(".local/share/diskrement"))
-        ResolvedPaths(dataDir.resolve(s"$projectName.sqlite"), dataDir)
+        val catalogPath = dataDir.resolve(s"$projectName.sqlite")
+        ResolvedPaths(catalogPath, dataDir, cacheFor(catalogPath))
+
+  /** `<catalog-stem>.scancache.sqlite`, resolved next to the catalog file. */
+  private def cacheFor(catalog: Path): Path =
+    val n    = catalog.getFileName.toString
+    val stem = if n.endsWith(".sqlite") then n.dropRight(".sqlite".length) else n
+    catalog.resolveSibling(s"$stem.scancache.sqlite")
