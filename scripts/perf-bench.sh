@@ -34,6 +34,11 @@
 #
 # Cleans up the throwaway project it created. Per-step stdout/stderr logs
 # are kept (outside the throwaway dir) and their path is printed at the end.
+#
+# Dependencies beyond bash itself: coreutils (date, mv, df, cat, rm, mkdir),
+# awk, grep, pgrep (procps), findmnt (util-linux), and the GNU-specific
+# `find -printf`, `df --output`, and `date +%s.%N` -- this script has not
+# been tested against BSD/macOS equivalents of these tools.
 set -euo pipefail
 
 # --- args -------------------------------------------------------------
@@ -85,16 +90,19 @@ fi
 
 # --- I4: free-space sanity guard ------------------------------------------
 # Reflink staging needs metadata space only (init enforces same-fs + CoW);
-# this is a sanity floor against an obviously-too-small WORK_AREA, not a
-# reservation for the 25 GB plain-copy-fallback worst case.
-MIN_FREE_MB=200
+# this is a floor for the throwaway project's *metadata* -- snapshot
+# records, scan.json, and the sqlite catalog (plus its burn-catalog.sqlite
+# copy) for every file in SOURCE_DIR, which adds up on a 75k-file tree --
+# not a reservation for the staged disc itself (which reflinks) or for the
+# 25 GB plain-copy-fallback worst case.
+MIN_FREE_MB=2000
 avail_kb="$(df --output=avail -k "$WORK_AREA" 2>/dev/null | tail -n1 | tr -d '[:space:]')" || avail_kb=""
 if [[ -z "$avail_kb" || ! "$avail_kb" =~ ^[0-9]+$ ]]; then
   echo "warning: could not determine free space on WORK_AREA ('$WORK_AREA'); continuing" >&2
 else
   avail_mb=$(( avail_kb / 1024 ))
   if (( avail_mb < MIN_FREE_MB )); then
-    echo "error: WORK_AREA ('$WORK_AREA') has only ${avail_mb} MB free; need at least ${MIN_FREE_MB} MB (sanity floor -- reflink staging itself needs metadata space only; ~25 GB would only matter on a silent plain-copy fallback)" >&2
+    echo "error: WORK_AREA ('$WORK_AREA') has only ${avail_mb} MB free; need at least ${MIN_FREE_MB} MB (floor for project metadata -- snapshot records, scan.json, and the sqlite catalog for every source file, not the staged disc itself, which reflinks; ~25 GB would only matter on a silent plain-copy fallback)" >&2
     exit 2
   fi
 fi
@@ -192,12 +200,19 @@ resolve_jvm_pid() {
 
 # sample_io PID OUTFILE — background sampler (C1+C3). Polls PID's I/O
 # counters every 0.2s and OVERWRITES outfile with the latest single-line
-# "rchar read_bytes write_bytes" triple. Since these counters are
-# monotonically non-decreasing for the life of a process, the last sample
-# written before the process exits *is* the peak/final value -- no separate
-# "final sample after exit" step is needed (and none is attempted: reading
-# /proc/<pid>/io after the pid is gone reliably fails, which was the source
-# of the old dead final-sample code).
+# "rchar read_bytes write_bytes" triple. These counters are monotonically
+# non-decreasing, so the last sample *taken* is the largest sample seen --
+# but it is NOT the process's final value: whatever the process reads or
+# writes after the last poll (up to one full 0.2s interval, in bytes) is
+# never captured, because no sample is attempted after the pid exits
+# (reading /proc/<pid>/io after the pid is gone reliably fails, which was
+# the source of the old dead final-sample code). On a real run (tens of
+# thousands of files spread over minutes) that residual final-interval gap
+# is a tiny fraction of the total and is acceptable. On a small/fast
+# fixture -- anything finishing in a second or two -- the last 0.2s can be
+# a large fraction of the whole run, and rchar/write_bytes will badly
+# under-report; do not use a small fixture to validate this instrument or
+# to draw conclusions from its numbers.
 sample_io() {
   local pid="$1" outfile="$2" jvm_pid="" snap
   : > "$outfile"
@@ -206,7 +221,8 @@ sample_io() {
       jvm_pid="$(resolve_jvm_pid "$pid" 2>/dev/null)" || jvm_pid=""
     fi
     if [[ -n "$jvm_pid" ]]; then
-      snap="$(get_io_snapshot "$jvm_pid")" && [[ -n "$snap" ]] && printf '%s\n' "$snap" > "$outfile"
+      snap="$(get_io_snapshot "$jvm_pid")" && [[ -n "$snap" ]] \
+        && printf '%s\n' "$snap" > "$outfile.tmp" && mv -f "$outfile.tmp" "$outfile"
     fi
     sleep 0.2
   done
@@ -244,7 +260,7 @@ run_step() {
   cache_after_kb="$(get_cached_kb)"
 
   if [[ -s "$io_file" ]]; then
-    read -r rchar read_bytes write_bytes < "$io_file"
+    read -r rchar read_bytes write_bytes < "$io_file" || true
   fi
 
   elapsed="$(awk -v a="$start" -v b="$end" 'BEGIN{printf "%.3f", b-a}')"
@@ -290,7 +306,7 @@ print_provenance() {
   repo_dir="$(cd -- "$SCRIPT_DIR/.." && pwd)"
   commit="$(git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null)" || commit="unknown"
   kernel="$(uname -r)"
-  ram_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+  ram_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" || true
   ram_gb="$(awk -v kb="${ram_kb:-0}" 'BEGIN{printf "%.1f", kb/1024/1024}')"
   fs_info="$(findmnt -no FSTYPE,OPTIONS -T "$WORK_AREA" 2>/dev/null)" || fs_info="unknown"
   if command -v java >/dev/null 2>&1; then
@@ -339,3 +355,8 @@ echo -n "  scan2: "; grep '^Hashed' "$LOG_DIR/scan2.stdout" || echo "(no Hashed 
 echo
 echo "note: rchar has a nonzero floor (jars, sqlite catalog, staged scan.json,"
 echo "      fingerprint sidecar) -- read scan2's rchar as '<< source size', not '== 0'."
+echo "note: the I/O sampler polls every 0.2s and cannot see any I/O the process"
+echo "      does after its last poll before exiting -- on a small/fast fixture"
+echo "      (a run finishing in a second or two) that residual can be a large"
+echo "      fraction of the total and rchar/write_bytes will badly under-report;"
+echo "      trust these numbers only on runs long enough to span many polls."
