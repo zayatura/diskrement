@@ -100,6 +100,32 @@ object FingerprintCacheSpec extends ZIOSpecDefault:
           m    <- c.readAll
         yield assertTrue(m.isEmpty)
     ,
+    test("a row with an undecodable mtime is skipped; the good row still comes back"):
+      ZIO.scoped:
+        for
+          path <- tmpCache
+          c     = FingerprintCacheLive(path)
+          _    <- c.putAll(Map(RelPath("good") -> fp(1, "h1")))
+          _    <- ZIO.attemptBlocking {
+                    val conn = java.sql.DriverManager.getConnection(s"jdbc:sqlite:$path")
+                    try
+                      val ps = conn.prepareStatement(
+                        """insert into fingerprint
+                             (rel_path, size_bytes, mtime, content_hash, updated_at)
+                           values (?, ?, ?, ?, ?)""")
+                      try
+                        ps.setString(1, "bad")
+                        ps.setLong(2, 2)
+                        ps.setString(3, "not-a-timestamp")
+                        ps.setString(4, "h2")
+                        ps.setString(5, Instant.now().toString)
+                        ps.executeUpdate()
+                      finally ps.close()
+                    finally conn.close()
+                  }.orDie
+          m    <- c.readAll
+        yield assertTrue(m == Map(RelPath("good") -> fp(1, "h1")))
+    ,
     test("a non-corrupt failure (locked file) does NOT wipe a healthy cache"):
       ZIO.scoped:
         for

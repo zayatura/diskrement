@@ -54,6 +54,18 @@ object PipelineRescanSpec extends ZIOSpecDefault:
         yield assertTrue(again.hashed == Some(2))
       }
     ,
+    test("verify with a staged scan present and force=false still re-hashes everything"):
+      ZIO.scoped {
+        for
+          paths  <- ZIO.service[ProjectPaths]
+          src    <- PipelineTestKit.makeSource(Map("a.txt" -> "aaa", "b.txt" -> "bb"))
+          pipe   <- PipelineTestKit.mkPipeline(FakeSnapshot())
+          _      <- pipe.init(initOf("p", src, paths.workDir))
+          _      <- pipe.scan("p", verify = false, force = false) // primes the staged scan
+          again  <- pipe.scan("p", verify = true, force = false)
+        yield assertTrue(again.hashed == Some(2))
+      }
+    ,
     test("a scan with a failing cache read still succeeds and hashes everything"):
       ZIO.scoped {
         for

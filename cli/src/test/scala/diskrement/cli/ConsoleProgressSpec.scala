@@ -61,6 +61,8 @@ object ConsoleProgressSpec extends ZIOSpecDefault:
           after.size == before.size + 2,
           after(before.size).startsWith("\r"),
           after(before.size).contains("3/10 files"),
+          after(before.size).contains(""),
+          after(before.size).endsWith("[K"),
           after(before.size + 1) == "\n"
         )
       ,

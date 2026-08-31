@@ -66,8 +66,8 @@ private[pipeline] final case class PipelineLive(
       p      <- project(name)
       reuse  <- staged.readScan(paths.workDir)
       result <- reuse match
-                  case Some(s) if !force => countOf(p.id, s, hashed = None, scannedFiles = s.size)
-                  case _                 => freshScan(p, verify)
+                  case Some(s) if !force && !verify => countOf(p.id, s, hashed = None, scannedFiles = s.size)
+                  case _                             => freshScan(p, verify)
     yield result
 
   private def freshScan(p: Project, verify: Boolean): IO[PipelineError, ScanResult] =

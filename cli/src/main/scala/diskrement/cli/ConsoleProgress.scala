@@ -103,7 +103,7 @@ object ConsoleProgress:
         val eta        = if rate > 0 then ((s.totalBytes - s.doneBytes) / rate).toLong else -1L
         val line       = format(s.label, s.doneBytes, s.totalBytes,
                                 s.doneFiles, s.totalFiles, rate, eta)
-        val chunk      = if tty then "\r" + line + "[K" else line + "\n"
+        val chunk      = if tty then "\r" + line + "[K" else line + "\n"
         write(chunk)
       }
 

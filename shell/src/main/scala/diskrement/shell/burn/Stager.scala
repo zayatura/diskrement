@@ -76,7 +76,11 @@ object Stager:
           else
             reflinkBatch(image, dataDir, b).flatMap { cloned =>
               if cloned then go(rest, false)
-              else plainCopy(image, dataDir, b) *> go(rest, true)
+              else
+                ZIO.logWarning(
+                  "reflink clone unsupported here; falling back to plain copies for this " +
+                    "burn (staging will read and write every byte)") *>
+                  plainCopy(image, dataDir, b) *> go(rest, true)
             }
     go(image.files.map(_.relPath.value).grouped(BatchSize).toList, fallback = false)
 

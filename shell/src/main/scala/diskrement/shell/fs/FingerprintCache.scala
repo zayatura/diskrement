@@ -8,7 +8,7 @@ import java.sql.{Connection, DriverManager}
 import java.time.Instant
 
 /** Filesystem location of a project's sidecar scan-fingerprint cache
-  * (`<catalog-stem>.scancache.sqlite`, resolved by the CLI). */
+  * (`<catalog-stem>.<project>.scancache.sqlite`, resolved by the CLI). */
 final case class CachePath(value: Path)
 
 /** Expected cache failures. Callers treat them as warnings, never fatal. */
@@ -40,11 +40,17 @@ final case class FingerprintCacheLive(path: Path) extends FingerprintCache:
         val rs = st.executeQuery(
           "select rel_path, size_bytes, mtime, content_hash from fingerprint")
         val b = Map.newBuilder[RelPath, FileFingerprint]
+        var skipped = 0
         while rs.next() do
-          b += RelPath(rs.getString(1)) -> FileFingerprint(
-            rs.getLong(2), Instant.parse(rs.getString(3)), ContentHash(rs.getString(4)))
-        b.result()
+          try
+            b += RelPath(rs.getString(1)) -> FileFingerprint(
+              rs.getLong(2), Instant.parse(rs.getString(3)), ContentHash(rs.getString(4)))
+          catch case _: java.time.format.DateTimeParseException => skipped += 1
+        (b.result(), skipped)
       finally st.close()
+    }.flatMap { case (rows, skipped) =>
+      ZIO.when(skipped > 0)(ZIO.logWarning(
+        s"fingerprint cache at $path: skipped $skipped unreadable row(s)")).as(rows)
     }
 
   def putAll(entries: Iterable[(RelPath, FileFingerprint)]): IO[CacheError, Unit] =
