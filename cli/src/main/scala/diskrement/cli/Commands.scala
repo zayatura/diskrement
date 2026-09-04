@@ -91,8 +91,19 @@ object Commands:
       .withHelp(HelpDoc.p("Show the full version history of one file."))
       .map { case (name, rel) => DiskrementCommand.History(name, rel) }
 
+  // --- disc mark-dead ---
+  private val disc: Command[DiskrementCommand] =
+    val yes = Options.boolean("yes").alias("y")
+    val markDead =
+      // zio-cli 0.5.0 has no named `Args.integer(name)` overload (unlike text/decimal),
+      // so the positional ordinal carries a description instead of a name.
+      Command("mark-dead", yes, nameArg ++ (Args.integer ?? "the ordinal of the disc to mark dead"))
+        .withHelp(HelpDoc.p("Mark a disc dead (destroyed/unreadable); its live files re-plan."))
+        .map { case (y, (name, disc)) => DiskrementCommand.MarkDead(name, disc.toInt, y) }
+    Command("disc").subcommands(markDead)
+
   /** The root command. zio-cli pairs the parent's GlobalOpts with the chosen
     * subcommand's value, giving `(GlobalOpts, DiskrementCommand)`. */
   val root: Command[(GlobalOpts, DiskrementCommand)] =
     Command("diskrement", globalOpts)
-      .subcommands(init, scan, plan, burn, reset, status, verify, history)
+      .subcommands(init, scan, plan, burn, reset, status, verify, history, disc)

@@ -69,6 +69,13 @@ object CommandsSpec extends ZIOSpecDefault:
       for v <- parse("status", "--catalog", "/tmp/c.sqlite", "photos")
       yield assertTrue(v._1 == GlobalOpts(Some(Paths.get("/tmp/c.sqlite")), None))
     },
+    test("disc mark-dead with ordinal and --yes") {
+      for a <- parse("disc", "mark-dead", "photos", "1")
+          b <- parse("disc", "mark-dead", "photos", "2", "--yes")
+      yield assertTrue(
+        a._2 == DiskrementCommand.MarkDead("photos", 1, assumeYes = false),
+        b._2 == DiskrementCommand.MarkDead("photos", 2, assumeYes = true))
+    },
     test("an unknown disc-type is rejected") {
       parse("init", "photos", "--source", "/s", "--work-dir", "/w", "--disc-type", "ZIP")
         .exit.map(e => assertTrue(e.isFailure))

@@ -67,6 +67,19 @@ object Render:
         v.mismatches.map(p => s"  ${p.value}").mkString("\n")
     }.mkString("\n")
 
+  def markDead(r: LostReport): String =
+    val header = s"Disc ${r.discOrdinal} marked DEAD."
+    val lost =
+      if r.lost.isEmpty then List("No versions permanently lost.")
+      else s"Permanently lost (${r.lost.size}):" ::
+        r.lost.map(e =>
+          s"  ${e.relPath.value}  ${gb(e.sizeBytes)}  ${e.contentHash.value}  (was session ${e.sessionOrdinal})")
+    val reburn =
+      if r.reburn.isEmpty then List("No live files to re-burn.")
+      else s"Re-burn on next scan/plan/burn (${r.reburn.size}):" ::
+        r.reburn.map(e => s"  ${e.relPath.value}")
+    (header :: lost ::: reburn).mkString("\n")
+
   def history(relPath: RelPath, entries: List[FileHistoryEntry]): String =
     if entries.isEmpty then s"No history for ${relPath.value}."
     else
