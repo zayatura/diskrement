@@ -80,7 +80,11 @@ object Migrations:
             file_version_id integer not null references file_version(id),
             fate            text    not null check (fate in ('LOST','REBURN'))
           )""",
-    sql"create index if not exists idx_disc_event_disc on disc_event(disc_id)"
+    sql"create index if not exists idx_disc_event_disc on disc_event(disc_id)",
+    // markDead's "is this version also on another live disc?" probe is a correlated
+    // subquery keyed on placement.file_version_id; without this it full-scans
+    // placement once per version on the dying disc.
+    sql"create index if not exists idx_placement_fv on placement(file_version_id)"
   )
 
   private val migrations: List[(Int, List[SqlFragment])] = List(1 -> v1, 2 -> v2)

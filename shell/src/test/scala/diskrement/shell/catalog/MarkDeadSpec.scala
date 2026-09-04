@@ -10,8 +10,9 @@ import java.time.Instant
 object MarkDeadSpec extends ZIOSpecDefault:
   private val init = ProjectInit("p", "/src", "/work", DiscType.BD_R, 2.0, 1,
     Instant.parse("2026-06-01T00:00:00Z"))
-  private val ts     = Instant.parse("2026-06-01T10:00:00Z")
-  private val deadAt = Instant.parse("2026-06-02T09:00:00Z")
+  private val ts      = Instant.parse("2026-06-01T10:00:00Z")
+  private val deadAt  = Instant.parse("2026-06-02T09:00:00Z")
+  private val deadAt2 = Instant.parse("2026-06-03T09:00:00Z")
 
   private def fw(path: String, hash: String, size: Long) =
     FileWrite(RelPath(path), ContentHash(hash), size, ts, "/data/" + path, 0)
@@ -32,6 +33,23 @@ object MarkDeadSpec extends ZIOSpecDefault:
     _    <- store(_.applyUpdate(session(1, 2,
               modified = List(fw("b", "b2", 25))).copy(projectId = pid)))
   yield pid
+
+  /** Every recorded casualty, as (relPath, fate). */
+  private val fateRows =
+    transaction(
+      sql"""select fv.rel_path, lv.fate from lost_version lv
+            join file_version fv on fv.id = lv.file_version_id"""
+        .query[(String, String)].selectAll).map(_.toList)
+
+  /** Put a's version on disc 2 as well, with a raw extra placement — exactly what
+    * copies>1 will eventually do for real. */
+  private val alsoPlaceAOnDisc2 =
+    transaction(
+      sql"""insert into placement (file_version_id, session_id, disc_path, copy_index)
+            select (select id from file_version where rel_path = 'a'),
+                   (select s.id from session s join disc d on d.id = s.disc_id
+                    where d.ordinal = 2),
+                   '/data/a', 1""".execute)
 
   def spec = suite("CatalogStore.markDead")(
     test("splits the disc's versions into lost (superseded) and reburn (current), records both"):
@@ -54,21 +72,66 @@ object MarkDeadSpec extends ZIOSpecDefault:
     ,
     test("a version that also lives on another live disc is neither lost nor reburned"):
       for
-        pid <- seed
-        // disc 2 exists via its own file; then wire a's version onto it with a raw
-        // extra placement — exactly what copies>1 will eventually do for real
-        _   <- ZIO.serviceWithZIO[CatalogStore](_.applyUpdate(session(2, 1,
-                 added = List(fw("c", "c1", 5))).copy(projectId = pid)))
-        _   <- transaction(
-                 sql"""insert into placement (file_version_id, session_id, disc_path, copy_index)
-                       select (select id from file_version where rel_path = 'a'),
-                              (select s.id from session s join disc d on d.id = s.disc_id
-                               where d.ordinal = 2),
-                              '/data/a', 1""".execute)
-        rep <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
+        pid   <- seed
+        // disc 2 exists via its own file; then wire a's version onto it too
+        _     <- ZIO.serviceWithZIO[CatalogStore](_.applyUpdate(session(2, 1,
+                   added = List(fw("c", "c1", 5))).copy(projectId = pid)))
+        _     <- alsoPlaceAOnDisc2
+        rep   <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
+        fates <- fateRows
       yield assertTrue(
         rep.reburn.map(_.relPath.value) == List("b"),
-        rep.lost.map(_.relPath.value) == List("b"))
+        rep.lost.map(_.relPath.value) == List("b"),
+        // nothing was recorded against a: its bytes still exist on live disc 2
+        fates.sorted == List(("b", "LOST"), ("b", "REBURN")))
+    ,
+    test("a copy on an already-dead disc no longer shields a version"):
+      for
+        pid  <- seed
+        _    <- ZIO.serviceWithZIO[CatalogStore](_.applyUpdate(session(2, 1,
+                  added = List(fw("c", "c1", 5))).copy(projectId = pid)))
+        _    <- alsoPlaceAOnDisc2
+        rep2 <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 2, deadAt))
+        rep1 <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt2))
+      yield assertTrue(
+        // while disc 1 lived, a's copy there kept it off disc 2's casualty list
+        rep2.reburn.map(_.relPath.value) == List("c"),
+        rep2.lost.isEmpty,
+        // now that disc 2 is dead too, a's only surviving copy is gone
+        rep1.reburn.map(e => (e.relPath.value, e.contentHash.value)) ==
+          List(("a", "a1"), ("b", "b2")),
+        rep1.lost.map(_.relPath.value) == List("b"))
+    ,
+    test("a path whose latest change is DELETED is lost, never reburned"):
+      for
+        pid   <- seed
+        _     <- ZIO.serviceWithZIO[CatalogStore](_.applyUpdate(
+                   session(1, 3, deleted = List(RelPath("a"))).copy(projectId = pid)))
+        rep   <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
+        fates <- fateRows
+      yield assertTrue(
+        rep.lost.map(e => (e.relPath.value, e.contentHash.value, e.sessionOrdinal)) ==
+          List(("a", "a1", 1), ("b", "b1", 1)),
+        rep.reburn.map(e => (e.relPath.value, e.contentHash.value)) == List(("b", "b2")),
+        fates.sorted == List(("a", "LOST"), ("b", "LOST"), ("b", "REBURN")))
+    ,
+    test("several placements of one version on the dying disc make one casualty"):
+      for
+        pid   <- seed
+        // b@b2 was burned in session 2; pretend a second copy also landed in session 1
+        _     <- transaction(
+                   sql"""insert into placement (file_version_id, session_id, disc_path, copy_index)
+                         select (select max(id) from file_version where rel_path = 'b'),
+                                (select s.id from session s join disc d on d.id = s.disc_id
+                                 where d.ordinal = 1 and s.ordinal = 1),
+                                '/data/b', 1""".execute)
+        rep   <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
+        fates <- fateRows
+      yield assertTrue(
+        rep.reburn.map(e => (e.relPath.value, e.contentHash.value)) ==
+          List(("a", "a1"), ("b", "b2")),
+        rep.lost.map(_.relPath.value) == List("b"),
+        fates.sorted == List(("a", "REBURN"), ("b", "LOST"), ("b", "REBURN")))
     ,
     test("marking a dead disc again fails; unknown ordinal fails"):
       for

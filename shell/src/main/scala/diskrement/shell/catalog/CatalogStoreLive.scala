@@ -348,11 +348,14 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
     }
 
   /** Versions placed on the dying disc that have no copy on any other live disc,
-    * flagged with whether each is its path's current version. */
+    * flagged with whether each is its path's current version. Grouped by version:
+    * a version with several placements on this disc (a later session, or copies>1)
+    * is one casualty, not one per placement — `lost_version` is append-only. */
   private def deadDiscVersions(pid: ProjectId, discId: Long)
       : ZIO[ZConnection, Throwable, List[(Long, String, String, Long, Int, Int)]] =
-    sql"""select fv.id, fv.rel_path, fv.content_hash, fv.size_bytes, s.ordinal,
-                 case when cur.fvid is not null then 1 else 0 end as is_current
+    sql"""select fv.id, fv.rel_path, fv.content_hash, fv.size_bytes,
+                 min(s.ordinal) as sess_ord,
+                 max(case when cur.fvid is not null then 1 else 0 end) as is_current
           from placement p
           join session s on s.id = p.session_id
           join file_version fv on fv.id = p.file_version_id
@@ -373,7 +376,8 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
               where p2.file_version_id = fv.id and d2.id <> $discId
                 and not exists (select 1 from disc_event e
                                 where e.disc_id = d2.id and e.kind = 'MARKED_DEAD'))
-          order by fv.rel_path, s.ordinal"""
+          group by fv.id, fv.rel_path, fv.content_hash, fv.size_bytes
+          order by fv.rel_path, sess_ord"""
       .query[(Long, String, String, Long, Int, Int)].selectAll.map(_.toList)
 
   def snapshotTo(dest: Path): IO[CatalogError, Unit] =
