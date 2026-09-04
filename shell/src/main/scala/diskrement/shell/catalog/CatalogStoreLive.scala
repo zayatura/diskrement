@@ -153,7 +153,13 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
               where fv.project_id = ${project.value}
             ) l
             join file_version fv on fv.id = l.fvid
-            where l.rn = 1 and l.kind <> 'DELETED'"""
+            where l.rn = 1 and l.kind <> 'DELETED'
+              and exists (
+                select 1 from placement p
+                join session s on s.id = p.session_id
+                where p.file_version_id = fv.id
+                  and not exists (select 1 from disc_event e
+                                  where e.disc_id = s.disc_id and e.kind = 'MARKED_DEAD'))"""
         .query[(String, String, Long)].selectAll
     }.map { rows =>
       CatalogView(rows.iterator.map { case (p, h, s) =>
@@ -247,7 +253,10 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
   def fileHistory(project: ProjectId, relPath: RelPath): IO[CatalogError, List[FileHistoryEntry]] =
     tx {
       sql"""select fv.content_hash, fv.size_bytes, d.ordinal, s.ordinal, fvk.kind,
-                   case when fv.id = cur.fvid then 1 else 0 end as is_current
+                   case when fv.id = cur.fvid then 1 else 0 end as is_current,
+                   case when exists (select 1 from disc_event e
+                                     where e.disc_id = d.id and e.kind = 'MARKED_DEAD')
+                        then 1 else 0 end as disc_dead
             from file_version fv
             join placement p on p.file_version_id = fv.id
             join session s   on s.id = p.session_id
@@ -268,10 +277,11 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
             ) cur on cur.fvid = fv.id
             where fv.project_id = ${project.value} and fv.rel_path = ${relPath.value}
             order by fv.id"""
-        .query[(String, Long, Int, Int, String, Int)].selectAll
-    }.map(_.toList.map { case (ch, sz, dOrd, sOrd, kind, isCurrent) =>
+        .query[(String, Long, Int, Int, String, Int, Int)].selectAll
+    }.map(_.toList.map { case (ch, sz, dOrd, sOrd, kind, isCurrent, discDead) =>
       val status =
         if isCurrent == 1 then VersionStatus.CURRENT
+        else if discDead == 1 then VersionStatus.LOST
         else if kind == "DELETED" then VersionStatus.DELETED
         else VersionStatus.SUPERSEDED
       FileHistoryEntry(ContentHash(ch), sz, dOrd, sOrd, status)

@@ -144,4 +144,21 @@ object MarkDeadSpec extends ZIOSpecDefault:
           .exists(_.isInstanceOf[CatalogError.IllegalStatusTransition]),
         bad.causeOption.flatMap(_.failureOption)
           .exists(_.isInstanceOf[CatalogError.ConstraintViolation]))
+    ,
+    test("readView drops current versions whose only copy is on a dead disc"):
+      for
+        pid    <- seed
+        before <- ZIO.serviceWithZIO[CatalogStore](_.readView(pid))
+        _      <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
+        after  <- ZIO.serviceWithZIO[CatalogStore](_.readView(pid))
+      yield assertTrue(
+        before.current.keySet.map(_.value) == Set("a", "b"),
+        after.current.isEmpty)
+    ,
+    test("fileHistory flags versions on a dead disc as LOST; the current version stays CURRENT"):
+      for
+        pid <- seed
+        _   <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
+        hb  <- ZIO.serviceWithZIO[CatalogStore](_.fileHistory(pid, RelPath("b")))
+      yield assertTrue(hb.map(_.status) == List(VersionStatus.LOST, VersionStatus.CURRENT))
   ).provideLayer(TestDb.layer)
