@@ -45,12 +45,17 @@ object Scenario09MarkDead:
           ver  <- Support.run(cli, "verify", "p")
           hb   <- Support.run(cli, "history", "p", "b.txt")
         yield assertTrue(
+          // the mark-dead report: one superseded version lost, two files to re-burn
           dead.exitCode == 0,
           dead.stdout.contains("Disc 1 marked DEAD."),
           dead.stdout.contains("Permanently lost (1):"),
-          dead.stdout.contains("b.txt"),
+          // the lost entry is b.txt's superseded v1, not just "b.txt appears
+          // somewhere" -- it also appears in the re-burn list below
+          dead.stdout.linesIterator.exists(l =>
+            l.trim.startsWith("b.txt") && l.contains("(was session 1)")),
           dead.stdout.contains("Re-burn on next scan/plan/burn (2):"),
           st.stdout.contains("DEAD"),
+          // recovery cycle: the dead disc's live content lands on a fresh disc 2
           sc.exitCode == 0,
           // the dead disc's content is gone from the burned view, so both files
           // read as new work rather than as unchanged
@@ -60,9 +65,11 @@ object Scenario09MarkDead:
           b2.exitCode == 0,
           b2.stdout.contains("Wrote disc 2"),
           d2 == Set("a.txt", "b.txt"),
+          // verify skips the dead disc; history records the loss
           ver.exitCode == 0,
           !verified(ver.stdout, 1),
           verified(ver.stdout, 2),
+          ver.stdout.contains("files OK"),
           hb.exitCode == 0,
           hb.stdout.contains("LOST"))
       }
