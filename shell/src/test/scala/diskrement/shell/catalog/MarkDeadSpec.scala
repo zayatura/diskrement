@@ -161,4 +161,28 @@ object MarkDeadSpec extends ZIOSpecDefault:
         _   <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
         hb  <- ZIO.serviceWithZIO[CatalogStore](_.fileHistory(pid, RelPath("b")))
       yield assertTrue(hb.map(_.status) == List(VersionStatus.LOST, VersionStatus.CURRENT))
+    ,
+    test("a current version with a surviving copy on a live disc stays in readView"):
+      for
+        pid  <- seed
+        // disc 2 exists via its own file; then wire a's version onto it too
+        _    <- ZIO.serviceWithZIO[CatalogStore](_.applyUpdate(session(2, 1,
+                  added = List(fw("c", "c1", 5))).copy(projectId = pid)))
+        _    <- alsoPlaceAOnDisc2
+        _    <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
+        view <- ZIO.serviceWithZIO[CatalogStore](_.readView(pid))
+      yield assertTrue(
+        // a survives on live disc 2; b@b2 is disc-1-only and drops; c is native to disc 2
+        view.current.keySet.map(_.value) == Set("a", "c"))
+    ,
+    test("a current version on a dead disc still renders CURRENT, not LOST"):
+      for
+        pid <- seed
+        _   <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
+        ha  <- ZIO.serviceWithZIO[CatalogStore](_.fileHistory(pid, RelPath("a")))
+      yield assertTrue(
+        // a@a1 is both a's only version and its current one, and disc 1 (its only copy)
+        // is dead: is_current wins over disc_dead, per the plan's Step 5 note — the
+        // source still has the file and it is about to re-burn, so it stays CURRENT.
+        ha.map(_.status) == List(VersionStatus.CURRENT))
   ).provideLayer(TestDb.layer)
