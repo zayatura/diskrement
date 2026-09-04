@@ -22,7 +22,12 @@ object PipelineError:
       extends PipelineError(s"no disc with ordinal $ordinal")
   final case class DiscAlreadyDead(ordinal: Int)
       extends PipelineError(s"disc $ordinal is already marked dead")
+  final case class DiscIsDead(ordinal: Int)
+      extends PipelineError(s"disc $ordinal is marked dead")
+  // `plan` alone is the whole recovery: the staged scan and the snapshot both
+  // survive, and plan re-reads the view and disc states. Do NOT advise `reset` —
+  // it deletes workDir/staging, which is the simulated backend's verify evidence.
   final case class StalePlan(detail: String)
-      extends PipelineError(s"staged plan is stale: $detail (run reset, then scan/plan)")
+      extends PipelineError(s"staged plan is stale: $detail (re-run plan)")
   final case class Burn(cause: BurnError) extends PipelineError(cause.getMessage, cause)
   final case class Failed(cause: Throwable) extends PipelineError("pipeline failure", cause)

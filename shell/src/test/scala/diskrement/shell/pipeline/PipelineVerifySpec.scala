@@ -31,6 +31,25 @@ object PipelineVerifySpec extends ZIOSpecDefault:
           reps.size == 1, reps.head.mismatches.isEmpty, reps.head.filesChecked == 1,
           ver.map(_.discOrdinal) == List(1))
       },
+    test("verify of an explicitly named live disc checks just that disc"):
+      ZIO.scoped {
+        for
+          paths <- ZIO.service[ProjectPaths]
+          src   <- PipelineTestKit.makeSource(Map("a.txt" -> "aaa"))
+          pipe  <- PipelineTestKit.mkPipeline(FakeSnapshot())
+          _     <- pipe.init(initOf("p", src, paths.workDir))
+          _     <- pipe.scan("p", verify = false, force = false)
+          _     <- pipe.plan("p", None, finalize = false)
+          _     <- pipe.burn("p")
+          reps  <- pipe.verify("p", Some(1))
+          gone  <- pipe.verify("p", Some(99)).exit
+        yield assertTrue(
+          reps.map(_.discOrdinal) == List(1),
+          reps.head.mismatches.isEmpty,
+          !reps.head.skipped,
+          // a named ordinal that does not exist is an error, not a silent exit 0
+          gone.causeOption.flatMap(_.failureOption).contains(PipelineError.UnknownDisc(99)))
+      },
     test("verify detects a corrupted staged file"):
       ZIO.scoped {
         for

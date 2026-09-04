@@ -87,6 +87,7 @@ object Render:
       case _: PipelineError.SnapshotMissing   => ExitCode(2)
       case _: PipelineError.UnknownDisc       => ExitCode(2)
       case _: PipelineError.DiscAlreadyDead   => ExitCode(2)
+      case _: PipelineError.DiscIsDead        => ExitCode(2)
       case _: PipelineError.StalePlan         => ExitCode(2)
       case _: PipelineError.NotSameFilesystem => ExitCode(3)
       case _: PipelineError.NotCowCapable     => ExitCode(3)

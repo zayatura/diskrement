@@ -247,6 +247,16 @@ private[pipeline] final case class PipelineLive(
       p        <- project(name)
       states   <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
       sessions <- catalog.sessionsByState(p.id, SessionState.BURNED).mapError(PipelineError.Failed(_))
+      // An explicitly named ordinal is an assertion of intent about that disc, so
+      // resolve it before filtering: silently reporting "nothing to verify" (exit 0)
+      // for a dead or nonexistent disc reads as reassurance. A sweep still skips
+      // dead discs quietly, which is the right default.
+      _        <- ZIO.foreachDiscard(discOrdinal) { o =>
+                    states.find(_.ordinal == o) match
+                      case None                                   => ZIO.fail(PipelineError.UnknownDisc(o))
+                      case Some(s) if s.status == DiscStatus.DEAD => ZIO.fail(PipelineError.DiscIsDead(o))
+                      case Some(_)                                => ZIO.unit
+                  }
       targets   = states.filter(_.status != DiscStatus.DEAD).map(_.ordinal)
                     .filter(o => discOrdinal.forall(_ == o))
       reps     <- ZIO.foreach(targets)(o => verifyDisc(p, o, sessions))

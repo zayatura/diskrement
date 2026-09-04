@@ -63,9 +63,15 @@ object PipelineMarkDeadSpec extends ZIOSpecDefault:
           bad   <- pipe.markDead("p", 9).exit
           _     <- pipe.markDead("p", 1)
           dup   <- pipe.markDead("p", 1).exit
+          // an explicitly named ordinal must never be answered with a reassuring
+          // "nothing to verify" / exit 0 -- a sweep skipping dead discs is different
+          vdead <- pipe.verify("p", Some(1)).exit
+          vgone <- pipe.verify("p", Some(99)).exit
         yield assertTrue(
           bad.causeOption.flatMap(_.failureOption).contains(PipelineError.UnknownDisc(9)),
-          dup.causeOption.flatMap(_.failureOption).contains(PipelineError.DiscAlreadyDead(1)))
+          dup.causeOption.flatMap(_.failureOption).contains(PipelineError.DiscAlreadyDead(1)),
+          vdead.causeOption.flatMap(_.failureOption).contains(PipelineError.DiscIsDead(1)),
+          vgone.causeOption.flatMap(_.failureOption).contains(PipelineError.UnknownDisc(99)))
       }
     ,
     test("burn refuses a staged plan whose target disc was marked dead after planning"):
@@ -84,8 +90,20 @@ object PipelineMarkDeadSpec extends ZIOSpecDefault:
           _     <- pipe.plan("p", None, finalize = false)
           _     <- pipe.markDead("p", 1)
           res   <- pipe.burn("p").exit
+          // The recovery the error message advertises: `plan` ALONE, no reset. The
+          // staged scan and the snapshot both survive, and plan re-reads the view and
+          // the disc states, so it re-plans onto a fresh disc 2.
+          plan2 <- pipe.plan("p", None, finalize = false)
+          bres  <- pipe.burn("p")
+          vreps <- pipe.verify("p", None)
         yield assertTrue(
           res.causeOption.flatMap(_.failureOption)
-            .exists(_.isInstanceOf[PipelineError.StalePlan]))
+            .exists(_.isInstanceOf[PipelineError.StalePlan]),
+          plan2.disc.isNew,
+          plan2.disc.ordinal == 2,
+          plan2.disc.files.map(_.relPath.value) == List("a.txt", "b.txt"),
+          bres.disc.ordinal == 2,
+          vreps.map(_.discOrdinal) == List(2),
+          vreps.forall(r => !r.skipped && r.mismatches.isEmpty))
       }
   ).provideLayer(PipelineTestKit.env.orDie)
