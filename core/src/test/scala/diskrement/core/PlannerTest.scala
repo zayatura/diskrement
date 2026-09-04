@@ -75,3 +75,15 @@ class PlannerTest extends munit.FunSuite:
     val plan = Planner.plan(cs, Nil, cap100)
     assertEquals(plan.oversized.map(_.relPath.value), List("big"))
     assertEquals(plan.discs.flatMap(_.files).map(_.relPath.value), List("ok"))
+
+  test("a DEAD disc is never topped off; new files open the next fresh disc"):
+    // dead disc 1 has plenty of free room, but must be ignored entirely
+    val dead = DiscState(1, DiscStatus.DEAD, usableBytes = 100L, usedBytes = 10L)
+    val cs   = changesOf(List(sf("a", 30)))
+    val plan = Planner.plan(cs, discs = List(dead), newDiscCap = cap100)
+    assertEquals(plan.discs.size, 1)
+    val d = plan.discs.head
+    assert(d.isNew)
+    assert(!d.willFinalize)
+    // the dead disc keeps its ordinal; the fresh disc takes the next one
+    assertEquals(d.ordinal, 2)

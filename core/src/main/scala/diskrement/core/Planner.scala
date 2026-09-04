@@ -1,8 +1,10 @@
 package diskrement.core
 
-/** Whether a disc can still receive new sessions. */
+/** Whether a disc can still receive new sessions. DEAD means the physical disc
+  * is lost or unreadable (a "coaster"): derived from a catalog mark-dead event,
+  * never stored in the disc row itself. */
 enum DiscStatus:
-  case OPEN, FINALIZED
+  case OPEN, FINALIZED, DEAD
 
 /** An existing disc as known to the catalog when planning begins. */
 final case class DiscState(
