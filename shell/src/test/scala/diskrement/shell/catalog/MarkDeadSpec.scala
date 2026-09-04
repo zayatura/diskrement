@@ -70,6 +70,19 @@ object MarkDeadSpec extends ZIOSpecDefault:
         states == List(DiscState(1, DiscStatus.DEAD, 1_000_000L, 55L)),
         fates.toList.sorted == List(("a", "REBURN"), ("b", "LOST"), ("b", "REBURN")))
     ,
+    test("deadness is derived: the disc row is untouched and one event is recorded"):
+      // The status column keeps its OPEN/FINALIZED CHECK forever; DEAD exists only in
+      // the derived DiscState. Without this, an update-in-place implementation would
+      // still satisfy the readDiscStates assertion above.
+      for
+        pid    <- seed
+        _      <- ZIO.serviceWithZIO[CatalogStore](_.markDead(pid, 1, deadAt))
+        status <- transaction(
+                    sql"select status from disc where ordinal = 1".query[String].selectAll)
+        events <- transaction(
+                    sql"select kind from disc_event".query[String].selectAll)
+      yield assertTrue(status.toList == List("OPEN"), events.toList == List("MARKED_DEAD"))
+    ,
     test("a version that also lives on another live disc is neither lost nor reburned"):
       for
         pid   <- seed

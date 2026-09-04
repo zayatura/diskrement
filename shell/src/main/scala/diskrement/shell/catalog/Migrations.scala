@@ -74,6 +74,10 @@ object Migrations:
             kind    text    not null check (kind in ('MARKED_DEAD')),
             at      text    not null
           )""",
+    // The immutable record of each version's fate at mark-dead time. `fileHistory`
+    // re-derives LOST from disc_event rather than reading this table, and cannot
+    // reproduce it: a REBURN-fated version that is later superseded reads LOST from
+    // then on. Keep it as the audit trail of what a given event actually cost.
     sql"""create table if not exists lost_version (
             id              integer primary key autoincrement,
             event_id        integer not null references disc_event(id),

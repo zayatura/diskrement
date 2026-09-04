@@ -993,3 +993,41 @@ Expected: everything green (`-Wunused:all` — zero warnings from new code).
 - **Type consistency:** `LostReport(discOrdinal, lost: List[LostVersionEntry], reburn: List[ReburnEntry])` is used identically in Tasks 3, 5, 6. `markDead(project: ProjectId, discOrdinal: Int, at: Instant)` (catalog) vs `markDead(name: String, discOrdinal: Int)` (pipeline) — intentional, mirrors `markVerified`.
 - **`fingerprints` intentionally unchanged** — documented in Task 4.
 - **Explicit `verify --disc N` on a dead disc** returns an empty report list ("Nothing to verify"); accepted as-is for this cycle.
+
+---
+
+## Deviations applied during execution (2026-09-04)
+
+The plan text above is preserved as written. These review-driven changes were made
+during execution and are what actually shipped — where the two disagree, the code wins.
+
+- **Task 5's `StalePlan` message** says `re-run plan`, NOT "run reset, then scan/plan".
+  `reset` is unnecessary and harmful: it deletes the work dir and staging trees, after
+  which `StagingDiscVerifier` reports every disc `skipped`, destroying verify evidence.
+  Pinned by `ExitMappingSpec` (`re-run plan`, and `!contains("reset")`). The Task 8
+  README draft above carries the same wrong advice; the shipped README does not.
+- **The Task 8 README draft's `LOST` wording** ("whose path has moved on") describes how
+  the mark-dead *report* classifies casualties, not what `history` renders. Every version
+  that lived only on the dead disc reads `LOST` in `history` after the recovery burn,
+  including one whose content is still live (it reappears as a new `CURRENT` row, same
+  hash). Per-physical-copy semantics; pinned by `PipelineMarkDeadSpec`.
+- **`verify --disc <dead|unknown>`** fails with `DiscIsDead` / `UnknownDisc` (exit 2)
+  rather than returning an empty report list. The self-review note below that says
+  "accepted as-is for this cycle" is superseded. `DiscIsDead` is a fourth `PipelineError`
+  case the plan never named.
+- **The `Render.handle` exit-code mapping was pulled forward** from Task 6 into Task 5:
+  adding sealed `PipelineError` cases made the existing match inexhaustive, and
+  `StalePlan` is reachable from the existing CLI burn path (a live `MatchError`).
+- **`idx_placement_fv` was amended into schema v2** rather than added as a v3 — v2 had
+  never shipped on `main`.
+- **`deadDiscVersions` groups by version**, so one version is one casualty regardless of
+  how many placements it has on the dying disc.
+- **Task 6's `Args.integer("disc")` does not compile** — zio-cli 0.5.0 has no named
+  `Args.integer(String)` overload. Shipped as `Args.integer ?? "<description>"` with a
+  `mapOrFail` rejecting non-positive and out-of-`Int`-range ordinals (`BigInt#toInt`
+  would otherwise silently truncate `2^32+1` to 1 and kill the wrong disc).
+
+Known follow-ups, deliberately not in this cycle: `archivePointers` still names dead
+discs and that output is baked into subsequently burned media; `writeDisc` does not
+itself refuse a session onto a dead disc (only `PipelineLive.burn`'s `StalePlan` guard
+does); `fingerprints` is intentionally unfiltered.

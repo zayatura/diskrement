@@ -360,7 +360,13 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
   /** Versions placed on the dying disc that have no copy on any other live disc,
     * flagged with whether each is its path's current version. Grouped by version:
     * a version with several placements on this disc (a later session, or copies>1)
-    * is one casualty, not one per placement — `lost_version` is append-only. */
+    * is one casualty, not one per placement — `lost_version` is append-only.
+    *
+    * The "no copy on another live disc" filter is correct for the lost/reburn split
+    * under copies>1. Restoring a lost *copy* is a separate concern that lands with
+    * copies>1: at copies=2, a version whose disc-1 copy dies while disc 3 lives is
+    * correctly not a casualty, and nothing re-plans a replacement — `readView` is a
+    * path->entry map with no copy count, so redundancy silently degrades 2 -> 1. */
   private def deadDiscVersions(pid: ProjectId, discId: Long)
       : ZIO[ZConnection, Throwable, List[(Long, String, String, Long, Int, Int)]] =
     sql"""select fv.id, fv.rel_path, fv.content_hash, fv.size_bytes,
