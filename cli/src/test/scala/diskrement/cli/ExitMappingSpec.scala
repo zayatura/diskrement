@@ -19,6 +19,14 @@ object ExitMappingSpec extends ZIOSpecDefault:
         Render.handle(PipelineError.NoStagedPlan("p"))._2 == ExitCode(2),
         Render.handle(PipelineError.SnapshotMissing("p"))._2 == ExitCode(2))
     },
+    test("UnknownDisc / DiscAlreadyDead / StalePlan -> exit 2 with their messages") {
+      val (staleMsg, staleCode) = Render.handle(PipelineError.StalePlan("disc 1 was marked dead"))
+      assertTrue(
+        Render.handle(PipelineError.UnknownDisc(9))._2 == ExitCode(2),
+        Render.handle(PipelineError.DiscAlreadyDead(1))._2 == ExitCode(2),
+        staleCode == ExitCode(2),
+        staleMsg.contains("disc 1 was marked dead"))
+    },
     test("precondition failures -> exit 3") {
       assertTrue(
         Render.handle(PipelineError.NotSameFilesystem(Paths.get("/a"), Paths.get("/b")))._2 == ExitCode(3),
