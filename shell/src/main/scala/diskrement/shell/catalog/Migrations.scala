@@ -67,7 +67,23 @@ object Migrations:
     sql"create index if not exists idx_change_record_fv on change_record(file_version_id)"
   )
 
-  private val migrations: List[(Int, List[SqlFragment])] = List(1 -> v1)
+  private val v2: List[SqlFragment] = List(
+    sql"""create table if not exists disc_event (
+            id      integer primary key autoincrement,
+            disc_id integer not null references disc(id),
+            kind    text    not null check (kind in ('MARKED_DEAD')),
+            at      text    not null
+          )""",
+    sql"""create table if not exists lost_version (
+            id              integer primary key autoincrement,
+            event_id        integer not null references disc_event(id),
+            file_version_id integer not null references file_version(id),
+            fate            text    not null check (fate in ('LOST','REBURN'))
+          )""",
+    sql"create index if not exists idx_disc_event_disc on disc_event(disc_id)"
+  )
+
+  private val migrations: List[(Int, List[SqlFragment])] = List(1 -> v1, 2 -> v2)
 
   private val ensureVersionTable: ZIO[ZConnection, Throwable, Unit] =
     sql"create table if not exists schema_version (version integer not null)".execute
