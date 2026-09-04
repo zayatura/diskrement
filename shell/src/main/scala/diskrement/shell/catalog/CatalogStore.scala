@@ -5,6 +5,7 @@ import diskrement.shell.model._
 import zio._
 import zio.jdbc._
 import java.nio.file.Path
+import java.time.Instant
 
 /** SQLite-backed persistence port for the catalog. Grows across Plan 2a tasks;
   * currently it creates and finds projects. */
@@ -33,6 +34,12 @@ trait CatalogStore:
     * ones), plus those hidden ("superseded within disc") versions with the
     * session that recorded them. Powers two-tier read-back verify. */
   def discRecordedContents(project: ProjectId, discOrdinal: Int): IO[CatalogError, DiscRecordedContents]
+  /** Append a MARKED_DEAD event for `discOrdinal` and record its casualties:
+    * every version whose only copy was on this disc becomes either REBURN (the
+    * path's current version — the next scan/plan/burn re-writes it from source)
+    * or LOST (a superseded/deleted version — permanently gone). Fails with
+    * IllegalStatusTransition if the disc is already dead. */
+  def markDead(project: ProjectId, discOrdinal: Int, at: Instant): IO[CatalogError, LostReport]
 
 object CatalogStore:
   /** Build the store from a pool, running migrations once at layer construction. */

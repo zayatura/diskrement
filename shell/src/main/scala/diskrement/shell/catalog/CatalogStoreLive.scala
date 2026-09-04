@@ -196,7 +196,11 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
 
   def readDiscStates(project: ProjectId): IO[CatalogError, List[DiscState]] =
     tx {
-      sql"""select d.ordinal, d.status, d.usable_bytes,
+      sql"""select d.ordinal,
+                   case when exists (select 1 from disc_event e
+                                     where e.disc_id = d.id and e.kind = 'MARKED_DEAD')
+                        then 'DEAD' else d.status end as status,
+                   d.usable_bytes,
                    coalesce((select sum(fv.size_bytes)
                              from placement p
                              join session s on s.id = p.session_id
@@ -314,6 +318,63 @@ private[catalog] final case class CatalogStoreLive(pool: ZConnectionPool) extend
         visible = vis.map { case (rp, ch, _, _) => RelPath(rp) -> ContentHash(ch) }.toMap,
         superseded = sup.map { case (rp, ch, sOrd, _) => SupersededVersion(sOrd, RelPath(rp), ContentHash(ch)) })
     }
+
+  def markDead(project: ProjectId, discOrdinal: Int, at: Instant): IO[CatalogError, LostReport] =
+    tx {
+      for
+        discId <- discIdByOrdinal(project, discOrdinal)
+        dead   <- sql"""select count(*) from disc_event
+                        where disc_id = $discId and kind = 'MARKED_DEAD'"""
+                    .query[Int].selectOne.map(_.getOrElse(0))
+        _      <- ZIO.when(dead > 0)(ZIO.fail(
+                    IllegalStatusTransition(s"disc $discOrdinal is already dead")))
+        rows   <- deadDiscVersions(project, discId)
+        _      <- sql"""insert into disc_event (disc_id, kind, at)
+                        values ($discId, 'MARKED_DEAD', ${at.toString})""".insert
+        evId   <- lastId
+        _      <- ZIO.foreachDiscard(rows) { case (fvId, _, _, _, _, isCurrent) =>
+                    val fate = if isCurrent == 1 then "REBURN" else "LOST"
+                    sql"""insert into lost_version (event_id, file_version_id, fate)
+                          values ($evId, $fvId, $fate)""".insert
+                  }
+      yield
+        val (cur, gone) = rows.partition(_._6 == 1)
+        LostReport(
+          discOrdinal,
+          lost = gone.map { case (_, rp, ch, sz, sOrd, _) =>
+            LostVersionEntry(RelPath(rp), ContentHash(ch), sz, sOrd) },
+          reburn = cur.map { case (_, rp, ch, sz, _, _) =>
+            ReburnEntry(RelPath(rp), ContentHash(ch), sz) })
+    }
+
+  /** Versions placed on the dying disc that have no copy on any other live disc,
+    * flagged with whether each is its path's current version. */
+  private def deadDiscVersions(pid: ProjectId, discId: Long)
+      : ZIO[ZConnection, Throwable, List[(Long, String, String, Long, Int, Int)]] =
+    sql"""select fv.id, fv.rel_path, fv.content_hash, fv.size_bytes, s.ordinal,
+                 case when cur.fvid is not null then 1 else 0 end as is_current
+          from placement p
+          join session s on s.id = p.session_id
+          join file_version fv on fv.id = p.file_version_id
+          left join (
+            select fvid from (
+              select cr.file_version_id as fvid, cr.kind as kind,
+                     row_number() over (partition by fv2.rel_path order by cr.id desc) as rn
+              from change_record cr
+              join file_version fv2 on fv2.id = cr.file_version_id
+              where fv2.project_id = ${pid.value}
+            ) c where c.rn = 1 and c.kind <> 'DELETED'
+          ) cur on cur.fvid = fv.id
+          where s.disc_id = $discId
+            and not exists (
+              select 1 from placement p2
+              join session s2 on s2.id = p2.session_id
+              join disc d2 on d2.id = s2.disc_id
+              where p2.file_version_id = fv.id and d2.id <> $discId
+                and not exists (select 1 from disc_event e
+                                where e.disc_id = d2.id and e.kind = 'MARKED_DEAD'))
+          order by fv.rel_path, s.ordinal"""
+      .query[(Long, String, String, Long, Int, Int)].selectAll.map(_.toList)
 
   def snapshotTo(dest: Path): IO[CatalogError, Unit] =
     transaction(sql"vacuum into ${dest.toString}".execute.unit)
