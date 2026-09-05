@@ -1,0 +1,7 @@
+# Warnings are failures for this workspace (spec §5.4). Kept here rather than as
+# per-crate `#![deny(warnings)]` so the policy lives in one place.
+#
+# These rustflags reach dependency compilation too, but registry crates are
+# built with `--cap-lints allow`, so third-party warnings cannot fail the build.
+[build]
+rustflags = ["-D", "warnings"]
