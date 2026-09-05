@@ -8,6 +8,7 @@
 //! `manifest::build` — mirroring the Scala `Diff.diff` / `Planner.plan` /
 //! `ManifestBuilder.build`. Types are re-exported here for convenience.
 
+pub mod diff;
 pub mod model;
 
 #[cfg(test)]
@@ -17,6 +18,7 @@ pub mod model;
 #[allow(dead_code)]
 mod testutil;
 
+pub use diff::ChangeSet;
 pub use model::{Capacity, CatalogEntry, CatalogView, ContentHash, DiscType, RelPath, ScannedFile};
 
 /// Temporary P0 scaffolding: gives the `shell -> core` dependency edge
