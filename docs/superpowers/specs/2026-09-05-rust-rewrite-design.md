@@ -445,13 +445,22 @@ failure modes.
 
 ## 10. Branch strategy
 
-Work happens on a long-lived `feat/rust-rewrite` off `main`. The Scala tree stays
-untouched on the branch for the duration, so it remains available both for
-re-harvesting fixtures and for reading behavior the tests do not pin. No hybrid
-build exists: `cargo` and `sbt` coexist without either knowing about the other.
+While the rewrite is in flight, `feat/rust-rewrite` is the **integration
+branch**: it acts as the rewrite's `main`. The Scala tree stays untouched on it
+for the duration, so it remains available both for re-harvesting fixtures and
+for reading behavior the tests do not pin. No hybrid build exists: `cargo` and
+`sbt` coexist without either knowing about the other.
 
-At P9, on the branch: delete `core/`, `shell/`, `cli/`, `build.sbt`, and
-`project/`, and rewrite `README.md` and `CLAUDE.md` for the Rust build. Then:
+Each phase's work goes on its own branch named `feat/rewrite-p<N>` forked from
+`feat/rust-rewrite`, and merges back into `feat/rust-rewrite` with an explicit
+merge commit titled `Merge feat/<branch>: <summary>`; the phase branch is
+deleted after the merge. Never commit phase work directly to
+`feat/rust-rewrite`, and no PRs — the same etiquette that governs `main`.
+
+At P9, on the integration branch: delete `core/`, `shell/`, `cli/`,
+`build.sbt`, and `project/`, and rewrite `README.md` and `CLAUDE.md` for the
+Rust build. Then, and only when the rewrite's completion is explicitly
+confirmed:
 
 1. Push `main`'s tip to a preservation branch `scala` on `origin`.
 2. Merge `feat/rust-rewrite` into `main` with an explicit merge commit
