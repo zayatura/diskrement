@@ -3,6 +3,7 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::diff::ChangeSet;
 use crate::model::{CatalogEntry, CatalogView, ContentHash, RelPath, ScannedFile};
 
 /// The Unix epoch — every ported test's stand-in mtime, matching the Scala
@@ -51,5 +52,14 @@ pub fn view_of(entries: &[CatalogEntry]) -> CatalogView {
             .iter()
             .map(|e| (e.rel_path.clone(), e.clone()))
             .collect(),
+    }
+}
+
+/// A change set holding only additions, mirroring the `changesOf` / `added`
+/// helpers in `PlannerTest.scala` and `PlannerEdgeTest.scala`.
+pub fn added(files: Vec<ScannedFile>) -> ChangeSet {
+    ChangeSet {
+        added: files,
+        ..ChangeSet::empty()
     }
 }
