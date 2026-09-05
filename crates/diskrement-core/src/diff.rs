@@ -149,4 +149,52 @@ mod tests {
         assert_eq!(paths(&cs.unchanged), vec!["keep"]);
         assert_eq!(cs.deleted, vec![RelPath("rm".to_string())]);
     }
+
+    use crate::testutil::{scanned_file_strategy, scanned_files_strategy};
+    use proptest::prelude::*;
+
+    // --- GeneratorsTest.scala ---
+
+    proptest! {
+        #[test]
+        fn generated_scanned_file_lists_have_unique_rel_paths(
+            files in scanned_files_strategy()
+        ) {
+            let mut paths: Vec<&RelPath> = files.iter().map(|f| &f.rel_path).collect();
+            let total = paths.len();
+            paths.sort();
+            paths.dedup();
+            prop_assert_eq!(paths.len(), total);
+        }
+
+        #[test]
+        fn generated_file_sizes_are_positive(f in scanned_file_strategy()) {
+            prop_assert!(f.size_bytes > 0);
+        }
+    }
+
+    // --- DiffPropertyTest.scala ---
+
+    proptest! {
+        #[test]
+        fn every_scanned_file_is_classified_exactly_once(
+            files in scanned_files_strategy()
+        ) {
+            // Against an empty catalog nothing is deleted and everything is added.
+            let cs = diff(&CatalogView::empty(), &files);
+            let classified = cs.added.len() + cs.modified.len() + cs.unchanged.len();
+            prop_assert_eq!(classified, files.len());
+            prop_assert!(cs.deleted.is_empty());
+        }
+
+        #[test]
+        fn diff_is_idempotent_recording_a_scan_yields_an_empty_diff_next_time(
+            files in scanned_files_strategy()
+        ) {
+            let catalog = CatalogView::from_scanned(&files);
+            let cs = diff(&catalog, &files);
+            prop_assert!(cs.is_empty());
+            prop_assert_eq!(cs.unchanged.len(), files.len());
+        }
+    }
 }
