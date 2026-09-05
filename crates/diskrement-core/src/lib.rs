@@ -25,10 +25,6 @@ pub use manifest::{ManifestChangeKind, ManifestEntry, SessionManifest};
 pub use model::{Capacity, CatalogEntry, CatalogView, ContentHash, DiscType, RelPath, ScannedFile};
 pub use planner::{BurnPlan, DiscState, DiscStatus, PlannedDisc};
 
-/// Temporary P0 scaffolding: gives the `shell -> core` dependency edge
-/// something to link against. Task 9 retires it in favour of a real type.
-pub struct Probe;
-
 #[cfg(test)]
 mod tests {
     #[test]
