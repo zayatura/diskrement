@@ -18,5 +18,16 @@ object PipelineError:
       extends PipelineError(s"work dir is not CoW-capable: $workDir [$detail]")
   final case class OversizedFiles(paths: List[RelPath])
       extends PipelineError(s"oversized files cannot be placed: ${paths.map(_.value).mkString(", ")}")
+  final case class UnknownDisc(ordinal: Int)
+      extends PipelineError(s"no disc with ordinal $ordinal")
+  final case class DiscAlreadyDead(ordinal: Int)
+      extends PipelineError(s"disc $ordinal is already marked dead")
+  final case class DiscIsDead(ordinal: Int)
+      extends PipelineError(s"disc $ordinal is marked dead")
+  // `plan` alone is the whole recovery: the staged scan and the snapshot both
+  // survive, and plan re-reads the view and disc states. Do NOT advise `reset` —
+  // it deletes workDir/staging, which is the simulated backend's verify evidence.
+  final case class StalePlan(detail: String)
+      extends PipelineError(s"staged plan is stale: $detail (re-run plan)")
   final case class Burn(cause: BurnError) extends PipelineError(cause.getMessage, cause)
   final case class Failed(cause: Throwable) extends PipelineError("pipeline failure", cause)

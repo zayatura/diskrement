@@ -128,6 +128,23 @@ object RenderSpec extends ZIOSpecDefault:
     test("history: empty") {
       assertTrue(Render.history(RelPath("nope"), Nil) == "No history for nope.")
     },
+    test("markDead lists lost and re-burn files") {
+      val r = Render.markDead(LostReport(1,
+        List(LostVersionEntry(RelPath("b"), ContentHash("b1"), 20L, 1)),
+        List(ReburnEntry(RelPath("a"), ContentHash("a1"), 10L))))
+      assertTrue(
+        r.contains("Disc 1 marked DEAD."),
+        r.contains("Permanently lost (1):"),
+        r.contains("b1"),
+        r.contains("Re-burn on next scan/plan/burn (1):"),
+        r.contains("  a"))
+    },
+    test("markDead with no casualties") {
+      val r = Render.markDead(LostReport(2, Nil, Nil))
+      assertTrue(
+        r.contains("No versions permanently lost."),
+        r.contains("No live files to re-burn."))
+    },
     test("init confirmation line") {
       assertTrue(Render.init("photos", ProjectId(7)) == "Created project photos (id 7).")
     }

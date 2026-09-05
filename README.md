@@ -62,9 +62,9 @@ called hexagonal or ports-and-adapters):
 - **`shell/`** — ZIO 2 effects wiring adapters to the core. The SQLite catalog
   (`CatalogStore`) is append-only by design, enforced at the schema level. A
   copy-on-write source snapshot (`SourceSnapshot`) is taken once per run to eliminate
-  TOCTOU races. The `Pipeline` service sequences all eight operations (`init`, `scan`,
-  `plan`, `burn`, `reset`, `status`, `verify`, `history`) and returns structured data
-  that a CLI can render.
+  TOCTOU races. The `Pipeline` service sequences all nine operations (`init`, `scan`,
+  `plan`, `burn`, `reset`, `status`, `verify`, `history`, `mark-dead`) and returns
+  structured data that a CLI can render.
 
 The write-once nature of optical media is treated as a first principle, not an
 afterthought. The append-only catalog, the commit-after-success burn, the
@@ -84,10 +84,10 @@ self-describing discs — all of these follow directly from "you can never undo 
 | SQLite catalog with append-only schema and migrations | Done |
 | File scanning, SHA-256 hashing, CoW source snapshots | Done |
 | Disc staging, `/.diskrement` layout, simulated burner | Done |
-| Pipeline orchestration (all 8 operations) | Done |
+| Pipeline orchestration (all 9 operations) | Done |
 | CLI adapter (argument parsing, prompts, output formatting) | Done |
 | Real disc burning (xorriso, BD-R multisession) | Done (burn + read-back verify) |
-| Coaster workflow (mark-dead + re-plan) | Planned (Plan 4b) |
+| Coaster workflow (mark-dead + re-plan) | Done (lost-history report + re-plan) |
 
 The pipeline orchestration layer is fully tested with integration tests against
 real temp directories and a full scan → plan → burn → verify → history loop. The
@@ -105,6 +105,7 @@ diskrement burn photos          # asks for confirmation; --yes to skip
 diskrement status photos
 diskrement verify photos
 diskrement history photos some/file.jpg
+diskrement disc mark-dead photos 1   # write off a destroyed disc; --yes to skip
 ```
 
 The per-project catalog defaults to `$XDG_DATA_HOME/diskrement/<name>.sqlite`
@@ -118,6 +119,47 @@ multisession). Select the device and backend with `--device /dev/sr0` /
 Your user must be able to open the drive — on most distros that means membership
 in the `optical` group. `verify` mounts the disc via `udisks2` and re-hashes every
 file, including versions superseded by later sessions on the same disc.
+
+### Dead discs (coasters)
+
+A burned disc that is later lost, destroyed, or unreadable can be written off:
+
+```
+diskrement disc mark-dead photos 1
+```
+
+This records an append-only `MARKED_DEAD` event — disc rows are never rewritten — and
+prints a report of the casualties: versions that lived only on that disc and are no
+longer their path's current version are **permanently lost**; the ones still current are
+listed for re-burn, and the next `scan` / `plan` / `burn` writes them to fresh media.
+A dead disc is excluded from `verify`, is never topped off again, and shows as `DEAD`
+in `status`.
+
+`history` lists one row per burned copy, so after the recovery burn every row on the
+dead disc reads `LOST` — including the one holding content you still have. `LOST` means
+*those bytes* are gone, not that the content is unrecoverable: a file that was
+superseded once on the dead disc ends up reading
+
+```
+b.txt
+  v1  disc 1 / session 1   ...  LOST
+  v2  disc 1 / session 2   ...  LOST
+  v3  disc 2 / session 1   ...  CURRENT
+```
+
+where v2 and v3 carry the same content hash — the live copy came back on fresh media.
+Between the mark-dead and that recovery burn, `status`'s `Current files` count drops by
+exactly the re-burn list — the still-current files whose only burned copy was on the
+dead disc (to zero, if that was all of them) — while `history` still calls those files
+`CURRENT`: `status` counts the *burned* view, which the dead disc just dropped out of.
+
+If a plan was already staged against the disc when it was marked dead, `burn` refuses
+it — re-run `plan`, which is the whole recovery: the staged scan and the source snapshot
+both survive, and `plan` re-reads the disc states and targets fresh media. `reset` is
+not part of the fix and throws away staged state you would only have to rebuild (with
+the simulated backend, including the staging trees `verify` reads back). Likewise,
+`verify --disc <n>` naming a dead or unknown disc is an error rather than a quiet
+"nothing to verify".
 
 ### Performance
 

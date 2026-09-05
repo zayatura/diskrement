@@ -91,8 +91,28 @@ object Commands:
       .withHelp(HelpDoc.p("Show the full version history of one file."))
       .map { case (name, rel) => DiskrementCommand.History(name, rel) }
 
+  // --- disc mark-dead ---
+  private val disc: Command[DiskrementCommand] =
+    val yes = Options.boolean("yes").alias("y")
+    // zio-cli 0.5.0 has no named `Args.integer(name)` overload (unlike text/decimal),
+    // so the positional ordinal carries a description instead of a name. Validate it
+    // here rather than letting BigInt#toInt truncate: mark-dead is irreversible, and a
+    // silently wrapped ordinal would destroy a different disc than the one named.
+    val ordinal: Args[Int] =
+      (Args.integer ?? "the ordinal of the disc to mark dead").mapOrFail { n =>
+        if n.isValidInt && n > 0 then Right(n.toInt)
+        else Left(HelpDoc.p(s"disc ordinal must be a positive whole number, got $n"))
+      }
+    val markDead =
+      Command("mark-dead", yes, nameArg ++ ordinal)
+        .withHelp(HelpDoc.p("Mark a disc dead (destroyed/unreadable); its live files re-plan."))
+        .map { case (y, (name, ord)) => DiskrementCommand.MarkDead(name, ord, y) }
+    Command("disc")
+      .withHelp(HelpDoc.p("Operations on individual burned discs."))
+      .subcommands(markDead)
+
   /** The root command. zio-cli pairs the parent's GlobalOpts with the chosen
     * subcommand's value, giving `(GlobalOpts, DiskrementCommand)`. */
   val root: Command[(GlobalOpts, DiskrementCommand)] =
     Command("diskrement", globalOpts)
-      .subcommands(init, scan, plan, burn, reset, status, verify, history)
+      .subcommands(init, scan, plan, burn, reset, status, verify, history, disc)

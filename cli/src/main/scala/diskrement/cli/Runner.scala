@@ -46,14 +46,15 @@ object Runner:
     yield code
 
   private def projectName(cmd: DiskrementCommand): String = cmd match
-    case c: DiskrementCommand.Init    => c.name
-    case c: DiskrementCommand.Scan    => c.name
-    case c: DiskrementCommand.Plan    => c.name
-    case c: DiskrementCommand.Burn    => c.name
-    case c: DiskrementCommand.Reset   => c.name
-    case c: DiskrementCommand.Status  => c.name
-    case c: DiskrementCommand.Verify  => c.name
-    case c: DiskrementCommand.History => c.name
+    case c: DiskrementCommand.Init     => c.name
+    case c: DiskrementCommand.Scan     => c.name
+    case c: DiskrementCommand.Plan     => c.name
+    case c: DiskrementCommand.Burn     => c.name
+    case c: DiskrementCommand.Reset    => c.name
+    case c: DiskrementCommand.Status   => c.name
+    case c: DiskrementCommand.Verify   => c.name
+    case c: DiskrementCommand.History  => c.name
+    case c: DiskrementCommand.MarkDead => c.name
 
   private def dispatch(
       cmd: DiskrementCommand, catalogPath: Path, cachePath: Path, backend: Backend
@@ -109,6 +110,19 @@ object Runner:
         withProject(catalogPath, cachePath, c.name, backend) { (_, pipeline) =>
           val rel = RelPath(c.relPath)
           pipeline.history(c.name, rel).flatMap(es => printOut(Render.history(rel, es))).as(ExitCode.success)
+        }
+
+      case c: DiskrementCommand.MarkDead =>
+        withProject(catalogPath, cachePath, c.name, backend) { (_, pipeline) =>
+          for
+            ok   <- Prompt.confirm(
+                      s"Mark disc ${c.disc} of ${c.name} DEAD? Superseded versions on it are lost forever; " +
+                        "its live files will re-plan.",
+                      c.assumeYes)
+            code <- if !ok then printOut("Aborted.").as(ExitCode.success)
+                    else pipeline.markDead(c.name, c.disc)
+                           .flatMap(r => printOut(Render.markDead(r))).as(ExitCode.success)
+          yield code
         }
 
   private def printOut(s: String): UIO[Unit] = Console.printLine(s).orDie

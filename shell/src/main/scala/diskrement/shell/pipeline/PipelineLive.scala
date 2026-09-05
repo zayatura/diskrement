@@ -152,6 +152,14 @@ private[pipeline] final case class PipelineLive(
                      case Some(r) => ZIO.succeed(r); case None => ZIO.fail(PipelineError.NoStagedPlan(name)) }
       _         <- ZIO.when(report.oversized.nonEmpty)(
                      ZIO.fail(PipelineError.OversizedFiles(report.oversized.map(_.relPath))))
+      // The catalog cannot catch this: deadness is derived from disc_event, so the
+      // disc row itself still reads OPEN. Without this guard the burner would commit
+      // a session onto a disc that no longer physically exists.
+      states    <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
+      _         <- ZIO.when(states.exists(s =>
+                       s.ordinal == report.disc.ordinal && s.status == DiscStatus.DEAD))(
+                     ZIO.fail(PipelineError.StalePlan(
+                       s"disc ${report.disc.ordinal} was marked dead after this plan was staged")))
       snapRoot   = paths.workDir.resolve("snapshot")
       _         <- ZIO.attemptBlockingIO(Files.exists(snapRoot)).mapError(PipelineError.Failed(_))
                      .flatMap(e => ZIO.unless(e)(ZIO.fail(PipelineError.SnapshotMissing(name))).unit)
@@ -239,7 +247,18 @@ private[pipeline] final case class PipelineLive(
       p        <- project(name)
       states   <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
       sessions <- catalog.sessionsByState(p.id, SessionState.BURNED).mapError(PipelineError.Failed(_))
-      targets   = states.map(_.ordinal).filter(o => discOrdinal.forall(_ == o))
+      // An explicitly named ordinal is an assertion of intent about that disc, so
+      // resolve it before filtering: silently reporting "nothing to verify" (exit 0)
+      // for a dead or nonexistent disc reads as reassurance. A sweep still skips
+      // dead discs quietly, which is the right default.
+      _        <- ZIO.foreachDiscard(discOrdinal) { o =>
+                    states.find(_.ordinal == o) match
+                      case None                                   => ZIO.fail(PipelineError.UnknownDisc(o))
+                      case Some(s) if s.status == DiscStatus.DEAD => ZIO.fail(PipelineError.DiscIsDead(o))
+                      case Some(_)                                => ZIO.unit
+                  }
+      targets   = states.filter(_.status != DiscStatus.DEAD).map(_.ordinal)
+                    .filter(o => discOrdinal.forall(_ == o))
       reps     <- ZIO.foreach(targets)(o => verifyDisc(p, o, sessions))
     yield reps
 
@@ -257,3 +276,16 @@ private[pipeline] final case class PipelineLive(
                                         .mapError(PipelineError.Failed(_))
                       case None    => ZIO.unit)
     yield VerifyReport(ordinal, out.filesChecked, out.mismatches, out.skipped)
+
+  def markDead(name: String, discOrdinal: Int): IO[PipelineError, LostReport] =
+    for
+      p      <- project(name)
+      states <- catalog.readDiscStates(p.id).mapError(PipelineError.Failed(_))
+      _      <- states.find(_.ordinal == discOrdinal) match
+                  case None => ZIO.fail(PipelineError.UnknownDisc(discOrdinal))
+                  case Some(s) if s.status == DiscStatus.DEAD =>
+                    ZIO.fail(PipelineError.DiscAlreadyDead(discOrdinal))
+                  case Some(_) => ZIO.unit
+      now    <- Clock.instant
+      report <- catalog.markDead(p.id, discOrdinal, now).mapError(PipelineError.Failed(_))
+    yield report

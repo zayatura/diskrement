@@ -23,3 +23,4 @@ enum DiskrementCommand:
   case Status(name: String)
   case Verify(name: String, disc: Option[Int])
   case History(name: String, relPath: String)
+  case MarkDead(name: String, disc: Int, assumeYes: Boolean)

@@ -67,7 +67,31 @@ object Migrations:
     sql"create index if not exists idx_change_record_fv on change_record(file_version_id)"
   )
 
-  private val migrations: List[(Int, List[SqlFragment])] = List(1 -> v1)
+  private val v2: List[SqlFragment] = List(
+    sql"""create table if not exists disc_event (
+            id      integer primary key autoincrement,
+            disc_id integer not null references disc(id),
+            kind    text    not null check (kind in ('MARKED_DEAD')),
+            at      text    not null
+          )""",
+    // The immutable record of each version's fate at mark-dead time. `fileHistory`
+    // re-derives LOST from disc_event rather than reading this table, and cannot
+    // reproduce it: a REBURN-fated version that is later superseded reads LOST from
+    // then on. Keep it as the audit trail of what a given event actually cost.
+    sql"""create table if not exists lost_version (
+            id              integer primary key autoincrement,
+            event_id        integer not null references disc_event(id),
+            file_version_id integer not null references file_version(id),
+            fate            text    not null check (fate in ('LOST','REBURN'))
+          )""",
+    sql"create index if not exists idx_disc_event_disc on disc_event(disc_id)",
+    // markDead's "is this version also on another live disc?" probe is a correlated
+    // subquery keyed on placement.file_version_id; without this it full-scans
+    // placement once per version on the dying disc.
+    sql"create index if not exists idx_placement_fv on placement(file_version_id)"
+  )
+
+  private val migrations: List[(Int, List[SqlFragment])] = List(1 -> v1, 2 -> v2)
 
   private val ensureVersionTable: ZIO[ZConnection, Throwable, Unit] =
     sql"create table if not exists schema_version (version integer not null)".execute

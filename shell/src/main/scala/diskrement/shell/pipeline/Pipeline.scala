@@ -55,6 +55,7 @@ trait Pipeline:
   def plan(name: String, discTypeOverride: Option[DiscType], finalize: Boolean): IO[PipelineError, PlanReport]
   def burn(name: String): IO[PipelineError, BurnReport]
   def verify(name: String, discOrdinal: Option[Int]): IO[PipelineError, List[VerifyReport]]
+  def markDead(name: String, discOrdinal: Int): IO[PipelineError, LostReport]
 
 object Pipeline:
   val live: ZLayer[
