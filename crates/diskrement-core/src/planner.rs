@@ -563,4 +563,148 @@ mod tests {
         assert_eq!(disc_paths(&plan.discs[1]), vec!["empty"]);
         assert_eq!(plan.discs[1].ordinal, 2);
     }
+
+    use crate::testutil::{planner_input_strategy, reshuffled_planner_input_strategy};
+    use proptest::prelude::*;
+
+    fn placeable(cs: &ChangeSet) -> Vec<&ScannedFile> {
+        cs.added.iter().chain(cs.modified.iter()).collect()
+    }
+
+    fn sorted_paths(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    proptest! {
+        /// 1. Conservation: every placeable file is placed or oversized, once.
+        #[test]
+        fn every_placeable_file_is_placed_or_oversized_exactly_once(
+            (cs, discs, cap) in planner_input_strategy()
+        ) {
+            let p = plan(&cs, &discs, cap);
+            let mut all: Vec<String> = p
+                .discs
+                .iter()
+                .flat_map(|d| d.files.iter())
+                .chain(p.oversized.iter())
+                .map(|f| f.rel_path.0.clone())
+                .collect();
+            let expected = sorted_paths(
+                placeable(&cs).iter().map(|f| f.rel_path.0.clone()).collect(),
+            );
+            let total = all.len();
+            all.sort();
+            prop_assert_eq!(&all, &expected);
+            all.dedup();
+            prop_assert_eq!(all.len(), total, "a file was placed twice");
+        }
+
+        /// 2. Capacity: no disc exceeds its usable capacity.
+        #[test]
+        fn no_disc_exceeds_its_usable_capacity(
+            (cs, discs, cap) in planner_input_strategy()
+        ) {
+            let p = plan(&cs, &discs, cap);
+            for d in &p.discs {
+                prop_assert!(
+                    d.total_used_bytes() <= d.usable_bytes,
+                    "disc {} holds {} of {} usable",
+                    d.ordinal,
+                    d.total_used_bytes(),
+                    d.usable_bytes
+                );
+            }
+        }
+
+        /// 3. No split: each placed file appears on exactly one disc.
+        #[test]
+        fn each_placed_file_appears_on_exactly_one_disc(
+            (cs, discs, cap) in planner_input_strategy()
+        ) {
+            let p = plan(&cs, &discs, cap);
+            let mut placed: Vec<String> = p
+                .discs
+                .iter()
+                .flat_map(|d| d.files.iter())
+                .map(|f| f.rel_path.0.clone())
+                .collect();
+            let total = placed.len();
+            placed.sort();
+            placed.dedup();
+            prop_assert_eq!(placed.len(), total);
+        }
+
+        /// 4. Order: placed files are in lexicographic order across all discs.
+        #[test]
+        fn placed_files_are_in_lexicographic_order_across_discs(
+            (cs, discs, cap) in planner_input_strategy()
+        ) {
+            let p = plan(&cs, &discs, cap);
+            let placed: Vec<String> = p
+                .discs
+                .iter()
+                .flat_map(|d| d.files.iter())
+                .map(|f| f.rel_path.0.clone())
+                .collect();
+            prop_assert_eq!(&placed, &sorted_paths(placed.clone()));
+        }
+
+        /// 5. Determinism: any permutation or redistribution of the inputs
+        ///    yields an identical plan.
+        #[test]
+        fn any_permutation_or_redistribution_yields_an_identical_plan(
+            (cs, alt, discs, cap) in reshuffled_planner_input_strategy()
+        ) {
+            prop_assert_eq!(plan(&cs, &discs, cap), plan(&alt, &discs, cap));
+        }
+
+        /// 6. Open-disc-first: if an open disc exists, it is the first planned.
+        #[test]
+        fn an_open_disc_is_always_the_first_planned_disc(
+            (cs, discs, cap) in planner_input_strategy()
+        ) {
+            let p = plan(&cs, &discs, cap);
+            // The generator produces at most one OPEN disc, so "find the first"
+            // and "take the newest" agree here — same as the Scala property.
+            if let (Some(open), Some(first)) = (
+                discs.iter().find(|d| d.status == DiscStatus::Open),
+                p.discs.first(),
+            ) {
+                prop_assert_eq!(first.ordinal, open.ordinal);
+                prop_assert!(!first.is_new);
+            }
+        }
+
+        /// 7. Finalize: at most one planned disc stays open, and it is the last.
+        #[test]
+        fn at_most_one_planned_disc_stays_open_and_it_is_the_last(
+            (cs, discs, cap) in planner_input_strategy()
+        ) {
+            let p = plan(&cs, &discs, cap);
+            let open_count = p.discs.iter().filter(|d| !d.will_finalize).count();
+            prop_assert!(open_count <= 1);
+            if let Some(last) = p.discs.last() {
+                prop_assert!(!last.will_finalize);
+            }
+        }
+
+        /// 8. Tombstones cost nothing: deletions add no bytes to any disc.
+        #[test]
+        fn deletions_add_no_bytes_to_any_disc(
+            (cs, discs, cap) in planner_input_strategy()
+        ) {
+            let with_deletes = ChangeSet {
+                deleted: vec![RelPath("zzz/deleted".to_string())],
+                ..cs.clone()
+            };
+            let a: u64 = plan(&cs, &discs, cap).discs.iter().map(|d| d.added_bytes()).sum();
+            let b: u64 = plan(&with_deletes, &discs, cap)
+                .discs
+                .iter()
+                .map(|d| d.added_bytes())
+                .sum();
+            prop_assert_eq!(a, b);
+        }
+    }
 }

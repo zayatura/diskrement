@@ -184,3 +184,31 @@ pub fn planner_input_strategy() -> impl Strategy<Value = (ChangeSet, Vec<DiscSta
             })
     })
 }
+
+/// A planner input paired with an equivalent one: the same placeable files,
+/// shuffled and re-split across `added`/`modified`. Property 5 asserts both
+/// produce an identical plan.
+pub fn reshuffled_planner_input_strategy(
+) -> impl Strategy<Value = (ChangeSet, ChangeSet, Vec<DiscState>, Capacity)> {
+    planner_input_strategy().prop_flat_map(|(cs, discs, cap)| {
+        let combined: Vec<ScannedFile> =
+            cs.added.iter().chain(cs.modified.iter()).cloned().collect();
+        let n = combined.len();
+        (
+            Just(cs),
+            Just(discs),
+            Just(cap),
+            Just(combined).prop_shuffle(),
+            0..=n,
+        )
+            .prop_map(|(cs, discs, cap, shuffled, k)| {
+                let (add, modi) = shuffled.split_at(k);
+                let alt = ChangeSet {
+                    added: add.to_vec(),
+                    modified: modi.to_vec(),
+                    ..ChangeSet::empty()
+                };
+                (cs, alt, discs, cap)
+            })
+    })
+}
