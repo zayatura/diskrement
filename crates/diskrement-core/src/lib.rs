@@ -10,6 +10,7 @@
 
 pub mod diff;
 pub mod model;
+pub mod planner;
 
 #[cfg(test)]
 // Helpers land in the task that first needs them, which is sometimes one task
@@ -20,6 +21,7 @@ mod testutil;
 
 pub use diff::ChangeSet;
 pub use model::{Capacity, CatalogEntry, CatalogView, ContentHash, DiscType, RelPath, ScannedFile};
+pub use planner::{BurnPlan, DiscState, DiscStatus, PlannedDisc};
 
 /// Temporary P0 scaffolding: gives the `shell -> core` dependency edge
 /// something to link against. Task 9 retires it in favour of a real type.
