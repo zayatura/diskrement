@@ -108,7 +108,7 @@ Port `core/src/main/scala/diskrement/core/Model.scala`. Read it first.
 - Create: `crates/diskrement-core/src/testutil.rs`
 - Modify: `crates/diskrement-core/src/lib.rs`
 
-- [ ] **Step 1: Write the shared test helpers**
+- [x] **Step 1: Write the shared test helpers**
 
 Create `crates/diskrement-core/src/testutil.rs`:
 
@@ -170,7 +170,7 @@ pub fn view_of(entries: &[CatalogEntry]) -> CatalogView {
 }
 ```
 
-- [ ] **Step 2: Wire the modules into `lib.rs`**
+- [x] **Step 2: Wire the modules into `lib.rs`**
 
 Replace the whole contents of `crates/diskrement-core/src/lib.rs`:
 
@@ -210,7 +210,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Write the failing tests**
+- [x] **Step 3: Write the failing tests**
 
 Create `crates/diskrement-core/src/model.rs` containing only the test module for
 now:
@@ -292,7 +292,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they fail**
+- [x] **Step 4: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -303,7 +303,7 @@ Expected: compilation errors — `cannot find type RelPath in this scope`,
 *is* the red state for a Rust port; do not try to get to a running-but-failing
 assertion first.
 
-- [ ] **Step 5: Write the implementation**
+- [x] **Step 5: Write the implementation**
 
 Insert above the `mod tests` block in `model.rs`:
 
@@ -398,7 +398,7 @@ impl CatalogView {
 }
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -406,7 +406,7 @@ cargo test -p diskrement-core --lib
 
 Expected: `test result: ok. 6 passed`.
 
-- [ ] **Step 7: Verify lint and format**
+- [x] **Step 7: Verify lint and format**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
@@ -414,7 +414,7 @@ cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
 
 Expected: clean.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/diskrement-core/src
@@ -433,7 +433,7 @@ task exists as its own step.
 - Modify: `crates/diskrement-core/src/model.rs`
 - Modify: `crates/diskrement-core/src/lib.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add these inside the existing `mod tests` block in `model.rs`:
 
@@ -503,7 +503,7 @@ Add these inside the existing `mod tests` block in `model.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -512,7 +512,7 @@ cargo test -p diskrement-core --lib
 Expected: compilation errors — `failed to resolve: use of undeclared type
 DiscType` and `Capacity`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Append to `model.rs`, above the `mod tests` block:
 
@@ -607,7 +607,7 @@ impl Capacity {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -620,7 +620,7 @@ If `capacity_is_floored_exactly_with_no_floating_point_drift` fails with
 the whole point of the integer-thousandths form is that no float reaches the
 byte-scale multiplication.
 
-- [ ] **Step 5: Extend the re-exports**
+- [x] **Step 5: Extend the re-exports**
 
 In `lib.rs`, replace the `pub use model::{...}` line with:
 
@@ -630,7 +630,7 @@ pub use model::{
 };
 ```
 
-- [ ] **Step 6: Verify lint and format, then commit**
+- [x] **Step 6: Verify lint and format, then commit**
 
 ```bash
 cargo test -p diskrement-core --lib \
@@ -652,7 +652,7 @@ Port `core/src/main/scala/diskrement/core/ChangeSet.scala` and `Diff.scala`.
 - Create: `crates/diskrement-core/src/diff.rs`
 - Modify: `crates/diskrement-core/src/lib.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/diskrement-core/src/diff.rs` with only the test module:
 
@@ -746,7 +746,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -755,7 +755,7 @@ cargo test -p diskrement-core --lib
 Expected: compilation errors — `cannot find type ChangeSet in this scope`,
 `cannot find function diff in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Insert above the `mod tests` block in `diff.rs`:
 
@@ -826,7 +826,7 @@ pub fn diff(catalog: &CatalogView, scanned: &[ScannedFile]) -> ChangeSet {
 }
 ```
 
-- [ ] **Step 4: Wire the module into `lib.rs`**
+- [x] **Step 4: Wire the module into `lib.rs`**
 
 Add `pub mod diff;` above `pub mod model;`, and add the type re-export:
 
@@ -834,7 +834,7 @@ Add `pub mod diff;` above `pub mod model;`, and add the type re-export:
 pub use diff::ChangeSet;
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -842,7 +842,7 @@ cargo test -p diskrement-core --lib
 
 Expected: `test result: ok. 21 passed`.
 
-- [ ] **Step 6: Verify lint and format, then commit**
+- [x] **Step 6: Verify lint and format, then commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
@@ -863,7 +863,7 @@ Task 5.
 - Create: `crates/diskrement-core/src/planner.rs`
 - Modify: `crates/diskrement-core/src/lib.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/diskrement-core/src/planner.rs` with only the test module:
 
@@ -929,7 +929,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -938,7 +938,7 @@ cargo test -p diskrement-core --lib
 Expected: compilation errors — `cannot find type DiscState in this scope` and
 similar.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Insert above the `mod tests` block in `planner.rs`:
 
@@ -1010,7 +1010,7 @@ pub struct BurnPlan {
 }
 ```
 
-- [ ] **Step 4: Wire the module into `lib.rs`**
+- [x] **Step 4: Wire the module into `lib.rs`**
 
 Add `pub mod planner;` after `pub mod model;`, and add:
 
@@ -1018,7 +1018,7 @@ Add `pub mod planner;` after `pub mod model;`, and add:
 pub use planner::{BurnPlan, DiscState, DiscStatus, PlannedDisc};
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -1026,7 +1026,7 @@ cargo test -p diskrement-core --lib
 
 Expected: `test result: ok. 25 passed`.
 
-- [ ] **Step 6: Verify lint and format, then commit**
+- [x] **Step 6: Verify lint and format, then commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
@@ -1047,7 +1047,7 @@ will not tell you *why* they are shaped that way.
 - Modify: `crates/diskrement-core/src/planner.rs`
 - Modify: `crates/diskrement-core/src/testutil.rs`
 
-- [ ] **Step 1: Add the change-set helper**
+- [x] **Step 1: Add the change-set helper**
 
 Append to `testutil.rs` (again moving the `use` line up to the imports at the
 top of the file):
@@ -1065,7 +1065,7 @@ pub fn added(files: Vec<ScannedFile>) -> ChangeSet {
 }
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Add these inside `planner.rs`'s `mod tests` block. They are the ports of
 `PlannerTest.scala` and `PlannerEdgeTest.scala` combined, plus one regression
@@ -1376,7 +1376,7 @@ Importing them again would duplicate a name the glob already provides.
     }
 ```
 
-- [ ] **Step 3: Run the tests to verify they fail**
+- [x] **Step 3: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -1386,7 +1386,7 @@ Expected: compilation errors — `cannot find function plan in this scope`,
 plus `cannot find type ChangeSet`/`Capacity` in this scope, because Step 4 is
 what brings those into the parent module. All three are the red state.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Append to `planner.rs`, above the `mod tests` block:
 
@@ -1532,7 +1532,7 @@ pub fn plan(changes: &ChangeSet, discs: &[DiscState], new_disc_cap: Capacity) ->
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -1551,7 +1551,7 @@ Diagnosis for the three most likely failures:
 - `a_zero_byte_file_does_not_fit_an_overfull_disc` failing — `fits` is using
   `free_bytes()` (or any `saturating_sub` form) instead of the checked addition.
 
-- [ ] **Step 6: Verify lint and format**
+- [x] **Step 6: Verify lint and format**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
@@ -1562,7 +1562,7 @@ existing_open.is_some() { .. } else { .. }` chain, keep the shape — the
 `!b.is_new` case must win over both of the others, which a `match` on
 `existing_open` alone cannot express without a guard arm.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/diskrement-core/src
@@ -1579,7 +1579,7 @@ Port `core/src/main/scala/diskrement/core/Manifest.scala`.
 - Create: `crates/diskrement-core/src/manifest.rs`
 - Modify: `crates/diskrement-core/src/lib.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/diskrement-core/src/manifest.rs` with only the test module:
 
@@ -1677,7 +1677,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -1686,7 +1686,7 @@ cargo test -p diskrement-core --lib
 Expected: compilation errors — `cannot find function build in this scope`,
 `cannot find type ManifestEntry in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Insert above the `mod tests` block in `manifest.rs`:
 
@@ -1796,7 +1796,7 @@ fn to_entry(f: &ScannedFile) -> ManifestEntry {
 }
 ```
 
-- [ ] **Step 4: Wire the module into `lib.rs`**
+- [x] **Step 4: Wire the module into `lib.rs`**
 
 Add `pub mod manifest;` after `pub mod diff;`, and add:
 
@@ -1804,7 +1804,7 @@ Add `pub mod manifest;` after `pub mod diff;`, and add:
 pub use manifest::{ManifestChangeKind, ManifestEntry, SessionManifest};
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -1812,7 +1812,7 @@ cargo test -p diskrement-core --lib
 
 Expected: `test result: ok. 45 passed`.
 
-- [ ] **Step 6: Verify lint and format, then commit**
+- [x] **Step 6: Verify lint and format, then commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
@@ -1830,7 +1830,7 @@ Port `Generators.scala`, `GeneratorsTest.scala`, and `DiffPropertyTest.scala`.
 - Modify: `crates/diskrement-core/src/testutil.rs`
 - Modify: `crates/diskrement-core/src/diff.rs`
 
-- [ ] **Step 1: Write the strategies**
+- [x] **Step 1: Write the strategies**
 
 Append the following to `testutil.rs`, but move its four `use` lines up to join
 the imports already at the top of the file — rustfmt will not reorder imports
@@ -1965,7 +1965,7 @@ pub fn planner_input_strategy() -> impl Strategy<Value = (ChangeSet, Vec<DiscSta
 }
 ```
 
-- [ ] **Step 2: Write the property tests**
+- [x] **Step 2: Write the property tests**
 
 Add to `diff.rs`'s `mod tests` block:
 
@@ -2019,7 +2019,7 @@ Add to `diff.rs`'s `mod tests` block:
     }
 ```
 
-- [ ] **Step 3: Run the tests to verify they pass**
+- [x] **Step 3: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -2032,7 +2032,7 @@ If `generated_scanned_file_lists_have_unique_rel_paths` fails, the dedup in
 `scanned_files_strategy` is filtering on the wrong key — the whole
 `ScannedFile` rather than its `rel_path`.
 
-- [ ] **Step 4: Verify lint and format, then commit**
+- [x] **Step 4: Verify lint and format, then commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
@@ -2052,7 +2052,7 @@ nobody wrote by hand.
 - Modify: `crates/diskrement-core/src/planner.rs`
 - Modify: `crates/diskrement-core/src/testutil.rs`
 
-- [ ] **Step 1: Add the reshuffling strategy**
+- [x] **Step 1: Add the reshuffling strategy**
 
 Property 5 needs the same input twice: once as generated, once with all
 placeable files permuted and re-split across the `added`/`modified` buckets.
@@ -2093,7 +2093,7 @@ pub fn reshuffled_planner_input_strategy()
 }
 ```
 
-- [ ] **Step 2: Write the property tests**
+- [x] **Step 2: Write the property tests**
 
 Add to `planner.rs`'s `mod tests` block:
 
@@ -2243,7 +2243,7 @@ Add to `planner.rs`'s `mod tests` block:
     }
 ```
 
-- [ ] **Step 3: Run the tests to verify they pass**
+- [x] **Step 3: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-core --lib
@@ -2260,7 +2260,7 @@ If property 5 fails, the planner is reading `changes.added` and
 `changes.modified` in a way that distinguishes them — the only legitimate use of
 that split is the manifest builder, never the planner.
 
-- [ ] **Step 4: Verify lint and format, then commit**
+- [x] **Step 4: Verify lint and format, then commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
@@ -2277,7 +2277,7 @@ git commit -m "test(core): port the eight planner properties"
 - Modify: `crates/diskrement-shell/src/lib.rs`
 - Create: `crates/diskrement-core/README.md`
 
-- [ ] **Step 1: Replace the P0 `Probe` stub with a real type**
+- [x] **Step 1: Replace the P0 `Probe` stub with a real type**
 
 `Probe` existed only to give the `shell -> core` edge something to link. Real
 types exist now, so delete it and re-point the shell's edge proof.
@@ -2353,7 +2353,7 @@ mod tests {
 `crates/diskrement-cli/src/main.rs` still compiles unchanged: it only discards
 the value.
 
-- [ ] **Step 2: Confirm the purity constraint actually holds**
+- [x] **Step 2: Confirm the purity constraint actually holds**
 
 ```bash
 cargo tree --package diskrement-core --edges normal
@@ -2364,7 +2364,7 @@ chrono's own non-optional dependencies beneath it. If `proptest` appears under
 `--edges normal`, it has been misplaced into `[dependencies]` — move it back to
 `[dev-dependencies]`.
 
-- [ ] **Step 3: Confirm the clock is genuinely unreachable**
+- [x] **Step 3: Confirm the clock is genuinely unreachable**
 
 The purity claim in the spec is only worth as much as the check behind it. Prove
 it, then remove the proof.
@@ -2394,7 +2394,7 @@ crate turning it on, since Cargo unifies features across the graph. Check
 `cargo tree -p diskrement-core -f '{p} {f}'` and fix the offender before
 committing.
 
-- [ ] **Step 4: Write the crate README**
+- [x] **Step 4: Write the crate README**
 
 Create `crates/diskrement-core/README.md`:
 
@@ -2428,7 +2428,7 @@ Two things in here are load-bearing beyond their size:
   `a_zero_byte_file_does_not_fit_an_overfull_disc`.
 ```
 
-- [ ] **Step 5: Run the full phase verification**
+- [x] **Step 5: Run the full phase verification**
 
 ```bash
 cargo test --workspace \
@@ -2440,7 +2440,7 @@ Expected: the `diskrement-core` lib target reports `test result: ok. 57 passed`,
 `diskrement-shell` reports 1, `diskrement-cli`'s `binary.rs` reports 1; then
 silence from clippy and rustfmt.
 
-- [ ] **Step 6: Confirm the Scala build is untouched**
+- [x] **Step 6: Confirm the Scala build is untouched**
 
 ```bash
 git status --porcelain
@@ -2452,7 +2452,7 @@ Expected: `git status` clean; the diff against `main` for those paths **empty**;
 `sbt core/test` still reporting **51 tests passing**. P1 adds Rust; it removes
 nothing.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/diskrement-core crates/diskrement-shell
@@ -2463,13 +2463,13 @@ git commit -m "docs(core): document diskrement-core; retire the P0 probe scaffol
 
 ## Phase P1 acceptance
 
-- [ ] `cargo test -p diskrement-core --lib` reports **57 passing**, 0 failing.
-- [ ] `cargo test --workspace` is green across all three crates.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is silent.
-- [ ] `cargo fmt --check` is silent.
-- [ ] `cargo tree -p diskrement-core --edges normal` shows `chrono` as the only
+- [x] `cargo test -p diskrement-core --lib` reports **57 passing**, 0 failing.
+- [x] `cargo test --workspace` is green across all three crates.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` is silent.
+- [x] `cargo fmt --check` is silent.
+- [x] `cargo tree -p diskrement-core --edges normal` shows `chrono` as the only
       direct dependency, and a temporary `Utc::now()` call fails to compile.
-- [ ] Every test in `core/src/test/scala/diskrement/core/` has a counterpart.
+- [x] Every test in `core/src/test/scala/diskrement/core/` has a counterpart.
       The Rust suite is larger by six, because six ports gained a case:
 
       | Source | Scala | Rust | Added |
@@ -2486,9 +2486,27 @@ git commit -m "docs(core): document diskrement-core; retire the P0 probe scaffol
       | `PlannerPropertyTest` | 8 | 8 | — |
       | **Total** | **51** | **57** | **+6** |
 
-- [ ] `git diff main -- core shell cli build.sbt project` is empty and
+- [x] `git diff main -- core shell cli build.sbt project` is empty and
       `sbt core/test` still reports 51 tests passing.
 
 **Next:** phase P2 (the catalog: schema, migrations, store, and the `time`
 module whose round-trip is pinned against the timestamp strings harvested in
 P0), which gets its own plan document.
+
+---
+
+## P1 execution deviations (appended during execution)
+
+1. **Task 1 (model tests):** clippy `-D warnings` rejected two shapes of the
+   plan's test code: `useless_vec` on the `paths` binding (now a fixed-size
+   array) and `clipped_ref_to_slice_refs`/`cloned_ref_to_slice_refs` on
+   `view_of(&[e.clone()])` (now `view_of(std::slice::from_ref(&e))`). Test
+   semantics unchanged.
+2. **Task 3 (diff):** the red state only appeared after wiring
+   `pub mod diff;` and the `ChangeSet` re-export into `lib.rs` — an unwired
+   module is not compiled, so writing the test file alone produces no compile
+   error. Sequencing adjusted accordingly (wire → red → implement).
+3. **Task 5 (planner):** the Task-4 planner-type tests were accidentally
+   dropped while replacing the test module with the Task-5 suite (the plan's
+   snippet shows only the added tests); they were restored verbatim before
+   commit and the expected count of 42 was reached.
