@@ -1,0 +1,31 @@
+{
+  "pointers" : [
+    {
+      "relPath" : "a.bin",
+      "contentHash" : "8e19511b7991430a1950f27907234183151bb0dbf1fbf28cd5b765088feb9f70",
+      "sizeBytes" : 800,
+      "discOrdinal" : 1,
+      "sessionOrdinal" : 1,
+      "discPath" : "/data/a.bin",
+      "kind" : "ADDED"
+    },
+    {
+      "relPath" : "a.bin",
+      "contentHash" : "e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77",
+      "sizeBytes" : 800,
+      "discOrdinal" : 3,
+      "sessionOrdinal" : 1,
+      "discPath" : "/data/a.bin",
+      "kind" : "MODIFIED"
+    },
+    {
+      "relPath" : "b.bin",
+      "contentHash" : "3413ff9e166e40ad8798e36609f28433496ee3a0f8984f73d33b0a80ffef2a89",
+      "sizeBytes" : 800,
+      "discOrdinal" : 2,
+      "sessionOrdinal" : 1,
+      "discPath" : "/data/b.bin",
+      "kind" : "DELETED"
+    }
+  ]
+}

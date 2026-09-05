@@ -1,0 +1,44 @@
+
+== step 01 [init p]
+
+== step 02 [scan p]
+
+== step 03 [plan p]
+
+== step 04 [burn p --yes]
+
+== step 05 [verify p]
+
+== step 06 [scan p]
+
+== step 07 [plan p]
+
+== step 08 [burn p --yes]
+
+== step 09 [scan p]
+
+== step 10 [plan p]
+
+== step 11 [burn p --yes]
+
+== step 12 [disc mark-dead p 3 --yes]
+
+== step 13 [scan p]
+
+== step 14 [plan p]
+
+== step 15 [burn p --yes]
+
+== step 16 [history p a.bin]
+
+== step 17 [scan p]
+
+== step 18 [plan p --finalize]
+
+== step 19 [burn p --yes]
+
+== step 20 [status p]
+
+== step 21 [verify p]
+
+== step 22 [history p b.bin]

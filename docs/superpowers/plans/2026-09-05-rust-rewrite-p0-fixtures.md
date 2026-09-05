@@ -955,3 +955,51 @@ Step 5, which P2 needs.
       `sbt core/test` still reports 51 tests passing.
 
 **Next:** phase P1 (the pure functional core), which gets its own plan document.
+
+---
+
+## Execution deviations (P0, recorded 2026-09-05)
+
+1. **Scenario corrected against the one-disc-per-cycle invariant (Tasks 1–2).**
+   The drafted scenario assumed one `burn` could write discs 1 *and* 2; the
+   implementation writes exactly one disc per scan→plan→burn cycle (CLAUDE.md
+   invariant; `Scenario05Spill` spills "in the next cycle"). The harvest gained
+   a cycle 1b (`scan` "1 added" → `plan` → `burn`: b@1 lands on disc 2, left
+   OPEN) and an empty `scan` before `plan --finalize` (every plan consumes the
+   staged scan; `PipelineLive` fails with "no staged scan" otherwise —
+   confirmed by `Scenario03FinalizedNewDisc`, which always scans first).
+   Consequences: 22 recorded `[exit 0]` steps (not 18), 11 catalog snapshots
+   (not 9), 4 scancache snapshots (not 3); work dirs and disc trees unchanged
+   at 2 and 4. All original anchors are preserved; the only new anchor is
+   cycle 1b's "1 added".
+2. **SC2094 fix in the SHA256SUMS generation (Task 1).** Sums are captured to
+   a variable before being written; the drafted one-liner's redirect creates
+   the output file before `find` finishes enumerating (shellcheck info-level,
+   and a genuine race if the script is ever re-run into a non-empty dir).
+3. **Oracle redactions (Task 1).** The scratch path appears in recorded
+   command lines (`init`) and `status` output, and `status` prints the last
+   burn timestamp; all three are redacted to `<scratch>`/`<timestamp>` so the
+   oracle is byte-stable across re-harvests modulo its `#` header. `stderr.log`
+   remains unredacted (not an oracle).
+4. **`discs/disc-4` holds the seal session, not the recovery session
+   (Task 2).** `plan --finalize` re-stages disc 4, and the seal burn
+   re-materializes `staging/disc-4`, overwriting the recovery-session tree, so
+   the captured tree has an empty `data/` and `sessionOrdinal: 2`. This is
+   kept deliberately: it pins the seal-session manifest shape (the only one of
+   the four shapes with empty lists *and* session > 1), while a@2's recovery
+   bytes are identical (same content hash) to `discs/disc-3/data/a.bin`.
+5. **`project.json` excluded from the disc-tree re-derivation diff (Task 5
+   Step 2).** It embeds a volatile `createdAt`; consumers compare it
+   semantically (fixtures/README.md).
+6. **Perf baseline uses a synthetic tree (Task 3).** User-approved substitute
+   for a real photo library: 2000 files / 2.072 GB of incompressible urandom
+   content on btrfs `/tmp` (compress=zstd:3), source
+   `/tmp/diskrement-bench-src`, work `/tmp/diskrement-bench-work`; the exact
+   generation recipe is in the committed header, and P9 must re-run against
+   the same pair of paths. Run is short (1–3 s/step): wall times are the
+   baseline, per-step I/O columns are approximate.
+7. **Timestamp shapes observed for P2 (Task 2 Step 5):** 3-digit fractions on
+   file mtimes (`...T19:56:11.446Z`) and 9-digit on `createdAt`/catalog
+   `first_seen_at` (`...T19:56:28.287125297Z`); **no whole-second example
+   occurs in the corpus** — construct those synthetically in the
+   `shell::catalog::time` tests.

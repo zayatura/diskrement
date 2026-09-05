@@ -1,0 +1,18 @@
+[package]
+name = "diskrement-core"
+description = "diskrement functional core: diff, planning, manifests — pure, no I/O"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+# Deliberately dependency-poor. `chrono` with default features disabled excludes
+# the `clock` feature, so `Utc::now()` is not reachable from here — purity is
+# enforced by the dependency graph, not by discipline. Do not add a dependency
+# to this crate without a very good reason.
+[dependencies]
+chrono.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

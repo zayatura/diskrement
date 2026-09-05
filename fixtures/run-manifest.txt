@@ -1,0 +1,150 @@
+# diskrement golden fixture run manifest
+# launcher: ~/work/diskrement/cli/target/universal/stage/bin/diskrement
+# launcher sha256: fcd6d67984cf37028d85c5946a45217ed3762ee8d14a7746f19454e10f590a94
+# generated: 2026-09-05T20:01:03Z
+# env: DISKREMENT_BURNER=simulated DISKREMENT_DISC_BYTES=1000
+
+== step 01 [init p]
+$ diskrement init p --source <scratch>/source --work-dir <scratch>/work
+Created project p (id 1).
+[exit 0]
+
+== step 02 [scan p]
+$ diskrement scan p
+Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged.
+Hashed 2 of 2 files (0 fingerprints reused).
+[exit 0]
+
+== step 03 [plan p]
+$ diskrement plan p
+Plan: disc 1 (new disc, BD_R) — 1 files, 0.0 GB, will FINALIZE
+~1 more files (~1 more discs) remain after this one.
+[exit 0]
+
+== step 04 [burn p --yes]
+$ diskrement burn p --yes
+✔ Wrote disc 1  —  label: "p disc 1"
+Status: FINALIZED — set this disc aside, it is sealed.
+~1 more discs of changes remain. Run: scan → plan → burn
+[exit 0]
+
+== step 05 [verify p]
+$ diskrement verify p
+disc 1: 1 files OK ✓
+[exit 0]
+
+== step 06 [scan p]
+$ diskrement scan p
+Scanned: 1 added, 0 modified, 0 deleted, 1 unchanged.
+Hashed 0 of 2 files (2 fingerprints reused).
+[exit 0]
+
+== step 07 [plan p]
+$ diskrement plan p
+Plan: disc 2 (new disc, BD_R) — 1 files, 0.0 GB, left OPEN
+This disc completes the set.
+[exit 0]
+
+== step 08 [burn p --yes]
+$ diskrement burn p --yes
+✔ Wrote disc 2  —  label: "p disc 2"
+Status: left OPEN — may receive more sessions later.
+No more changes — the set is up to date.
+[exit 0]
+
+== step 09 [scan p]
+$ diskrement scan p
+Scanned: 0 added, 1 modified, 1 deleted, 0 unchanged.
+Hashed 1 of 1 files (0 fingerprints reused).
+[exit 0]
+
+== step 10 [plan p]
+$ diskrement plan p
+Plan: disc 3 (new disc, BD_R) — 1 files, 0.0 GB, left OPEN
+This disc completes the set.
+Deletions: 1
+[exit 0]
+
+== step 11 [burn p --yes]
+$ diskrement burn p --yes
+✔ Wrote disc 3  —  label: "p disc 3"
+Status: left OPEN — may receive more sessions later.
+No more changes — the set is up to date.
+[exit 0]
+
+== step 12 [disc mark-dead p 3 --yes]
+$ diskrement disc mark-dead p 3 --yes
+Disc 3 marked DEAD.
+No versions permanently lost.
+Re-burn on next scan/plan/burn (1):
+  a.bin
+[exit 0]
+
+== step 13 [scan p]
+$ diskrement scan p
+Scanned: 1 added, 0 modified, 0 deleted, 0 unchanged.
+Hashed 0 of 1 files (1 fingerprints reused).
+[exit 0]
+
+== step 14 [plan p]
+$ diskrement plan p
+Plan: disc 4 (new disc, BD_R) — 1 files, 0.0 GB, left OPEN
+This disc completes the set.
+[exit 0]
+
+== step 15 [burn p --yes]
+$ diskrement burn p --yes
+✔ Wrote disc 4  —  label: "p disc 4"
+Status: left OPEN — may receive more sessions later.
+No more changes — the set is up to date.
+[exit 0]
+
+== step 16 [history p a.bin]
+$ diskrement history p a.bin
+a.bin
+  v1  disc 1 / session 1   0.0 GB  8e19511b7991430a1950f27907234183151bb0dbf1fbf28cd5b765088feb9f70  SUPERSEDED
+  v2  disc 3 / session 1   0.0 GB  e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77  LOST
+  v3  disc 4 / session 1   0.0 GB  e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77  CURRENT
+[exit 0]
+
+== step 17 [scan p]
+$ diskrement scan p
+Scanned: 0 added, 0 modified, 0 deleted, 1 unchanged.
+Hashed 0 of 1 files (1 fingerprints reused).
+[exit 0]
+
+== step 18 [plan p --finalize]
+$ diskrement plan p --finalize
+Plan: finalize disc 4 (seal; no new files).
+[exit 0]
+
+== step 19 [burn p --yes]
+$ diskrement burn p --yes
+✔ Wrote disc 4  —  label: "p disc 4"
+Status: FINALIZED — set this disc aside, it is sealed.
+No more changes — the set is up to date.
+[exit 0]
+
+== step 20 [status p]
+$ diskrement status p
+Project p  (source <scratch>/source, BD_R, margin 2.0%)
+Discs:
+  #1   FINALIZED  0.0 GB / 0.0 GB
+  #2   OPEN       0.0 GB / 0.0 GB  <- open
+  #3   DEAD       0.0 GB / 0.0 GB
+  #4   FINALIZED  0.0 GB / 0.0 GB
+Current files: 1      Last burn: <timestamp>
+[exit 0]
+
+== step 21 [verify p]
+$ diskrement verify p
+disc 1: 1 files OK ✓
+disc 2: 1 files OK ✓
+disc 4: 0 files OK ✓
+[exit 0]
+
+== step 22 [history p b.bin]
+$ diskrement history p b.bin
+b.bin
+  v1  disc 2 / session 1   0.0 GB  3413ff9e166e40ad8798e36609f28433496ee3a0f8984f73d33b0a80ffef2a89  DELETED
+[exit 0]

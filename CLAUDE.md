@@ -61,6 +61,7 @@ Known deferred debt, documented on purpose — don't casually "fix" it: `archive
 ## Repo etiquette
 
 - Feature work goes on a branch off `main` named `feat/<topic>`, merged back with an explicit merge commit titled `Merge feat/<branch>: <summary>`, then the branch is deleted locally and on `origin`. No PRs. Never commit feature work directly to `main`.
+- **While the Rust rewrite is in flight, `feat/rust-rewrite` acts as the integration branch**: each phase's work goes on its own branch (e.g. `feat/rewrite-p0`) forked from `feat/rust-rewrite`, merged back into `feat/rust-rewrite` with the same explicit `Merge feat/<branch>: <summary>` commit, then the phase branch is deleted. The same rules apply: never commit phase work directly to `feat/rust-rewrite`, no PRs. `main` only receives the rewrite when its completion is explicitly confirmed.
 - Conventional commits with a scope: `feat(catalog):`, `fix(cli):`, `test(catalog):`, `docs(plan):`, `chore:`.
 
 ## In-flight work

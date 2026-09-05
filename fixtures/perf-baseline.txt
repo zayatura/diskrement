@@ -1,0 +1,51 @@
+# Scala baseline for the Rust rewrite (spec §1, compared in P9)
+# date: 2026-09-05T20:32:10Z
+# commit: 42e7f76
+# source: /tmp/diskrement-bench-src  work: /tmp/diskrement-bench-work
+# fs: btrfs (compress=zstd:3,ssd,noatime)  cpu: 12 threads  ram: 31.1 GB
+# java: openjdk version "21.0.12.1" 2026-08-18
+# tree: SYNTHETIC (user-approved substitute for a real photo library): 2000 files,
+#   8 dirs x 250 files, size = 512 KiB + (i mod 1024) KiB (0.5-1.5 MiB), 2.072 GB total,
+#   incompressible urandom content. Recipe (idempotent, deterministic structure):
+#     rm -rf /tmp/diskrement-bench-src && mkdir -p /tmp/diskrement-bench-src
+#     for i in $(seq 0 1999); do d=$(( i % 8 )); sz=$(( 512 + (i % 1024) ));
+#       mkdir -p /tmp/diskrement-bench-src/dir$d;
+#       head -c $(( sz * 1024 )) /dev/urandom > /tmp/diskrement-bench-src/dir$d/file$i.bin; done
+#   P9 must re-run against this same pair of paths; regenerate the tree first if
+#   /tmp was cleared (content is random, sizes/structure are what the timings depend on).
+# caveat: short run (1-3 s/step, a few 0.2 s sampler polls) — wall times are the
+#   baseline; per-step I/O columns are approximate (see perf-bench.sh notes).
+#
+diskrement performance benchmark
+  source:  /tmp/diskrement-bench-src
+  bin:     ~/work/diskrement/cli/target/universal/stage/bin/diskrement
+  project: /tmp/diskrement-bench-work/perf-bench-827271
+  logs:    /tmp/diskrement-bench-work/perf-bench-827271-logs
+
+provenance:
+  commit:       42e7f76
+  kernel:       6.18.49-2-lts
+  ram:          31.1 GB
+  work area fs: btrfs rw,noatime,nodiratime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=257,subvol=/@tmp
+  jvm:          openjdk version "21.0.12.1" 2026-08-18
+  source tree:  2000 files, 2.072 GB
+
+init         0.791 s   rchar=    0.009 GB   read_bytes=    0.000 GB   write_bytes=    0.001 GB   cached=   26.949 GB   exit=0
+scan1        1.726 s   rchar=    2.082 GB   read_bytes=    2.075 GB   write_bytes=    0.003 GB   cached=   26.794 GB   exit=0
+plan         1.077 s   rchar=    0.011 GB   read_bytes=    0.001 GB   write_bytes=    0.001 GB   cached=   26.861 GB   exit=0
+burn         2.629 s   rchar=    2.085 GB   read_bytes=    2.075 GB   write_bytes=    0.005 GB   cached=   24.649 GB   exit=0
+scan2        1.142 s   rchar=    0.011 GB   read_bytes=    0.000 GB   write_bytes=    0.002 GB   cached=   24.747 GB   exit=0
+
+page cache: not requested (DROP_CACHES not set)
+
+cache evidence (P2: scan2 should show ~0 hashed):
+  scan1: Hashed 2000 of 2000 files (0 fingerprints reused).
+  scan2: Hashed 0 of 2000 files (2000 fingerprints reused).
+
+note: rchar has a nonzero floor (jars, sqlite catalog, staged scan.json,
+      fingerprint sidecar) -- read scan2's rchar as '<< source size', not '== 0'.
+note: the I/O sampler polls every 0.2s and cannot see any I/O the process
+      does after its last poll before exiting -- on a small/fast fixture
+      (a run finishing in a second or two) that residual can be a large
+      fraction of the total and rchar/write_bytes will badly under-report;
+      trust these numbers only on runs long enough to span many polls.

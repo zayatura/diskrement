@@ -1,0 +1,64 @@
+# Golden fixture corpus (Rust rewrite)
+
+Harvested from the **Scala** implementation by `scripts/harvest-fixtures.sh`.
+Scenario: two 800-byte files spill across discs 1-2 (one disc per burn cycle) ->
+modify + delete cycle lands a@2 on disc 3 -> disc 3 marked dead -> recovery burn
+onto disc 4 -> `plan --finalize` seals disc 4. Run with
+`DISKREMENT_DISC_BYTES=1000` and the simulated burner.
+
+## What each piece is
+
+| path | what | byte-stable across re-harvests? |
+|---|---|---|
+| `catalog/NN-*.sqlite` | catalog at each recorded state (11 snapshots) | **no** — compare logically (query outputs), never bytes |
+| `scancache/NN-*.sqlite` | fingerprint sidecar at each scan (4 snapshots) | **no** — same rule |
+| `work/NN-after-planN/` | whole work dir at two staged-plan moments (the recovery unit: staged scan + plan + snapshot + previously burned staging trees). `snapshot/` is byte-stable; `staged/*.json` embed live file mtimes — compare semantically | snapshot yes; staged JSON and sqlite no |
+| `discs/disc-N/` | staged disc trees as left by the last burn of each disc: `data/` + `.diskrement/{manifest,project,pointers}.json` + `catalog.sqlite`. `data/`, `manifest.json`, `pointers.json` are byte-stable; `project.json` embeds a volatile `createdAt` — compare semantically | data + manifest + pointers **yes**; `project.json`/`catalog.sqlite` no |
+| `source/` | source tree as it stood at the end of the run (`b.bin` was deleted in cycle 2; its bytes live on in `discs/disc-2/data/`) | **yes** |
+| `run-manifest.txt` | every command, exit code, and stdout — the **render oracle**. Scratch paths and the `Last burn` timestamp are redacted to `<scratch>`/`<timestamp>`; everything below the `#` header is byte-stable | **yes** |
+| `stderr.log` | stderr — reference only, **not** an oracle (progress lines and scratch paths vary) | no |
+| `perf-baseline.txt` | `perf-bench.sh` output for the Scala build; P9 compares against it | no (timings) |
+| `SHA256SUMS` | integrity pins for what is committed | — |
+
+### Disc-tree notes
+
+- `discs/disc-N` holds the tree of the **last session staged for that disc**,
+  not the cumulative disc: `burn` never clears staging, and the final
+  `plan --finalize` + burn re-staged disc 4 with the (file-less) seal session.
+  That is why `disc-4/data/` is empty — by design, and it is the only example
+  of the seal-session manifest shape (`sessionOrdinal` 2, empty lists).
+- Every distinct content byte is present: a@1 in `disc-1`, b@1 in `disc-2`,
+  a@2 in `disc-3` (the LOST copy; the recovery copy on disc 4 has the same
+  content hash).
+- The four trees pin the four manifest shapes: initial add (disc 1), add
+  session (disc 2), modify+delete session (disc 3), seal session (disc 4).
+
+## Timestamp shapes (test data for `shell::catalog::time`)
+
+The timestamp strings in these files are `java.time.Instant.toString()` output
+with variable fractional precision. This corpus contains **3-digit**
+(`...T19:56:11.446Z`, file mtimes) and **9-digit** (`...T19:56:28.287125297Z`,
+`createdAt`, catalog `first_seen_at`) examples. No whole-second example occurs
+here — construct one synthetically in tests (`Instant.parse` accepts it, and
+`toString` omits the fraction when it is zero).
+
+## Rules for consumers (P2+ compatibility tests)
+
+- Catalog and scancache comparisons are **logical** — dumped rows or query
+  outputs. SQLite file layout is not stable across library builds, and xerial's
+  SQLite is not `libsqlite3-sys`'s.
+- Manifest and pointer JSON compare **semantically** (parsed-value equality);
+  field order is not an oracle, and `project.json`'s `createdAt` is expected to
+  differ between the Scala and Rust runs.
+- `run-manifest.txt` pins stdout and exit codes byte-for-byte for the
+  success-path commands it records (modulo the redactions noted above). It is
+  the only cross-implementation render oracle; `insta` snapshots pin Rust
+  against Rust and cannot catch a wording drift from Scala.
+
+## Regenerating
+
+Do **not** regenerate casually — corpus changes are spec-level events. To
+reproduce: `sbt cli/stage`, then
+`scripts/harvest-fixtures.sh <launcher> <fresh-dir>` with `TMPDIR` on a CoW
+filesystem, and diff `run-manifest.txt` (minus its `#` header), `source/`, and
+the disc trees excluding `*.sqlite` and `project.json`.
