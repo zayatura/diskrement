@@ -17,7 +17,7 @@ pub mod model;
 #[allow(dead_code)]
 mod testutil;
 
-pub use model::{CatalogEntry, CatalogView, ContentHash, RelPath, ScannedFile};
+pub use model::{Capacity, CatalogEntry, CatalogView, ContentHash, DiscType, RelPath, ScannedFile};
 
 /// Temporary P0 scaffolding: gives the `shell -> core` dependency edge
 /// something to link against. Task 9 retires it in favour of a real type.

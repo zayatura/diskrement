@@ -89,6 +89,95 @@ impl CatalogView {
     }
 }
 
+/// Physical optical media types and their nominal byte capacities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiscType {
+    BdR,
+    BdRDl,
+    Dvd,
+    DvdDl,
+}
+
+impl DiscType {
+    pub fn nominal_bytes(self) -> u64 {
+        match self {
+            DiscType::BdR => 25_000_000_000,
+            DiscType::BdRDl => 50_000_000_000,
+            DiscType::Dvd => 4_700_000_000,
+            DiscType::DvdDl => 8_500_000_000,
+        }
+    }
+
+    /// The catalog and JSON spelling. Frozen by the data-compatibility
+    /// contract; see the spec, §3.1. Do not change these strings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiscType::BdR => "BD_R",
+            DiscType::BdRDl => "BD_R_DL",
+            DiscType::Dvd => "DVD",
+            DiscType::DvdDl => "DVD_DL",
+        }
+    }
+}
+
+impl std::fmt::Display for DiscType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for DiscType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "BD_R" => Ok(DiscType::BdR),
+            "BD_R_DL" => Ok(DiscType::BdRDl),
+            "DVD" => Ok(DiscType::Dvd),
+            "DVD_DL" => Ok(DiscType::DvdDl),
+            other => Err(format!("unknown disc type: {other}")),
+        }
+    }
+}
+
+/// Usable bytes on a disc after subtracting filesystem/UDF overhead margin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capacity {
+    pub usable_bytes: u64,
+}
+
+impl Capacity {
+    pub fn new(usable_bytes: u64) -> Self {
+        Capacity { usable_bytes }
+    }
+
+    /// Nominal capacity reduced by `margin_percent` (e.g. 2.0 == 2%), floored.
+    ///
+    /// The margin is converted to an exact integer count of thousandths of a
+    /// percent before dividing, so the result never drifts by a byte the way
+    /// `nominal as f64 * (1.0 - margin / 100.0)` does: DVD-DL at a 7% margin
+    /// floors to 7_904_999_999 in f64, one byte short of the exact
+    /// 7_905_000_000. The Scala reached for `BigDecimal` to solve the same
+    /// problem.
+    ///
+    /// This quantises the margin to three decimal places. `--margin` is a
+    /// user-facing percentage where that is far below anything meaningful (a
+    /// thousandth of a percent of a BD-R is 250 KB), and the alternative — a
+    /// decimal-arithmetic dependency in the one crate that is meant to have
+    /// almost none — costs more than it buys.
+    ///
+    /// A margin above 100% would compute negative and is clamped to zero; the
+    /// value comes from `project.margin_percent` and is nonsense in that range.
+    pub fn from_disc_type(disc_type: DiscType, margin_percent: f64) -> Self {
+        let margin_thousandths = (margin_percent * 1000.0).round() as i128;
+        let usable =
+            i128::from(disc_type.nominal_bytes()) * (100_000 - margin_thousandths) / 100_000;
+        Capacity {
+            usable_bytes: usable.max(0) as u64,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +248,69 @@ mod tests {
                 size_bytes: 7,
             })
         );
+    }
+
+    #[test]
+    fn disc_types_expose_nominal_capacities() {
+        assert_eq!(DiscType::BdR.nominal_bytes(), 25_000_000_000);
+        assert_eq!(DiscType::BdRDl.nominal_bytes(), 50_000_000_000);
+        assert_eq!(DiscType::Dvd.nominal_bytes(), 4_700_000_000);
+        assert_eq!(DiscType::DvdDl.nominal_bytes(), 8_500_000_000);
+    }
+
+    #[test]
+    fn capacity_subtracts_the_margin_percent_and_floors() {
+        assert_eq!(
+            Capacity::from_disc_type(DiscType::BdR, 2.0).usable_bytes,
+            24_500_000_000
+        );
+    }
+
+    #[test]
+    fn zero_margin_yields_nominal_capacity() {
+        assert_eq!(
+            Capacity::from_disc_type(DiscType::Dvd, 0.0).usable_bytes,
+            4_700_000_000
+        );
+    }
+
+    #[test]
+    fn capacity_is_floored_exactly_with_no_floating_point_drift() {
+        // 8_500_000_000 * 0.93 == 7_905_000_000 exactly. Computed in f64 this
+        // floors to 7_904_999_999 — one byte short. Integer math must not.
+        assert_eq!(
+            Capacity::from_disc_type(DiscType::DvdDl, 7.0).usable_bytes,
+            7_905_000_000
+        );
+    }
+
+    #[test]
+    fn a_fractional_margin_percent_is_honoured_exactly() {
+        // 25_000_000_000 * (1 - 2.5/100) == 24_375_000_000 exactly.
+        assert_eq!(
+            Capacity::from_disc_type(DiscType::BdR, 2.5).usable_bytes,
+            24_375_000_000
+        );
+    }
+
+    #[test]
+    fn disc_type_wire_names_round_trip() {
+        // Frozen by the data-compatibility contract (spec §3.1): these are the
+        // strings the Scala build wrote into `project.default_disc_type` and
+        // into the staged `plan.json`.
+        for (dt, name) in [
+            (DiscType::BdR, "BD_R"),
+            (DiscType::BdRDl, "BD_R_DL"),
+            (DiscType::Dvd, "DVD"),
+            (DiscType::DvdDl, "DVD_DL"),
+        ] {
+            assert_eq!(dt.as_str(), name);
+            assert_eq!(name.parse::<DiscType>().expect("parses"), dt);
+        }
+    }
+
+    #[test]
+    fn an_unknown_disc_type_name_is_rejected() {
+        assert!("CD_R".parse::<DiscType>().is_err());
     }
 }
