@@ -129,7 +129,9 @@ snap_work()  { cp -r "$WORK" "$OUTDIR/work/$1"; }
 # exit 0 only. Never loosen an anchor without confirming against the Scala
 # implementation that the new output is correct.
 
-# cycle 1: two 800-byte files spill across discs 1 and 2 in one burn.
+# cycle 1: two 800-byte files, one plan that spills across two discs; burn 1
+# writes disc 1 ([a@1], auto-FINALIZED as the non-last planned disc). One disc
+# per cycle (invariant): b@1 is still unburned after this burn.
 tree_write a.bin 800
 tree_write b.bin 800
 
@@ -147,12 +149,24 @@ snap_work 01-after-plan1
 
 ok "burn p --yes" burn p --yes
 anchor "Wrote disc"
-# disc 1 = [a@1] and is FINALIZED by the spill rule (a non-last planned disc is
-# always finalized); disc 2 = [b@1] and is the OPEN disc, with 200 B headroom.
 snap_cat 03-after-burn1
 
 ok "verify p" verify p
 anchor "files OK"
+
+# cycle 1b: the spill's remaining changes land b@1 on disc 2, which stays
+# OPEN with 200 B headroom.
+ok "scan p" scan p
+anchor "1 added"                 # b@1 enters the burned view
+snap_cat 04-after-scan2
+snap_cache 02-after-scan2
+
+ok "plan p" plan p
+anchor "new disc"
+
+ok "burn p --yes" burn p --yes
+anchor "Wrote disc"
+snap_cat 05-after-burn2          # disc 2 = [b@1], left OPEN
 
 # cycle 2: modify a (supersede), delete b.
 tree_modify a.bin 800
@@ -160,36 +174,36 @@ tree_delete b.bin
 
 ok "scan p" scan p
 anchor "1 modified, 1 deleted"
-snap_cat 04-after-scan2
-snap_cache 02-after-scan2
+snap_cat 06-after-scan3
+snap_cache 03-after-scan3
 
 ok "plan p" plan p
 # a@2 is 800 B and does not fit disc 2's 200 B headroom — disc 2 is the open
 # disc here, not disc 1, which the cycle-1 spill finalized. So a fresh disc 3.
 anchor "new disc"
-snap_work 02-after-plan2
+snap_work 02-after-plan3
 
 ok "burn p --yes" burn p --yes
 anchor "Wrote disc"
-snap_cat 05-after-burn2          # disc 3 = [a@2]
+snap_cat 07-after-burn3          # disc 3 = [a@2]
 
 # the coaster: disc 3 dies. a@2 is current and had only that one copy, so it
 # must be re-burned.
 ok "disc mark-dead p 3 --yes" disc mark-dead p 3 --yes
 anchor "marked DEAD"
-snap_cat 06-after-mark-dead
+snap_cat 08-after-mark-dead
 
 ok "scan p" scan p
 anchor "1 added"                 # a@2's burned view died with disc 3
-snap_cat 07-after-scan3
-snap_cache 03-after-scan3
+snap_cat 09-after-scan4
+snap_cache 04-after-scan4
 
 ok "plan p" plan p
 anchor "new disc"
 
 ok "burn p --yes" burn p --yes
 anchor "Wrote disc"
-snap_cat 08-after-burn3          # disc 4 = [a@2], a second physical copy
+snap_cat 10-after-burn4          # disc 4 = [a@2], a second physical copy
 
 ok "history p a.bin" history p a.bin
 # LOST is a@2's copy on the dead disc 3; CURRENT is a@2's live copy on disc 4.
@@ -198,12 +212,16 @@ ok "history p a.bin" history p a.bin
 anchor "LOST"
 anchor "CURRENT"
 
-# seal the non-full disc: --finalize on an empty changeset, then burn.
+# seal the non-full disc: an (empty) scan stages the state the finalize plan
+# needs — every plan consumes the staged scan, so a fresh one is required —
+# then --finalize marks the head (disc 4) willFinalize and burn seals it.
+ok "scan p" scan p               # no changes; wording not pinned, exit 0 only
+
 ok "plan p --finalize" plan p --finalize
 
 ok "burn p --yes" burn p --yes
 anchor "Wrote disc"
-snap_cat 09-after-finalize       # disc 4 FINALIZED
+snap_cat 11-after-finalize       # disc 4 FINALIZED
 
 ok "status p" status p
 anchor "DEAD"
@@ -224,6 +242,16 @@ shopt -u nullglob
 [ "${#staged[@]}" -gt 0 ] || { echo "error: no staged discs under $WORK/staging" >&2; exit 4; }
 for d in "${staged[@]}"; do cp -r "$d" "$OUTDIR/discs/"; done
 cp -r "$SRC" "$OUTDIR/source"
+
+# --- normalize the oracle ----------------------------------------------------
+# Three recorded values are volatile by nature and would break the byte-stable
+# re-derivation check: the scratch path appears in recorded command lines and
+# in `status` output, and `status` prints the last-burn timestamp. Redact them
+# to fixed placeholders so the oracle differs across re-harvests only in its
+# `#`-prefixed header. (stderr.log is not an oracle and is left as-is.)
+sed -i -e "s|$SCRATCH|<scratch>|g" \
+       -e 's|Last burn: [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z|Last burn: <timestamp>|' \
+       "$RUNLOG"
 
 # --- integrity manifest -----------------------------------------------------
 # Sums are captured to a variable before being written so the pipeline never

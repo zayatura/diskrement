@@ -1,0 +1,1 @@
+{"disc":{"ordinal":3,"isNew":true,"willFinalize":false,"files":[{"relPath":"a.bin","contentHash":"e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77","sizeBytes":800,"mtime":"2026-09-05T20:01:10.247Z"}],"priorUsedBytes":0,"usableBytes":1000},"discType":"BD_R","tombstones":["b.bin"],"remaining":{"moreDiscs":0,"moreFiles":0,"moreBytes":0},"oversized":[]}
