@@ -9,6 +9,7 @@
 //! `ManifestBuilder.build`. Types are re-exported here for convenience.
 
 pub mod diff;
+pub mod manifest;
 pub mod model;
 pub mod planner;
 
@@ -20,6 +21,7 @@ pub mod planner;
 mod testutil;
 
 pub use diff::ChangeSet;
+pub use manifest::{ManifestChangeKind, ManifestEntry, SessionManifest};
 pub use model::{Capacity, CatalogEntry, CatalogView, ContentHash, DiscType, RelPath, ScannedFile};
 pub use planner::{BurnPlan, DiscState, DiscStatus, PlannedDisc};
 
