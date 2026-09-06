@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 diskrement-core.workspace = true
-chrono.workspace = true
+chrono = { workspace = true, features = ["clock"] }
 rayon.workspace = true
 reflink-copy.workspace = true
 rusqlite.workspace = true
