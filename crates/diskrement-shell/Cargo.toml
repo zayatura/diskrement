@@ -19,6 +19,10 @@ sha2.workspace = true
 thiserror.workspace = true
 walkdir.workspace = true
 
+[features]
+testutil = []
+
 [dev-dependencies]
+diskrement-shell = { path = ".", features = ["testutil"] }
 proptest.workspace = true
 tempfile.workspace = true

@@ -4,3 +4,6 @@
 
 pub mod catalog;
 pub mod error;
+
+#[cfg(feature = "testutil")]
+pub mod testutil;
