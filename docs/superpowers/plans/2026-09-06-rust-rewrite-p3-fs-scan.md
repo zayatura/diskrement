@@ -3697,6 +3697,17 @@ git commit -m "feat(difftest): teach the harness that init, scan and status exis
   file's mtime after the first scan. Also: `ScanOutput` derives `Debug` (the
   failure test uses `unwrap_err`), and `scan` computes the hashed count
   before `files.extend(hashed_files)` moves the vec (E0382).
+- **Task 6:** shell needs the chrono `clock` feature for `Utc::now()` in
+  `put_all` (`chrono = { workspace = true, features = ["clock"] }` in shell's
+  manifest) — the workspace default excludes it to keep *core* pure; shell is
+  the effects crate. The plan's `ffi::Error::new(ErrorCode::…)` also does not
+  compile: the constructor takes a `c_int`, so it is
+  `ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT)`. `put_all` uses
+  `Connection::unchecked_transaction()` because the cache hands out
+  `&Connection` (same rollback-on-drop guard).
+- **Task 7 (test helper):** the `ok_cloner` stand-in `copy_tree` must handle a
+  plain-file source — the CoW probe passes a file, and `dst.join("")`
+  collapsed to the work dir (EISDIR). It now copies a file directly.
 
 ## Spec coverage
 

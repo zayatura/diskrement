@@ -4,3 +4,4 @@
 pub mod fingerprint_cache;
 pub mod hasher;
 pub mod scanner;
+pub mod snapshot;
