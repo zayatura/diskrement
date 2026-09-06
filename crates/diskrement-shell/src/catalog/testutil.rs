@@ -7,10 +7,10 @@
 //! the directory.
 
 use chrono::{DateTime, TimeZone, Utc};
-use diskrement_core::DiscType;
+use diskrement_core::{ContentHash, DiscStatus, DiscType, RelPath};
 use tempfile::TempDir;
 
-use super::model::ProjectInit;
+use super::model::{CatalogUpdate, DiscWrite, FileWrite, ProjectId, ProjectInit, SessionWrite};
 use super::Catalog;
 
 pub(crate) fn temp_catalog() -> (TempDir, Catalog) {
@@ -21,9 +21,6 @@ pub(crate) fn temp_catalog() -> (TempDir, Catalog) {
 
 /// The fixed "burned at" instant every unit test uses, matching the Scala
 /// specs' `ts`.
-// Same situation as Task 2's `Catalog::tx` marker: the brief adds the helper
-// one task before its first caller, and `.cargo/config.toml` denies warnings.
-#[expect(dead_code, reason = "first used by store.rs tests in task 5")]
 pub(crate) fn ts() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 1, 10, 0, 0).unwrap()
 }
@@ -38,4 +35,65 @@ pub(crate) fn project_init(name: &str) -> ProjectInit {
         copies: 1,
         created_at: Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap(),
     }
+}
+
+/// A file write with the conventional test values: mtime `ts()`, disc path
+/// `/data/<path>`, copy 0.
+pub(crate) fn fw(path: &str, hash: &str, size: u64) -> FileWrite {
+    fw_at(path, hash, size, ts())
+}
+
+pub(crate) fn fw_at(
+    path: &str,
+    hash: &str,
+    size: u64,
+    mtime: chrono::DateTime<chrono::Utc>,
+) -> FileWrite {
+    FileWrite {
+        rel_path: RelPath(path.to_string()),
+        content_hash: ContentHash(hash.to_string()),
+        size_bytes: size,
+        mtime,
+        disc_path: format!("/data/{path}"),
+        copy_index: 0,
+    }
+}
+
+/// One session on one disc, the shape every ported spec's `session` helper
+/// built: the disc is new exactly when this is its first session.
+pub(crate) fn update(
+    project: ProjectId,
+    disc_ordinal: u32,
+    session_ordinal: u32,
+    added: Vec<FileWrite>,
+    modified: Vec<FileWrite>,
+    deleted: Vec<RelPath>,
+) -> CatalogUpdate {
+    CatalogUpdate {
+        project_id: project,
+        finalize_disc_ordinals: Vec::new(),
+        discs: vec![DiscWrite {
+            ordinal: disc_ordinal,
+            is_new: session_ordinal == 1,
+            disc_type: diskrement_core::DiscType::BdR,
+            usable_bytes: 1_000_000,
+            status: DiscStatus::Open,
+            label: format!("d{disc_ordinal}"),
+            session: SessionWrite {
+                ordinal: session_ordinal,
+                burned_at: ts(),
+                manifest_hash: format!("m{disc_ordinal}-{session_ordinal}"),
+                added,
+                modified,
+                deleted,
+            },
+        }],
+    }
+}
+
+/// Row count of one table, for the atomicity assertions.
+pub(crate) fn count(cat: &super::Catalog, table: &str) -> i64 {
+    cat.raw_connection_for_tests()
+        .query_row(&format!("select count(*) from {table}"), [], |r| r.get(0))
+        .expect("count query succeeds")
 }
