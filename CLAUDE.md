@@ -70,6 +70,11 @@ These apply to the `crates/` tree only; the Scala gotchas above still govern
   `journal_mode=memory`, so a WAL assertion against one passes vacuously.
 - **Never open a fixture catalog with `Catalog::open`** — it runs the migration
   runner and writes. Copy the file to a `TempDir` first.
+- **`ioctl(FICLONE)` does not preserve mtime.** A reflinked copy gets the
+  current time; `cp -a` preserved the source's. Any Rust code that clones a
+  file must copy the mtime afterwards (`File::set_modified`), or the
+  scanner's size+mtime fast path never hits and the fingerprint cache is
+  useless. `fs::snapshot::reflink_tree` does this — keep it that way.
 
 ## The differential harness (P3+)
 

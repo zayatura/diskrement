@@ -47,6 +47,12 @@ fn classify(work_dir: &Path, e: std::io::Error) -> SnapshotError {
 /// Recursively clone `src` to `dst` by reflinking each regular file. Not
 /// atomic; the caller has already removed any stale `dst`. Symlinks are
 /// excluded, matching the scanner's walk.
+///
+/// Each file's **mtime and permissions are copied after the clone** (`cp -a`
+/// did this): `ioctl(FICLONE)` stamps the destination with the current time,
+/// and the scanner's size+mtime fast path compares exact millis instants —
+/// without this, every scan of a fresh snapshot would re-hash and the
+/// fingerprint cache would never hit.
 fn reflink_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in walkdir::WalkDir::new(src).follow_links(false) {
@@ -58,6 +64,11 @@ fn reflink_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
             std::fs::create_dir_all(&target)?;
         } else if ft.is_file() {
             reflink_copy::reflink(entry.path(), &target)?;
+            let meta = entry.metadata()?;
+            std::fs::set_permissions(&target, meta.permissions())?;
+            let mtime = meta.modified()?;
+            let f = std::fs::File::options().write(true).open(&target)?;
+            f.set_modified(mtime)?;
         }
     }
     Ok(())

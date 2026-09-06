@@ -3717,6 +3717,15 @@ git commit -m "feat(difftest): teach the harness that init, scan and status exis
   corrupt-scan test asserts `!err.is_io()` rather than `is_syntax()`: the
   category depends on where the parse dies (`{not json` is a data error —
   map vs sequence).
+- **Task 9 (the phase's real find):** `ioctl(FICLONE)` stamps the cloned file
+  with the *current* mtime — it does not preserve the source's, while the
+  Scala `cp -a` did. Verified empirically on btrfs. Consequence: a fresh
+  snapshot per scan made every cached fingerprint miss (mtime mismatch) and
+  the forced-rescan re-hashed everything, breaking the pinned `Hashed 0 of N`
+  reuse output. `reflink_tree` now copies each file's mtime and permissions
+  after cloning. Also: the pipeline `Env` test helper must read `TempDir`
+  paths *before* moving the dirs into `_dirs` (E0382), and the reports derive
+  `Debug` for `unwrap`/panic printing.
 
 ## Spec coverage
 

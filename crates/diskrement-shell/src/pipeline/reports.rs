@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use diskrement_core::DiscState;
 
 /// `ScanResult` — `hashed` is `None` when a staged scan was reused.
+#[derive(Debug)]
 pub struct ScanReport {
     pub added: usize,
     pub modified: usize,
@@ -16,6 +17,7 @@ pub struct ScanReport {
 }
 
 /// `StatusReport`.
+#[derive(Debug)]
 pub struct StatusReport {
     pub discs: Vec<DiscState>,
     pub open_disc_ordinal: Option<u32>,
