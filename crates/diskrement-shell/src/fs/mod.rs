@@ -2,3 +2,4 @@
 //! CoW source snapshot (spec §5.3).
 
 pub mod hasher;
+pub mod scanner;
