@@ -5,6 +5,7 @@
 //! makes "this operation mutates the catalog" a fact the compiler knows rather
 //! than a convention. Readers take `&self` and live in `read.rs`.
 
+use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -213,6 +214,30 @@ impl Catalog {
                     .collect(),
             })
         })
+    }
+
+    /// Write a consistent full-database snapshot to `dest` via `VACUUM INTO`.
+    ///
+    /// Runs outside a transaction, and `dest` must not already exist —
+    /// `VACUUM INTO` fails if it does, which is the behaviour the burn flow
+    /// relies on to notice a stale work-directory snapshot.
+    pub fn snapshot_to(&self, dest: &Path) -> Result<(), CatalogError> {
+        self.conn
+            .execute("vacuum into ?1", params![dest.to_string_lossy()])
+            .map_err(CatalogError::from_sqlite)?;
+        Ok(())
+    }
+
+    /// Open a standalone catalog file, apply `update`, and close it.
+    ///
+    /// Used to materialise the post-burn catalog state into the per-disc
+    /// snapshot without committing anything to the live catalog: the live
+    /// commit happens separately, only after the discs are staged. The disc's
+    /// embedded `catalog.sqlite` therefore describes the state *after* its own
+    /// burn, so a single disc knows about itself and its siblings.
+    pub fn apply_update_to(path: &Path, update: &CatalogUpdate) -> Result<(), CatalogError> {
+        let mut catalog = Catalog::open(path)?;
+        catalog.apply_update(update)
     }
 }
 
@@ -1072,5 +1097,55 @@ mod tests {
             history.iter().map(|e| e.status).collect::<Vec<_>>(),
             vec![crate::catalog::model::VersionStatus::Current]
         );
+    }
+
+    #[test]
+    fn snapshot_to_writes_a_self_contained_copy() {
+        let (dir, mut cat) = temp_catalog();
+        let pid = cat.create_project(&project_init("p")).expect("project");
+        cat.apply_update(&update(
+            pid,
+            1,
+            1,
+            vec![fw("a", "a1", 10), fw("b", "b1", 20)],
+            vec![],
+            vec![],
+        ))
+        .expect("burn");
+
+        let dest = dir.path().join("snapshot.sqlite");
+        cat.snapshot_to(&dest).expect("vacuum into succeeds");
+        assert!(dest.is_file());
+
+        let copy = rusqlite::Connection::open(&dest).expect("the snapshot opens");
+        let versions: i64 = copy
+            .query_row("select count(*) from file_version", [], |r| r.get(0))
+            .expect("the snapshot has the source's rows");
+        assert_eq!(versions, 2);
+
+        // VACUUM INTO refuses an existing destination; the burn flow relies on
+        // that rather than on silently overwriting a stale snapshot.
+        assert!(cat.snapshot_to(&dest).is_err());
+    }
+
+    #[test]
+    fn apply_update_to_writes_a_standalone_catalog_without_touching_the_live_one() {
+        let (dir, mut cat) = temp_catalog();
+        let pid = cat.create_project(&project_init("p")).expect("project");
+        cat.apply_update(&update(pid, 1, 1, vec![fw("a", "a1", 10)], vec![], vec![]))
+            .expect("first burn");
+
+        let work_copy = dir.path().join("burn-catalog.sqlite");
+        cat.snapshot_to(&work_copy).expect("snapshot taken");
+
+        let next = update(pid, 1, 2, vec![fw("b", "b1", 20)], vec![], vec![]);
+        crate::catalog::Catalog::apply_update_to(&work_copy, &next)
+            .expect("the work copy takes the update");
+
+        let copy = crate::catalog::Catalog::open(&work_copy).expect("work copy opens");
+        assert_eq!(count(&copy, "file_version"), 2);
+        // The live catalog has not moved: this is the post-burn snapshot path,
+        // not the commit point.
+        assert_eq!(count(&cat, "file_version"), 1);
     }
 }
