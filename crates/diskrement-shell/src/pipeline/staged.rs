@@ -202,6 +202,31 @@ pub fn read_plan(work_dir: &Path) -> Result<Option<PlanReport>, serde_json::Erro
     }))
 }
 
+/// Discard both staged files and the `staged/` directory
+/// (`StagedStoreLive.clear`). Absent files are not an error.
+///
+/// A non-empty `staged/` *is* an error, and deliberately so: the Scala
+/// `Files.deleteIfExists(stagedDir)` threw `DirectoryNotEmptyException` in
+/// that case, and something unexpected living in the recovery unit is worth
+/// surfacing rather than stepping around.
+pub fn clear(work_dir: &Path) -> std::io::Result<()> {
+    remove_if_present(&scan_path(work_dir))?;
+    remove_if_present(&plan_path(work_dir))?;
+    match std::fs::remove_dir(work_dir.join("staged")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn remove_if_present(file: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(file) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +357,32 @@ mod tests {
         assert_eq!(v["remaining"]["moreFiles"], 2);
         assert_eq!(v["remaining"]["moreBytes"], 30);
         assert_eq!(v["oversized"][0]["relPath"], "huge.bin");
+    }
+
+    #[test]
+    fn clear_removes_both_staged_files_and_the_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_scan(dir.path(), &[sf("a.txt")]).unwrap();
+        write_plan(dir.path(), &plan_report()).unwrap();
+        clear(dir.path()).unwrap();
+        assert!(read_scan(dir.path()).unwrap().is_none());
+        assert!(read_plan(dir.path()).unwrap().is_none());
+        assert!(!dir.path().join("staged").exists());
+    }
+
+    #[test]
+    fn clearing_nothing_is_not_an_error() {
+        // `deleteIfExists` semantics: reset on a project that never staged
+        // anything must succeed.
+        let dir = tempfile::TempDir::new().unwrap();
+        clear(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn clear_removes_the_plan_even_when_no_scan_was_staged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_plan(dir.path(), &plan_report()).unwrap();
+        clear(dir.path()).unwrap();
+        assert!(read_plan(dir.path()).unwrap().is_none());
     }
 }
