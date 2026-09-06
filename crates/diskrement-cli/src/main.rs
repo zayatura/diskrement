@@ -4,6 +4,7 @@
 
 mod args;
 mod paths;
+mod progress;
 mod render;
 
 fn main() {

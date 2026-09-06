@@ -3090,9 +3090,10 @@ mod tests {
 
     #[test]
     fn the_eta_uses_minutes_and_padded_seconds() {
-        // rate = 999_000 B/s → "1 MB/s"; remaining = 1_000 B → ETA 0m01s.
+        // rate = 999_000 B/s -> "1 MB/s"; remaining = 999_000 B -> ETA 1.0s
+        // -> "0m01s".
         assert_eq!(
-            format("hashing", 999_000, 1_000_000, 1, 1, Duration::from_secs(1)),
+            format("hashing", 999_000, 1_998_000, 1, 1, Duration::from_secs(1)),
             "hashing 0.0/0.0 GB · 1/1 files · 1 MB/s · ETA 0m01s"
         );
     }
