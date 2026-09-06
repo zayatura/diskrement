@@ -15,7 +15,7 @@ mod store;
 pub mod time;
 
 #[cfg(test)]
-mod testutil;
+pub(crate) mod testutil;
 
 use std::path::Path;
 

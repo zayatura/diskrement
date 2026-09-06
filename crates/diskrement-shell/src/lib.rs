@@ -4,3 +4,9 @@
 
 pub mod catalog;
 pub mod error;
+pub mod fs;
+pub mod pipeline;
+pub mod progress;
+
+#[cfg(feature = "testutil")]
+pub mod testutil;

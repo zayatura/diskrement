@@ -70,6 +70,30 @@ These apply to the `crates/` tree only; the Scala gotchas above still govern
   `journal_mode=memory`, so a WAL assertion against one passes vacuously.
 - **Never open a fixture catalog with `Catalog::open`** — it runs the migration
   runner and writes. Copy the file to a `TempDir` first.
+- **`ioctl(FICLONE)` does not preserve mtime.** A reflinked copy gets the
+  current time; `cp -a` preserved the source's. Any Rust code that clones a
+  file must copy the mtime afterwards (`File::set_modified`), or the
+  scanner's size+mtime fast path never hits and the fingerprint cache is
+  useless. `fs::snapshot::reflink_tree` does this — keep it that way.
+
+## The differential harness (P3+)
+
+`crates/diskrement-difftest` runs a scenario through the Scala binary, the Rust
+binary, or the two alternating, and diffs command output and end state. It
+complements `fixtures/`, which is one-directional and frozen; the harness covers
+the reverse direction and arbitrary scenarios. See its README to run it.
+
+- **It is disposable.** P10 deletes it with the Scala tree. Nothing shipping may
+  depend on it.
+- **Every differential test is `#[ignore]`d.** Routine `cargo test` stays
+  JVM-free. A run with no `DISKREMENT_SCALA_BIN` skips and says so — check the
+  printed scenario counts, exactly as with the sbt IT suite.
+- **Landing a command means appending it to `runner::RUST_IMPLEMENTED`** in the
+  same commit. Otherwise the Rust and interleaved modes keep skipping that
+  scenario, and a fully-skipped run still exits green.
+- **A normalization rule is a hole in the oracle.** Each one carries a doc
+  comment saying what varies and why erasing it is safe. Widening a rule to make
+  a failing diff pass is how this harness stops working without anyone noticing.
 
 ## Repo etiquette
 

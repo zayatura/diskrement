@@ -2403,6 +2403,33 @@ scenario, and never widen a normalization rule to make a diff pass."
 
 ---
 
+## Execution deviations
+
+- **Task 1, Step 4:** the re-export in `tests/support/mod.rs` is an
+  *unused import* (not dead code) in the three test binaries that never touch
+  it, and `-D warnings` makes that fatal. The file-level allow became
+  `#![allow(dead_code, unused_imports)]` with a comment saying why. The plan's
+  note anticipated a `dead_code` warning from `testutil` itself; this is the
+  consumer side of the same problem.
+- **Task 3/4:** the tree's clippy (1.98) flags `command_index % 2 == 0` as
+  `manual_is_multiple_of`, which postdates the plan. Replaced with
+  `command_index.is_multiple_of(2)` in `scenario.rs`.
+- **Task 7:** the test `the_replay_covers_every_command_the_harvest_scenario_did`
+  does not compile as written — `harvest_replay().commands()` borrows a
+  `BTreeSet<&str>` from a temporary that drops at the end of the statement
+  (E0716). The scenario is bound to a `let` first.
+
+### Bootstrap outcome (Task 8, Step 6)
+
+The bootstrap was **green on the first attempt**: all three scenarios
+(`init-scan-status`, `error-paths`, `harvest-replay`) reproduced identically
+through Scala-versus-Scala with no edits. **No normalization rules were added
+beyond the two written in Task 5** (scratch root, instant ordinals), and no
+capture point needed an extra sort. The oracle's holes are exactly:
+`<scratch>` path substitution and `<tn>` instant ordinals.
+
+---
+
 ## What later phases must add
 
 This plan builds the scaffold. Each phase from P4 to P8 carries its own

@@ -4,7 +4,11 @@
 //! the reference for every compatibility test from P2 onward (spec §4). It is
 //! read-only in the strongest sense available: see `open_fixture`.
 
-#![allow(dead_code)]
+// The comparison helpers are re-exported from the library's `testutil` module.
+// Test binaries that include `support` but never touch those re-exports would
+// otherwise fail on an unused import; the corpus-specific helpers below stay
+// dead-code-allowed for the same reason.
+#![allow(dead_code, unused_imports)]
 
 use std::path::{Path, PathBuf};
 
@@ -65,70 +69,4 @@ pub fn fixture_copy(rel: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, dest)
 }
 
-/// The catalog tables, in the order a dump reports them.
-pub const CATALOG_TABLES: &[&str] = &[
-    "schema_version",
-    "project",
-    "disc",
-    "session",
-    "file_version",
-    "placement",
-    "change_record",
-    "disc_event",
-    "lost_version",
-];
-
-fn render(value: rusqlite::types::ValueRef<'_>) -> String {
-    use rusqlite::types::ValueRef;
-    match value {
-        ValueRef::Null => "NULL".to_string(),
-        ValueRef::Integer(i) => i.to_string(),
-        // `{:?}` so 2.0 stays "2.0" rather than collapsing to "2".
-        ValueRef::Real(f) => format!("{f:?}"),
-        ValueRef::Text(t) => format!("{:?}", String::from_utf8_lossy(t)),
-        ValueRef::Blob(b) => format!("<{} bytes>", b.len()),
-    }
-}
-
-/// Every row of every catalog table as sorted `table: col=value …` lines.
-///
-/// Logical, never byte-wise: SQLite file layout is not stable across library
-/// builds, and xerial's SQLite is not `libsqlite3-sys`'s (spec §4).
-pub fn dump_catalog(conn: &rusqlite::Connection) -> Vec<String> {
-    let mut out = Vec::new();
-    for table in CATALOG_TABLES {
-        let mut stmt = conn
-            .prepare(&format!("select * from {table}"))
-            .unwrap_or_else(|e| panic!("preparing dump of {table}: {e}"));
-        let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
-        let mut rows = stmt.query([]).expect("dump query runs");
-        let mut lines = Vec::new();
-        while let Some(row) = rows.next().expect("readable row") {
-            let cells: Vec<String> = columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| {
-                    format!("{name}={}", render(row.get_ref(i).expect("column exists")))
-                })
-                .collect();
-            lines.push(format!("{table}: {}", cells.join(" ")));
-        }
-        lines.sort();
-        out.extend(lines);
-    }
-    out
-}
-
-/// Compare two dumps, reporting the first difference rather than two walls of
-/// text.
-pub fn assert_dumps_match(expected: &[String], actual: &[String]) {
-    for (i, (want, got)) in expected.iter().zip(actual.iter()).enumerate() {
-        assert_eq!(want, got, "dumps diverge at line {i}");
-    }
-    assert_eq!(
-        expected.len(),
-        actual.len(),
-        "row counts differ:\nexpected {expected:#?}\nactual {actual:#?}"
-    );
-    assert!(!expected.is_empty(), "the dump was empty");
-}
+pub use diskrement_shell::testutil::{assert_dumps_match, dump_catalog, CATALOG_TABLES};
