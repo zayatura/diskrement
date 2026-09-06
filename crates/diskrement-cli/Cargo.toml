@@ -12,6 +12,7 @@ name = "diskrement"
 path = "src/main.rs"
 
 [dependencies]
+diskrement-core.workspace = true
 diskrement-shell.workspace = true
 clap.workspace = true
 
