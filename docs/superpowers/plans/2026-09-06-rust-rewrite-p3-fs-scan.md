@@ -3674,7 +3674,29 @@ git commit -m "feat(difftest): teach the harness that init, scan and status exis
 
 ## Execution deviations
 
-(appended during execution — none yet)
+(appended during execution)
+
+- **Task 2 (`resolve_parallelism`):** the plan's match arm
+  `Ok(n) if (1..=MAX_PARALLELISM).contains(&n)` sends `Ok(0)` to the *clamp*
+  arm (0 parses, 0 > 64 is false). Scala's `toIntOption.filter(_ > 0)` treats
+  0 as unusable. Fixed: `Ok(0) | Err(_)` → default + warning. The test helper
+  `env(&[(&str, &str)])` also needs an explicit lifetime
+  (`fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> … + 'a`); `'_` is ambiguous
+  across the three input lifetimes.
+- **Task 2 (test correction):** present-but-empty `""` is *unset* (no
+  warning), per the Scala empty/whitespace rule — the plan's must-warn loop
+  wrongly included it.
+- **Tasks 4/5:** `pub(crate)` items with no non-test consumer fail
+  `-D warnings`; Task 4 carried temporary `#[allow(dead_code)]` annotations,
+  removed when Task 5's `scan` consumed them.
+- **Task 5 (two tests corrected):** `output_is_sorted_by_relpath…` and
+  `progress_covers_only…` built `prior` from the first scan's real sizes and
+  mtimes, so the intended "miss" file *hit* the fast path (which never
+  compares hashes) and `hashed` came back 0. The Scala FakeFs tests made the
+  miss by giving the prior a stale stat; the Rust tests now bump the miss
+  file's mtime after the first scan. Also: `ScanOutput` derives `Debug` (the
+  failure test uses `unwrap_err`), and `scan` computes the hashed count
+  before `files.extend(hashed_files)` moves the vec (E0382).
 
 ## Spec coverage
 
