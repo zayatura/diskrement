@@ -3,3 +3,4 @@
 //! (spec §5.3, §5.5).
 
 pub mod catalog;
+pub mod error;
