@@ -3708,6 +3708,15 @@ git commit -m "feat(difftest): teach the harness that init, scan and status exis
 - **Task 7 (test helper):** the `ok_cloner` stand-in `copy_tree` must handle a
   plain-file source — the CoW probe passes a file, and `dst.join("")`
   collapsed to the work dir (EISDIR). It now copies a file directly.
+- **Task 8:** thiserror reserves a variant field named `source` for the error
+  chain, so `NotSameFilesystem { source, … }` does not compile
+  (`PathBuf: Error` unsatisfied). The field is renamed `src` — which matches
+  the Scala message's `$src` anyway; the rendered string is unchanged.
+  `serde_json::Error::custom` is a trait method
+  (`<serde_json::Error as serde::de::Error>::custom`), not an inherent. The
+  corrupt-scan test asserts `!err.is_io()` rather than `is_syntax()`: the
+  category depends on where the parse dies (`{not json` is a data error —
+  map vs sequence).
 
 ## Spec coverage
 
