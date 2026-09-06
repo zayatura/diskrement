@@ -30,19 +30,20 @@ pub fn resolve_parallelism(get_env: impl Fn(&str) -> Option<String>) -> Parallel
         };
     }
     match raw.trim().parse::<usize>() {
-        Ok(n) if (1..=MAX_PARALLELISM).contains(&n) => {
+        Ok(n) if n > 0 && n <= MAX_PARALLELISM => {
             Parallelism { value: n, warnings: Vec::new() }
         }
+        // Zero parses fine but is unusable, like the Scala `filter(_ > 0)`.
+        Ok(0) | Err(_) => Parallelism {
+            value: DEFAULT_PARALLELISM,
+            warnings: vec![format!(
+                "ignoring unusable DISKREMENT_HASH_PARALLELISM '{raw}' (want a positive int); using {DEFAULT_PARALLELISM}"
+            )],
+        },
         Ok(n) => Parallelism {
             value: MAX_PARALLELISM,
             warnings: vec![format!(
                 "clamping DISKREMENT_HASH_PARALLELISM {n} to {MAX_PARALLELISM}"
-            )],
-        },
-        Err(_) => Parallelism {
-            value: DEFAULT_PARALLELISM,
-            warnings: vec![format!(
-                "ignoring unusable DISKREMENT_HASH_PARALLELISM '{raw}' (want a positive int); using {DEFAULT_PARALLELISM}"
             )],
         },
     }
