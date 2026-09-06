@@ -16,6 +16,7 @@ pub mod content;
 pub mod normalize;
 pub mod runner;
 pub mod scenario;
+pub mod state_diff;
 // Each later task adds its own `pub mod` line here as it creates the file.
 // Declaring them all up front would break the build until the last one lands.
 
