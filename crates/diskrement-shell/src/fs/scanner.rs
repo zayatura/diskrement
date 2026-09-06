@@ -75,11 +75,15 @@ mod tests {
 
     #[test]
     fn ignores_non_numeric_and_non_positive_values_with_a_warning() {
-        for raw in ["banana", "0", "-1", ""] {
+        for raw in ["banana", "0", "-1"] {
             let r = resolve_parallelism(env(&[("DISKREMENT_HASH_PARALLELISM", raw)]));
             assert_eq!(r.value, 6, "raw={raw:?}");
             assert!(!r.warnings.is_empty(), "raw={raw:?} must warn");
         }
+        // present-but-empty is *unset*, like whitespace-only: no warning
+        let r = resolve_parallelism(env(&[("DISKREMENT_HASH_PARALLELISM", "")]));
+        assert_eq!(r.value, 6);
+        assert!(r.warnings.is_empty());
     }
 
     #[test]

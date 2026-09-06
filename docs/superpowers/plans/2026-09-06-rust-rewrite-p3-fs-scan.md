@@ -271,11 +271,15 @@ mod tests {
 
     #[test]
     fn ignores_non_numeric_and_non_positive_values_with_a_warning() {
-        for raw in ["banana", "0", "-1", ""] {
+        for raw in ["banana", "0", "-1"] {
             let r = resolve_parallelism(env(&[("DISKREMENT_HASH_PARALLELISM", raw)]));
             assert_eq!(r.value, 6, "raw={raw:?}");
             assert!(!r.warnings.is_empty(), "raw={raw:?} must warn");
         }
+        // present-but-empty is *unset*, like whitespace-only: no warning
+        let r = resolve_parallelism(env(&[("DISKREMENT_HASH_PARALLELISM", "")]));
+        assert_eq!(r.value, 6);
+        assert!(r.warnings.is_empty());
     }
 
     #[test]
@@ -340,18 +344,19 @@ pub fn resolve_parallelism(get_env: impl Fn(&str) -> Option<String>) -> Parallel
         return Parallelism { value: DEFAULT_PARALLELISM, warnings: Vec::new() };
     }
     match raw.trim().parse::<usize>() {
-        Ok(n) if (1..=MAX_PARALLELISM).contains(&n) => {
+        Ok(n) if n > 0 && n <= MAX_PARALLELISM => {
             Parallelism { value: n, warnings: Vec::new() }
         }
-        Ok(n) => Parallelism {
-            value: MAX_PARALLELISM,
-            warnings: vec![format!("clamping DISKREMENT_HASH_PARALLELISM {n} to {MAX_PARALLELISM}")],
-        },
-        Err(_) => Parallelism {
+        // Zero parses fine but is unusable, like the Scala `filter(_ > 0)`.
+        Ok(0) | Err(_) => Parallelism {
             value: DEFAULT_PARALLELISM,
             warnings: vec![format!(
                 "ignoring unusable DISKREMENT_HASH_PARALLELISM '{raw}' (want a positive int); using {DEFAULT_PARALLELISM}"
             )],
+        },
+        Ok(n) => Parallelism {
+            value: MAX_PARALLELISM,
+            warnings: vec![format!("clamping DISKREMENT_HASH_PARALLELISM {n} to {MAX_PARALLELISM}")],
         },
     }
 }
