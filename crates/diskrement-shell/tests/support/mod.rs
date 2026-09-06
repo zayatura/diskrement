@@ -50,3 +50,17 @@ pub fn fixture_dbs(subdir: &str) -> Vec<String> {
     assert!(!names.is_empty(), "no fixture databases under {subdir}");
     names.into_iter().map(|n| format!("{subdir}/{n}")).collect()
 }
+
+/// Copy a fixture database into a fresh temp directory and return both.
+///
+/// Hold the `TempDir` for as long as the copy is in use. Opening the corpus
+/// itself through `Catalog::open` would run migrations against it and write to
+/// `fixtures/`; a copy is also the only honest way to test that opening an
+/// already-current catalog changes nothing.
+pub fn fixture_copy(rel: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::TempDir::new().expect("a writable temp directory");
+    let dest = dir.path().join("catalog.sqlite");
+    std::fs::copy(fixtures_dir().join(rel), &dest)
+        .unwrap_or_else(|e| panic!("copying fixture {rel}: {e}"));
+    (dir, dest)
+}
