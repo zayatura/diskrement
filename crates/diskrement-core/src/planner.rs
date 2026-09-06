@@ -17,6 +17,39 @@ pub enum DiscStatus {
     Dead,
 }
 
+impl DiscStatus {
+    /// The catalog spelling. `Open` and `Finalized` are the only values the
+    /// `disc.status` column may hold; `Dead` exists only as the result of the
+    /// derivation in `read_disc_states` and is never written. Frozen by the
+    /// data-compatibility contract; see the spec, §3.1.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiscStatus::Open => "OPEN",
+            DiscStatus::Finalized => "FINALIZED",
+            DiscStatus::Dead => "DEAD",
+        }
+    }
+}
+
+impl std::fmt::Display for DiscStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for DiscStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "OPEN" => Ok(DiscStatus::Open),
+            "FINALIZED" => Ok(DiscStatus::Finalized),
+            "DEAD" => Ok(DiscStatus::Dead),
+            other => Err(format!("unknown disc status: {other}")),
+        }
+    }
+}
+
 /// An existing disc as known to the catalog when planning begins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscState {
@@ -706,5 +739,22 @@ mod tests {
                 .sum();
             prop_assert_eq!(a, b);
         }
+    }
+
+    #[test]
+    fn disc_status_wire_names_round_trip() {
+        // Frozen by the data-compatibility contract (spec §3.1): OPEN and
+        // FINALIZED are the only values `disc.status` may hold — its check
+        // constraint enforces that. DEAD parses because `read_disc_states`
+        // derives it in the query's case expression, and is never written.
+        for (status, name) in [
+            (DiscStatus::Open, "OPEN"),
+            (DiscStatus::Finalized, "FINALIZED"),
+            (DiscStatus::Dead, "DEAD"),
+        ] {
+            assert_eq!(status.as_str(), name);
+            assert_eq!(name.parse::<DiscStatus>().expect("parses"), status);
+        }
+        assert!("OPENED".parse::<DiscStatus>().is_err());
     }
 }
