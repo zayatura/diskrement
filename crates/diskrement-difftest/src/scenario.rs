@@ -46,7 +46,7 @@ impl Mode {
             // step 1. Starting with Scala would defer the direction the
             // corpus cannot already test.
             Mode::Interleaved => {
-                if command_index % 2 == 0 {
+                if command_index.is_multiple_of(2) {
                     Which::Rust
                 } else {
                     Which::Scala

@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod content;
+pub mod runner;
 pub mod scenario;
 // Each later task adds its own `pub mod` line here as it creates the file.
 // Declaring them all up front would break the build until the last one lands.
