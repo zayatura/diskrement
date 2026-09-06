@@ -7,8 +7,6 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use diskrement_core::DiscType;
 
-/// Consumed by `main` (Task 14); the allow below is temporary.
-#[allow(dead_code)]
 #[derive(Parser, Debug)]
 #[command(
     name = "diskrement",

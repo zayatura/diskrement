@@ -64,8 +64,6 @@ pub fn format(
     )
 }
 
-/// Consumed by `main` (Task 14); the allow below is temporary.
-#[allow(dead_code)]
 pub struct ConsoleProgress {
     label: Mutex<String>,
     total_bytes: AtomicU64,
@@ -94,7 +92,6 @@ impl ConsoleProgress {
         }
     }
 
-    #[allow(dead_code)] // consumed by main (Task 14)
     fn interval(&self) -> Duration {
         if self.tty {
             Duration::from_secs(1)
@@ -103,7 +100,6 @@ impl ConsoleProgress {
         }
     }
 
-    #[allow(dead_code)] // consumed by main (Task 14)
     fn emit(&self) {
         let started = match *self.started.lock().unwrap() {
             Some(t) => t,
@@ -130,7 +126,6 @@ impl ConsoleProgress {
 
     /// Whether an `advance` is due to emit: once the phase has been running
     /// longer than the interval since the last emission (or the start).
-    #[allow(dead_code)] // consumed by main (Task 14)
     fn due(&self) -> bool {
         let last = *self.last_emit.lock().unwrap();
         let anchor = last.or(*self.started.lock().unwrap());

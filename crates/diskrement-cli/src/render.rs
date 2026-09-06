@@ -5,8 +5,6 @@ use diskrement_shell::catalog::model::{Project, ProjectId};
 use diskrement_shell::catalog::time;
 use diskrement_shell::pipeline::reports::{ScanReport, StatusReport};
 
-/// Consumed by `main` (Task 14); the allows below are temporary.
-#[allow(dead_code)]
 pub fn init_done(name: &str, id: ProjectId) -> String {
     format!("Created project {name} (id {}).", id.0)
 }

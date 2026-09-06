@@ -7,8 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// Consumed by `main` (Task 14); the allows below are temporary.
-#[allow(dead_code)]
 pub struct ResolvedPaths {
     pub catalog: PathBuf,
     pub data_dir: PathBuf,
