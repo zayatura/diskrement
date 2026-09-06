@@ -4,6 +4,7 @@
 
 mod args;
 mod paths;
+mod render;
 
 fn main() {
     println!("diskrement {}", env!("CARGO_PKG_VERSION"));
