@@ -122,6 +122,38 @@ fn scancache_path(catalog: &Path, project: &str) -> PathBuf {
     catalog.with_file_name(format!("{stem}.{project}.scancache.sqlite"))
 }
 
+/// Deterministic mtime base for the files the harness writes:
+/// 2020-09-13T12:26:40Z — a whole second, so the millisecond truncation
+/// `FileSystem.stat` applies on both sides is an identity over every value
+/// derived from it.
+const SOURCE_MTIME_BASE_MILLIS: u64 = 1_600_000_000_000;
+
+/// Pin a written file's mtime to `unix_millis`.
+///
+/// **Why the runner, not the normalizer:** a freshly written file's mtime is
+/// whatever the kernel's coarse clock says when the write lands, so whether two
+/// back-to-back `write` steps share one (millisecond-truncated) instant is a
+/// timing accident. Two runs of the *same* scenario can then disagree on the
+/// equality relations the instant-ordinals rule deliberately preserves — the
+/// bootstrap caught exactly this on `plan-spill-and-seal`, where `a.bin` and
+/// `b.bin` shared one mtime in one run and straddled a tick in the other. The
+/// frozen corpus never sees this (harvested once); the live runner therefore
+/// makes the environment deterministic instead of erasing the value. Pinned
+/// from the write *index*, the same role `(rel_path, version)` plays for
+/// bytes: values stay per-file distinct, so a scanner that recorded the wrong
+/// file's mtime still diverges, and a `modify` step still gets a later mtime
+/// than the write it supersedes, keeping the fingerprint cache's fast path
+/// honest.
+fn pin_mtime(path: &Path, unix_millis: u64) -> Result<(), Skip> {
+    let file = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .map_err(|e| Skip(format!("reopening {}: {e}", path.display())))?;
+    let time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(unix_millis);
+    file.set_modified(time)
+        .map_err(|e| Skip(format!("pinning mtime on {}: {e}", path.display())))
+}
+
 /// Can this directory reflink? `init` refuses a non-CoW work area, so a
 /// scenario cannot run at all without one.
 fn cow_capable(dir: &Path) -> bool {
@@ -234,6 +266,7 @@ pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcom
     let scratch = scratch()?;
     let mut steps = Vec::new();
     let mut command_index = 0usize;
+    let mut write_index: u32 = 0;
 
     for step in &scenario.steps {
         match step {
@@ -249,6 +282,8 @@ pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcom
                 }
                 std::fs::write(&path, content(rel_path, *version, *size))
                     .map_err(|e| Skip(format!("writing {}: {e}", path.display())))?;
+                pin_mtime(&path, SOURCE_MTIME_BASE_MILLIS + u64::from(write_index))?;
+                write_index += 1;
             }
             Step::Delete { rel_path } => {
                 let path = scratch.source.join(rel_path);
@@ -368,5 +403,30 @@ mod tests {
         assert!(rust_gap(&uses, &implemented).is_some());
         assert_eq!(rust_gap(&uses, &implemented).unwrap(), vec!["burn"]);
         assert!(rust_gap(&uses, &["init", "burn"]).is_none());
+    }
+
+    #[test]
+    fn pinned_mtimes_are_deterministic_and_per_file_distinct() {
+        let dir = TempDir::new().expect("temp dir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::write(&a, b"x").expect("write a");
+        std::fs::write(&b, b"y").expect("write b");
+        pin_mtime(&a, SOURCE_MTIME_BASE_MILLIS).expect("pin a");
+        pin_mtime(&b, SOURCE_MTIME_BASE_MILLIS + 1).expect("pin b");
+        // Re-pinning the same value must not drift: two runs pinning the same
+        // scenario land byte-identical instants.
+        pin_mtime(&a, SOURCE_MTIME_BASE_MILLIS).expect("re-pin a");
+        let mtime_millis = |p: &Path| {
+            std::fs::metadata(p)
+                .expect("metadata")
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_millis() as u64
+        };
+        assert_eq!(mtime_millis(&a), SOURCE_MTIME_BASE_MILLIS);
+        assert_eq!(mtime_millis(&b), SOURCE_MTIME_BASE_MILLIS + 1);
     }
 }
