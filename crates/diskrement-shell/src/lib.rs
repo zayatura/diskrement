@@ -4,6 +4,7 @@
 
 pub mod catalog;
 pub mod error;
+pub mod fs;
 
 #[cfg(feature = "testutil")]
 pub mod testutil;
