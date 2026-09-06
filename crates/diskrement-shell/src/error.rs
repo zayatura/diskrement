@@ -32,7 +32,6 @@ impl CatalogError {
     /// The Scala matched the English text of the driver's message for
     /// `"constraint"`; SQLite hands us a result code instead, so this cannot
     /// drift with a driver's wording or a locale.
-    #[expect(dead_code, reason = "first called by store.rs in task 3")]
     pub(crate) fn from_sqlite(e: rusqlite::Error) -> Self {
         match &e {
             rusqlite::Error::SqliteFailure(f, message)
@@ -49,7 +48,6 @@ impl CatalogError {
 ///
 /// Distinguishing this is what turns a duplicate `project.name` into
 /// `DuplicateProject` rather than a generic constraint error.
-#[expect(dead_code, reason = "first called by store.rs in task 3")]
 pub(crate) fn is_unique_violation(e: &rusqlite::Error) -> bool {
     matches!(
         e,

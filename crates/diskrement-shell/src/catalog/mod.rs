@@ -51,7 +51,6 @@ impl Catalog {
     /// xerial's driver opened connections in auto-commit mode and zio-jdbc
     /// would then never roll back. Here an early return drops the guard, and
     /// dropping an uncommitted `Transaction` rolls it back.
-    #[expect(dead_code, reason = "first called by store.rs in task 3")]
     pub(crate) fn tx<T>(
         &mut self,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, CatalogError>,
