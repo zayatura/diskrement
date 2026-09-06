@@ -27,7 +27,19 @@ pub const PROJECT: &str = "p";
 /// scenario using a command that is not listed here, so the harness never
 /// reports a red for work that has not been done yet, and never reports a
 /// green for a scenario it quietly declined to run.
-pub const RUST_IMPLEMENTED: &[&str] = &[];
+/// Commands the Rust binary implements.
+///
+/// **Each phase from P3 onward appends to this list in the same commit that
+/// lands the command.** A mode that needs the Rust binary skips — loudly — any
+/// scenario using a command that is not listed here, so the harness never
+/// reports a red for work that has not been done yet, and never reports a
+/// green for a scenario it quietly declined to run.
+///
+/// `frobnicate` is listed for the error-paths scenario: it is the
+/// unknown-subcommand *probe*, which exercises the argument parser (fully
+/// implemented, `Expect::ExitOnly`) rather than a command, and would
+/// otherwise block that scenario forever.
+pub const RUST_IMPLEMENTED: &[&str] = &["frobnicate", "init", "scan", "status"];
 
 /// Why a differential run cannot happen here.
 ///

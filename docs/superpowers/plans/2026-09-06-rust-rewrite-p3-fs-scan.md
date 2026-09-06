@@ -3659,19 +3659,20 @@ git commit -m "feat(difftest): teach the harness that init, scan and status exis
 
 ## Phase exit bar (spec §9, P3 row)
 
-- [ ] First runnable binary: `cargo build -p diskrement-cli` produces
+- [x] First runnable binary: `cargo build -p diskrement-cli` produces
   `target/debug/diskrement`; `init`/`scan`/`status` work end to end
   (Task 14's integration tests).
-- [ ] Scancache semantics ported and green (Task 6: 8 `FingerprintCacheSpec`
+- [x] Scancache semantics ported and green (Task 6: 8 `FingerprintCacheSpec`
   cases including wipe-and-retry, upsert, soft-lock failure).
-- [ ] `HashParallelismSpec` port green (Task 2: default 6, clamp 64, trim,
+- [x] `HashParallelismSpec` port green (Task 2: default 6, clamp 64, trim,
   unusable-value warning).
-- [ ] Scanner, hasher, snapshot, staged-scan ports green (Tasks 1, 4, 5, 7, 8).
-- [ ] The harness runs its scenarios in all three modes with
+- [x] Scanner, hasher, snapshot, staged-scan ports green (Tasks 1, 4, 5, 7, 8).
+- [x] The harness runs its scenarios in all three modes with
   `init`/`scan`/`status` implemented: all-rust and interleaved compare 2 of 3
   scenarios green, skip 1 loudly (Task 15).
-- [ ] Routine suite, clippy `-D warnings`, fmt clean; Scala tree untouched.
-- [ ] Execution deviations appended to this section as they occur.
+- [x] Routine suite, clippy `-D warnings`, fmt clean; Scala tree untouched
+  (220 tests, 0 failed at Task 15).
+- [x] Execution deviations appended to this section as they occurred.
 
 ## Execution deviations
 
@@ -3727,6 +3728,33 @@ git commit -m "feat(difftest): teach the harness that init, scan and status exis
   after cloning. Also: the pipeline `Env` test helper must read `TempDir`
   paths *before* moving the dirs into `_dirs` (E0382), and the reports derive
   `Debug` for `unwrap`/panic printing.
+- **Task 10:** the precedence ladder in the module doc read as broken
+  markdown blockquotes to clippy (`doc quote line without '>'`); the doc was
+  rephrased without line-leading `>`. The `envmap` test helper needed
+  `impl Fn(&str) -> Option<String> + use<'a>` (the `'_` ambiguity again).
+  Like Tasks 4/5, temporary `#[allow(dead_code)]` until `main` consumed the
+  modules (Tasks 11-13), then removed.
+- **Task 11:** clap derive makes every subcommand a *struct variant*, so
+  `Command::Init(a)` patterns do not compile; the tests destructure with
+  braces instead.
+- **Task 13:** the plan's third format test was arithmetically wrong
+  (1_000 B remaining at 999_000 B/s is 0.001 s, not 1 s); corrected to
+  `total = 1_998_000` so the ETA is exactly `0m01s`. Private helper methods
+  needed `#[allow(dead_code)]` until Task 14 wired `main`.
+- **Task 14:** `Cli::try_parse` needs `clap::Parser` in scope; `ProjectInit`
+  lives in `diskrement_shell::catalog::model`, not core; the clap
+  subcommand patterns are struct variants. The P0 version test pinned the
+  stub's bare-invocation print; with a real command surface, a bare
+  invocation is a missing-subcommand error (exit 1), so the test now asserts
+  `--version` explicitly.
+- **Task 15:** `error-paths` uses `frobnicate`, the deliberate
+  unknown-subcommand probe, which the `RUST_IMPLEMENTED` gate would block
+  forever — the plan expected that scenario to compare. `frobnicate` is
+  listed with a comment explaining it is the parser probe, never a real
+  command. Outcome: **all-rust and interleaved each compared 2 of 3
+  scenarios green** (init-scan-status and error-paths, the latter including
+  the fully-compared `status nosuch` exit-2 case), `harvest-replay` skipped
+  loudly for the not-yet-ported plan/burn/verify/history/disc.
 
 ## Spec coverage
 
