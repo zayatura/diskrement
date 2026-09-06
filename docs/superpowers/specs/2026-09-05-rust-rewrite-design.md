@@ -309,7 +309,8 @@ shipping CLI crate's dev-dependencies.
 
 **Dev:** `proptest`, `tempfile`, `assert_cmd`, `predicates`, `insta`. The
 differential harness (§8.1) adds no dependency of its own: it needs `proptest`,
-`assert_cmd`, `tempfile`, `serde_json`, and `rusqlite`, all already present.
+`tempfile`, `serde_json`, `rusqlite`, `sha2` and `reflink-copy`, all already
+present.
 
 Toolchain: stable, pinned by `rust-toolchain.toml` at P0; edition 2021.
 Warnings are failures via `.cargo/config.toml` rather than per-crate
@@ -482,10 +483,11 @@ that sentence.
   with the corpus.
 - `runner` — runs a scenario in an isolated CoW scratch tree under the harvest
   script's env isolation, choosing the binary per step. The Scala launcher comes
-  from `DISKREMENT_SCALA_BIN`; the Rust one from
-  `assert_cmd::cargo::cargo_bin("diskrement")`. When `DISKREMENT_SCALA_BIN` is
-  unset the suite skips *loudly*, naming the reason and the `sbt cli/stage`
-  command that fixes it, per §7.
+  from `DISKREMENT_SCALA_BIN`, the Rust one from `DISKREMENT_RUST_BIN` or the
+  target directory. Both are resolved without panicking — `assert_cmd`'s
+  `cargo_bin` panics on a missing binary, and the all-Scala bootstrap must run
+  before the Rust binary exists at all. A run that cannot happen skips *loudly*,
+  naming the reason and the command that fixes it, per §7.
 - `normalize` — the volatile-value redactor. Every rule is named and carries a
   written justification, because **each normalization is a hole punched in the
   oracle** and an unjustified regex silently converts a real difference into a
