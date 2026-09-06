@@ -12,7 +12,15 @@ use crate::scenario::{cmd, cmd_exit_only, delete, modify, write, Scenario};
 
 /// Every scenario, in the order the suites run them.
 pub fn all() -> Vec<Scenario> {
-    vec![init_scan_status(), error_paths(), harvest_replay()]
+    vec![
+        init_scan_status(),
+        error_paths(),
+        plan_basics(),
+        plan_spill_and_seal(),
+        plan_oversize(),
+        plan_errors(),
+        harvest_replay(),
+    ]
 }
 
 /// The smallest useful scenario, and the first one the Rust binary can run:
@@ -55,6 +63,101 @@ pub fn error_paths() -> Scenario {
             // fully compared, because the exit-code ladder and the message are
             // both contract (CLAUDE.md: 2 = state/lookup).
             cmd("status on an uninitialised project", &["status", "nosuch"]),
+        ],
+    }
+}
+
+/// `plan` on a tree that fits one disc: the "completes the set" wording, the
+/// `--finalize` seal, and the fact that re-planning is idempotent because it
+/// does not consume the staged scan.
+pub fn plan_basics() -> Scenario {
+    Scenario {
+        name: "plan-basics",
+        disc_bytes: None,
+        steps: vec![
+            write("a.bin", 800),
+            write("nested/b.bin", 120),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            // Re-plan: same staged scan, same answer, plan.json overwritten.
+            cmd("plan p again", &["plan", "p"]),
+            cmd("plan p --finalize", &["plan", "p", "--finalize"]),
+            // An explicit disc type changes the capacity the plan reports.
+            cmd(
+                "plan p --disc-type DVD",
+                &["plan", "p", "--disc-type", "DVD"],
+            ),
+            cmd("status p", &["status", "p"]),
+        ],
+    }
+}
+
+/// The spill: two 800-byte files against a 1000-byte disc. This cycle's disc
+/// is sealed and the remainder is reported — the shape the corpus's
+/// `work/01-after-plan1` recorded.
+pub fn plan_spill_and_seal() -> Scenario {
+    Scenario {
+        name: "plan-spill-and-seal",
+        disc_bytes: Some(1000),
+        steps: vec![
+            write("a.bin", 800),
+            write("b.bin", 800),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("status p", &["status", "p"]),
+        ],
+    }
+}
+
+/// A file no disc can hold. `plan` must list it and still succeed; `burn`
+/// refuses it, which is P5's half of the two-stage check.
+pub fn plan_oversize() -> Scenario {
+    Scenario {
+        name: "plan-oversize",
+        disc_bytes: Some(500),
+        steps: vec![
+            write("big.bin", 800),
+            write("small.bin", 100),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+        ],
+    }
+}
+
+/// `plan` before `scan`: a state error, not an argument error, so the message
+/// and the exit code are both contract and both fully compared.
+pub fn plan_errors() -> Scenario {
+    Scenario {
+        name: "plan-errors",
+        disc_bytes: None,
+        steps: vec![
+            write("a.bin", 100),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            cmd("plan before scan", &["plan", "p"]),
+            // …and the same failure on an uninitialised project resolves to
+            // the project lookup instead.
+            cmd("plan on an unknown project", &["plan", "nosuch"]),
+            // An unknown disc type fails in the argument parser, the one place
+            // spec §3.2 lets clap and zio-cli word things differently.
+            cmd_exit_only(
+                "plan with a bogus disc type",
+                &["plan", "p", "--disc-type", "ZIP"],
+            ),
         ],
     }
 }
@@ -144,6 +247,38 @@ mod tests {
         ] {
             assert!(got.contains(expected), "replay is missing '{expected}'");
         }
+    }
+
+    #[test]
+    fn the_plan_scenarios_use_only_commands_p4_lands() {
+        for s in [
+            plan_basics(),
+            plan_spill_and_seal(),
+            plan_oversize(),
+            plan_errors(),
+        ] {
+            for c in s.commands() {
+                assert!(
+                    ["init", "scan", "status", "plan"].contains(&c),
+                    "scenario '{}' uses '{c}', which P4 does not land",
+                    s.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_spill_scenario_shrinks_the_disc_enough_to_spill() {
+        // Two 800-byte files, a 1000-byte disc: without the override they
+        // would share one disc and the scenario would test nothing.
+        assert_eq!(plan_spill_and_seal().disc_bytes, Some(1000));
+    }
+
+    #[test]
+    fn the_oversize_scenario_puts_one_file_beyond_any_disc() {
+        // 800 bytes against a 500-byte disc, with a 100-byte file that still
+        // fits: the plan must list the first and place the second.
+        assert_eq!(plan_oversize().disc_bytes, Some(500));
     }
 
     #[test]
