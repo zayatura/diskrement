@@ -105,6 +105,35 @@ impl Catalog {
             Ok(())
         })
     }
+
+    /// Record that a burned session was read back and matched.
+    ///
+    /// Only a BURNED session can become VERIFIED; anything else — a missing
+    /// session, or one already verified — is an illegal transition.
+    pub fn mark_verified(
+        &mut self,
+        project: ProjectId,
+        disc_ordinal: u32,
+        session_ordinal: u32,
+    ) -> Result<(), CatalogError> {
+        self.tx(|tx| {
+            let updated = tx
+                .execute(
+                    "update session set state = 'VERIFIED'
+                     where state = 'BURNED' and ordinal = ?1
+                       and disc_id = (select id from disc
+                                      where project_id = ?2 and ordinal = ?3)",
+                    params![session_ordinal as i64, project.0, disc_ordinal as i64],
+                )
+                .map_err(CatalogError::from_sqlite)?;
+            if updated == 0 {
+                return Err(CatalogError::IllegalStatusTransition(format!(
+                    "no BURNED session {session_ordinal} on disc {disc_ordinal}"
+                )));
+            }
+            Ok(())
+        })
+    }
 }
 
 /// Flip a pre-existing OPEN disc to FINALIZED. Anything else is an illegal
@@ -453,6 +482,41 @@ mod tests {
         assert!(
             matches!(err, CatalogError::ConstraintViolation(_)),
             "expected ConstraintViolation, got {err:?}"
+        );
+    }
+
+    use crate::catalog::model::SessionState;
+
+    #[test]
+    fn mark_verified_flips_a_burned_session() {
+        let (_dir, mut cat) = temp_catalog();
+        let pid = cat.create_project(&project_init("p")).expect("project");
+        cat.apply_update(&update(pid, 1, 1, vec![fw("a", "h", 10)], vec![], vec![]))
+            .expect("burn");
+
+        cat.mark_verified(pid, 1, 1).expect("verification recorded");
+
+        let verified = cat
+            .sessions_by_state(pid, SessionState::Verified)
+            .expect("query succeeds");
+        assert_eq!(verified.len(), 1);
+        assert_eq!((verified[0].disc_ordinal, verified[0].ordinal), (1, 1));
+        assert!(cat
+            .sessions_by_state(pid, SessionState::Burned)
+            .expect("query succeeds")
+            .is_empty());
+    }
+
+    #[test]
+    fn marking_a_session_that_is_not_burned_is_an_illegal_transition() {
+        let (_dir, mut cat) = temp_catalog();
+        let pid = cat.create_project(&project_init("p")).expect("project");
+        let err = cat
+            .mark_verified(pid, 1, 1)
+            .expect_err("there is no such session");
+        assert!(
+            matches!(err, CatalogError::IllegalStatusTransition(_)),
+            "expected IllegalStatusTransition, got {err:?}"
         );
     }
 }

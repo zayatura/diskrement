@@ -16,8 +16,8 @@ use std::str::FromStr;
 use rusqlite::params;
 
 use super::model::{
-    ArchivePointer, FileFingerprint, FileHistoryEntry, ProjectId, Session, SessionState,
-    VersionStatus,
+    ArchivePointer, DiscRecordedContents, FileFingerprint, FileHistoryEntry, ProjectId, Session,
+    SessionState, SupersededVersion, VersionStatus,
 };
 use super::time;
 use super::Catalog;
@@ -380,6 +380,102 @@ impl Catalog {
         }
         Ok(out)
     }
+
+    /// What the burner staged on `disc_ordinal`'s LATEST session — used by
+    /// verify to check a disc against its own recorded contents rather than
+    /// against the current view.
+    ///
+    /// A seal session (`plan --finalize`) places no files, so this is
+    /// legitimately empty for a disc whose last session was a seal.
+    pub fn placements_for_disc(
+        &self,
+        project: ProjectId,
+        disc_ordinal: u32,
+    ) -> Result<BTreeMap<RelPath, ContentHash>, CatalogError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "select fv.rel_path, fv.content_hash
+                 from placement p
+                 join session s   on s.id = p.session_id
+                 join disc d      on d.id = s.disc_id
+                 join file_version fv on fv.id = p.file_version_id
+                 where d.project_id = ?1 and d.ordinal = ?2
+                   and s.ordinal = (select max(s2.ordinal) from session s2
+                                    where s2.disc_id = d.id)",
+            )
+            .map_err(CatalogError::from_sqlite)?;
+
+        let rows = stmt
+            .query_map(params![project.0, disc_ordinal as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(CatalogError::from_sqlite)?;
+
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (path, hash) = row.map_err(CatalogError::from_sqlite)?;
+            out.insert(RelPath(path), ContentHash(hash));
+        }
+        Ok(out)
+    }
+
+    /// Everything recorded as physically on one disc: the merged view a mount
+    /// shows, plus the versions later sessions of that same disc hid.
+    ///
+    /// Powers the two-tier read-back verify — the visible set is checked by
+    /// mounting, the superseded set by extracting the session that wrote it.
+    pub fn disc_recorded_contents(
+        &self,
+        project: ProjectId,
+        disc_ordinal: u32,
+    ) -> Result<DiscRecordedContents, CatalogError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "select rp, ch, sess_ord, rn from (
+                   select fv.rel_path as rp, fv.content_hash as ch, s.ordinal as sess_ord,
+                          row_number() over (partition by fv.rel_path
+                                             order by s.ordinal desc, p.id desc) as rn
+                   from placement p
+                   join session s on s.id = p.session_id
+                   join disc d on d.id = s.disc_id
+                   join file_version fv on fv.id = p.file_version_id
+                   where d.project_id = ?1 and d.ordinal = ?2
+                 ) order by rp, rn",
+            )
+            .map_err(CatalogError::from_sqlite)?;
+
+        let rows = stmt
+            .query_map(params![project.0, disc_ordinal as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(CatalogError::from_sqlite)?;
+
+        let mut visible = BTreeMap::new();
+        let mut superseded = Vec::new();
+        for row in rows {
+            let (path, hash, session_ordinal, rank) = row.map_err(CatalogError::from_sqlite)?;
+            if rank == 1 {
+                visible.insert(RelPath(path), ContentHash(hash));
+            } else {
+                superseded.push(SupersededVersion {
+                    session_ordinal: session_ordinal as u32,
+                    rel_path: RelPath(path),
+                    content_hash: ContentHash(hash),
+                });
+            }
+        }
+        Ok(DiscRecordedContents {
+            visible,
+            superseded,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -670,6 +766,111 @@ mod tests {
                 session_ordinal: 1,
                 status: VersionStatus::Deleted,
             }]
+        );
+    }
+
+    use crate::catalog::model::{DiscRecordedContents, SupersededVersion};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn placements_for_disc_report_the_latest_sessions_files_only() {
+        let (_dir, mut cat) = temp_catalog();
+        let pid = cat.create_project(&project_init("p")).expect("project");
+        cat.apply_update(&update(pid, 1, 1, vec![fw("a", "a1", 10)], vec![], vec![]))
+            .expect("session 1");
+        cat.apply_update(&update(pid, 1, 2, vec![fw("b", "b1", 20)], vec![], vec![]))
+            .expect("session 2");
+
+        let placements = cat.placements_for_disc(pid, 1).expect("query succeeds");
+        assert_eq!(
+            placements,
+            BTreeMap::from([(RelPath("b".to_string()), ContentHash("b1".to_string()))])
+        );
+    }
+
+    #[test]
+    fn disc_recorded_contents_hide_earlier_versions_but_still_list_them() {
+        let (_dir, mut cat) = temp_catalog();
+        let pid = cat.create_project(&project_init("p")).expect("project");
+        cat.apply_update(&update(
+            pid,
+            1,
+            1,
+            vec![fw("a.txt", "aa", 10), fw("b.txt", "bb", 20)],
+            vec![],
+            vec![],
+        ))
+        .expect("session 1");
+        cat.apply_update(&update(
+            pid,
+            1,
+            2,
+            vec![],
+            vec![fw("a.txt", "a2", 12)],
+            vec![],
+        ))
+        .expect("session 2");
+
+        let recorded = cat.disc_recorded_contents(pid, 1).expect("query succeeds");
+        assert_eq!(
+            recorded.visible,
+            BTreeMap::from([
+                (RelPath("a.txt".to_string()), ContentHash("a2".to_string())),
+                (RelPath("b.txt".to_string()), ContentHash("bb".to_string())),
+            ])
+        );
+        assert_eq!(
+            recorded.superseded,
+            vec![SupersededVersion {
+                session_ordinal: 1,
+                rel_path: RelPath("a.txt".to_string()),
+                content_hash: ContentHash("aa".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn another_discs_versions_do_not_leak_into_recorded_contents() {
+        let (_dir, mut cat) = temp_catalog();
+        let pid = cat.create_project(&project_init("p")).expect("project");
+        cat.apply_update(&update(
+            pid,
+            1,
+            1,
+            vec![fw("a.txt", "aa", 10)],
+            vec![],
+            vec![],
+        ))
+        .expect("disc 1");
+        cat.apply_update(&update(
+            pid,
+            2,
+            1,
+            vec![fw("z.txt", "zz", 30)],
+            vec![],
+            vec![],
+        ))
+        .expect("disc 2");
+
+        assert_eq!(
+            cat.disc_recorded_contents(pid, 1).expect("query succeeds"),
+            DiscRecordedContents {
+                visible: BTreeMap::from([(
+                    RelPath("a.txt".to_string()),
+                    ContentHash("aa".to_string())
+                )]),
+                superseded: vec![],
+            }
+        );
+        assert_eq!(
+            cat.disc_recorded_contents(pid, 2).expect("query succeeds"),
+            DiscRecordedContents {
+                visible: BTreeMap::from([(
+                    RelPath("z.txt".to_string()),
+                    ContentHash("zz".to_string())
+                )]),
+                superseded: vec![],
+            }
         );
     }
 }
