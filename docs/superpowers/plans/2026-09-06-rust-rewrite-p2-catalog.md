@@ -4876,3 +4876,20 @@ first runnable binary — `init`, `scan`, `status`).
 
 *(Nothing yet. Record here what the implementation had to do differently and
 why, rather than leaving it in commit messages.)*
+
+### Task 2
+
+- `#[expect(dead_code, reason = "first called by store.rs in task 3")]` was
+  added to `Catalog::tx`, `CatalogError::from_sqlite`, and
+  `is_unique_violation`. The brief's verbatim code defines them before their
+  first caller exists, and `.cargo/config.toml` makes warnings failures for
+  the whole workspace, so the brief as written could not compile. `expect`
+  (not `allow`) so each marker warns once task 3 consumes its item.
+- `tests/fixture_schema.rs` calls
+  `schema_of(ours.raw_connection_for_tests())` without the brief's extra `&`:
+  the method already returns `&Connection`, and `&&Connection` trips clippy's
+  `needless_borrow` under `-D warnings`.
+- Final `catalog/mod.rs` keeps the Step 1 `mod tests` appended below the Step 5
+  replacement content: Step 5's block alone would leave the four new tests out
+  and Step 7 expects `8 passed`. The "replace wholesale" instruction was read
+  as replacing the task-1 skeleton, not the tests just written.
