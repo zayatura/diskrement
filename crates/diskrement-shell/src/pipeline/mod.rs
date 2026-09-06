@@ -2,6 +2,7 @@
 //! resolution, and — for scan — **writes no catalog rows**. P3 lands `init`,
 //! `scan` and `status`; later phases append the rest of the nine methods.
 
+pub mod planning;
 pub mod reports;
 pub mod staged;
 
