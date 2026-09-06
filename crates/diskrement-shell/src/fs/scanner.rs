@@ -1,6 +1,60 @@
 //! The parallel scanner (`FileScanner.scala`, `HashParallelism.scala`,
 //! `FileSystem.scala`).
 
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use diskrement_core::RelPath;
+
+/// Regular files under `root`, symlinks excluded, dotfiles included
+/// (`FileSystemLive.walk`). Order is directory order; `scan` sorts at the end.
+#[allow(dead_code)]
+pub(crate) fn walk(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(std::io::Error::other)?;
+        if entry.file_type().is_file() {
+            out.push(entry.into_path());
+        }
+    }
+    Ok(out)
+}
+
+/// Size and mtime, the scanner's whole view of a file. **mtime is truncated to
+/// milliseconds here** — the single normalization point (`FileSystem.stat`'s
+/// doc names it), so every stored or compared mtime is a millis instant.
+///
+/// The `allow` below is temporary: `scan` (next commit) consumes all three.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct FileStat {
+    pub size_bytes: u64,
+    pub mtime: DateTime<Utc>,
+}
+
+#[allow(dead_code)]
+pub(crate) fn stat(path: &Path) -> std::io::Result<FileStat> {
+    let meta = std::fs::metadata(path)?; // nofollow: stats the link itself
+    let ts: DateTime<Utc> = meta.modified()?.into();
+    let mtime =
+        ts - chrono::Duration::nanoseconds((ts.timestamp_subsec_nanos() % 1_000_000) as i64);
+    Ok(FileStat {
+        size_bytes: meta.len(),
+        mtime,
+    })
+}
+
+/// `RelPath` of `path` under `root` (`snapshotRoot.relativize`).
+#[allow(dead_code)]
+pub(crate) fn relativize(root: &Path, path: &Path) -> RelPath {
+    RelPath(
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string(),
+    )
+}
+
 /// `DISKREMENT_HASH_PARALLELISM` resolution: default 6, clamped to 64,
 /// empty/whitespace-only treated as unset, unusable values fall back to 6 with
 /// a warning carrying the raw value (`HashParallelism.scala`).
@@ -107,6 +161,41 @@ mod tests {
         assert_eq!(
             bad.warnings[0],
             "ignoring unusable DISKREMENT_HASH_PARALLELISM 'banana' (want a positive int); using 6"
+        );
+    }
+
+    #[test]
+    fn walk_returns_regular_files_including_dotfiles_but_not_symlinks_or_dirs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        std::fs::write(root.join(".hidden"), b"x").unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/b.txt"), b"x").unwrap();
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::symlink(root.join("a.txt"), root.join("link.txt"));
+        let mut got: Vec<String> = walk(root)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.strip_prefix(root).unwrap().display().to_string())
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![".hidden", "a.txt", "sub/b.txt"]);
+    }
+
+    #[test]
+    fn stat_truncates_mtime_to_milliseconds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("f");
+        std::fs::write(&p, b"12345").unwrap();
+        let st = stat(&p).unwrap();
+        assert_eq!(st.size_bytes, 5);
+        assert_eq!(
+            st.mtime,
+            st.mtime
+                - chrono::Duration::nanoseconds(
+                    (st.mtime.timestamp_subsec_nanos() % 1_000_000) as i64
+                )
         );
     }
 }
