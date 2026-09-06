@@ -4,6 +4,8 @@ members = [
     "crates/diskrement-core",
     "crates/diskrement-shell",
     "crates/diskrement-cli",
+    # Dev-only differential harness (spec §8.1). Deleted at P10 with the Scala tree.
+    "crates/diskrement-difftest",
 ]
 
 [workspace.package]
