@@ -1148,4 +1148,96 @@ mod tests {
         // not the commit point.
         assert_eq!(count(&cat, "file_version"), 1);
     }
+
+    use crate::catalog::model::{FileWrite, ProjectId};
+    use diskrement_core::{CatalogView, ChangeSet, ContentHash, ScannedFile};
+    use proptest::prelude::*;
+    use std::collections::BTreeMap;
+
+    /// A generated scan: a set of paths, each mapped to a content hash.
+    fn scanned_of(scan: &BTreeMap<String, String>) -> Vec<ScannedFile> {
+        scan.iter()
+            .map(|(path, hash)| ScannedFile {
+                rel_path: RelPath(path.clone()),
+                content_hash: ContentHash(hash.clone()),
+                size_bytes: 1,
+                mtime: ts(),
+            })
+            .collect()
+    }
+
+    /// Turn a change set into a one-disc update — the mini-orchestration the
+    /// real pipeline does for real in P4.
+    fn to_update(project: ProjectId, session_ordinal: u32, changes: &ChangeSet) -> CatalogUpdate {
+        let as_write = |f: &ScannedFile| FileWrite {
+            rel_path: f.rel_path.clone(),
+            content_hash: f.content_hash.clone(),
+            size_bytes: f.size_bytes,
+            mtime: ts(),
+            disc_path: format!("/data/{}", f.rel_path.as_str()),
+            copy_index: 0,
+        };
+        update(
+            project,
+            1,
+            session_ordinal,
+            changes.added.iter().map(as_write).collect(),
+            changes.modified.iter().map(as_write).collect(),
+            changes.deleted.clone(),
+        )
+    }
+
+    proptest! {
+        // Forty cases, matching the Scala's `TestAspect.samples(40)`. Each case
+        // builds a fresh catalog file, so this is the slowest test in the
+        // crate; more cases buy little.
+        #![proptest_config(ProptestConfig::with_cases(40))]
+
+        #[test]
+        fn the_view_tracks_the_latest_scan_while_file_version_only_grows(
+            scans in prop::collection::vec(
+                prop::collection::btree_map(
+                    prop::sample::select(vec!["a", "b", "c", "d", "e"]).prop_map(String::from),
+                    prop::sample::select(vec!["h1", "h2", "h3"]).prop_map(String::from),
+                    0..5usize,
+                ),
+                1..6usize,
+            )
+        ) {
+            let (_dir, mut cat) = temp_catalog();
+            let pid = cat.create_project(&project_init("p")).expect("project");
+
+            let mut view = CatalogView::empty();
+            let mut previous_rows = 0i64;
+            for (index, scan) in scans.iter().enumerate() {
+                let scanned = scanned_of(scan);
+                let changes = diskrement_core::diff::diff(&view, &scanned);
+                cat.apply_update(&to_update(pid, index as u32 + 1, &changes))
+                    .expect("the session applies");
+
+                let rows = count(&cat, "file_version");
+                prop_assert!(
+                    rows >= previous_rows,
+                    "file_version shrank: {} -> {}",
+                    previous_rows,
+                    rows
+                );
+                previous_rows = rows;
+                view = CatalogView::from_scanned(&scanned);
+            }
+
+            let stored = cat.read_view(pid).expect("view reads");
+            let expected: Vec<(&str, &str)> = view
+                .current
+                .values()
+                .map(|e| (e.rel_path.as_str(), e.content_hash.as_str()))
+                .collect();
+            let actual: Vec<(&str, &str)> = stored
+                .current
+                .values()
+                .map(|e| (e.rel_path.as_str(), e.content_hash.as_str()))
+                .collect();
+            prop_assert_eq!(actual, expected);
+        }
+    }
 }
