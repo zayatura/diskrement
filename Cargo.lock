@@ -305,7 +305,9 @@ name = "diskrement-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "chrono",
  "clap",
+ "diskrement-core",
  "diskrement-shell",
  "insta",
  "predicates",
