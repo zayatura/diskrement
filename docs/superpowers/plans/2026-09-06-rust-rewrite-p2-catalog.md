@@ -163,7 +163,7 @@ actually wrote.
 - Create: `crates/diskrement-shell/tests/timestamps.rs`
 - Modify: `crates/diskrement-shell/src/lib.rs`
 
-- [ ] **Step 1: Replace the P0 scaffolding in `lib.rs`**
+- [x] **Step 1: Replace the P0 scaffolding in `lib.rs`**
 
 The `probe()` function was P0 scaffolding whose own comment says P2 deletes it.
 Replace the whole file with:
@@ -180,7 +180,7 @@ pub mod error;
 `error` is created in Task 2; add its `mod` line then. For this task the file
 declares `pub mod catalog;` only.
 
-- [ ] **Step 2: Create the catalog module skeleton**
+- [x] **Step 2: Create the catalog module skeleton**
 
 `crates/diskrement-shell/src/catalog/mod.rs`:
 
@@ -193,7 +193,7 @@ declares `pub mod catalog;` only.
 pub mod time;
 ```
 
-- [ ] **Step 3: Write the failing tests**
+- [x] **Step 3: Write the failing tests**
 
 `crates/diskrement-shell/src/catalog/time.rs`:
 
@@ -246,7 +246,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they fail**
+- [x] **Step 4: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -254,7 +254,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: compilation errors — `cannot find function parse in this scope`.
 
-- [ ] **Step 5: Write the implementation**
+- [x] **Step 5: Write the implementation**
 
 Prepend to `crates/diskrement-shell/src/catalog/time.rs`, above `mod tests`:
 
@@ -300,7 +300,7 @@ pub struct TimeError {
 }
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -308,7 +308,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: `test result: ok. 4 passed`.
 
-- [ ] **Step 7: Write the fixture support module**
+- [x] **Step 7: Write the fixture support module**
 
 `crates/diskrement-shell/tests/support/mod.rs`. This module is shared by four
 integration test files; each of them uses part of it, so the `dead_code` allow
@@ -370,7 +370,7 @@ pub fn fixture_dbs(subdir: &str) -> Vec<String> {
 }
 ```
 
-- [ ] **Step 8: Write the corpus sweep**
+- [x] **Step 8: Write the corpus sweep**
 
 `crates/diskrement-shell/tests/timestamps.rs`:
 
@@ -455,7 +455,7 @@ fn every_scancache_timestamp_round_trips() {
 }
 ```
 
-- [ ] **Step 9: Run the sweep**
+- [x] **Step 9: Run the sweep**
 
 ```bash
 cargo test -p diskrement-shell --test timestamps -- --nocapture
@@ -469,7 +469,7 @@ formatter is not using `SecondsFormat::AutoSi`. If it fails on
 `...T20:01:06.100Z` by producing `.1`, the same. Do not "fix" it by padding to a
 fixed width — Java's rule is variable, and a fixed width breaks the other cases.
 
-- [ ] **Step 10: Confirm the corpus is untouched**
+- [x] **Step 10: Confirm the corpus is untouched**
 
 ```bash
 git status --porcelain fixtures/
@@ -478,7 +478,7 @@ git status --porcelain fixtures/
 Expected: no output. If `-wal`/`-shm` files appear, something opened a fixture
 without the `immutable=1` URI; delete them and fix the caller.
 
-- [ ] **Step 11: Verify lint and format, then commit**
+- [x] **Step 11: Verify lint and format, then commit**
 
 ```bash
 cargo test -p diskrement-shell \
@@ -504,7 +504,7 @@ Port `Migrations.scala` and the surviving half of `Db.scala`. Read both first.
 - Modify: `crates/diskrement-shell/src/lib.rs`
 - Modify: `crates/diskrement-shell/src/catalog/mod.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `crates/diskrement-shell/src/catalog/mod.rs`:
 
@@ -610,7 +610,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -618,7 +618,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: compilation errors — `unresolved module testutil`, `cannot find type Catalog`.
 
-- [ ] **Step 3: Write the error type**
+- [x] **Step 3: Write the error type**
 
 `crates/diskrement-shell/src/error.rs`:
 
@@ -686,7 +686,7 @@ pub(crate) fn is_unique_violation(e: &rusqlite::Error) -> bool {
 
 Add `pub mod error;` to `crates/diskrement-shell/src/lib.rs`.
 
-- [ ] **Step 4: Transcribe the schema**
+- [x] **Step 4: Transcribe the schema**
 
 `crates/diskrement-shell/src/catalog/schema.rs`. Every statement below is copied
 from `Migrations.scala`; the only changes are Rust string syntax and
@@ -822,7 +822,7 @@ fn run_inner(conn: &mut Connection) -> Result<(), rusqlite::Error> {
 }
 ```
 
-- [ ] **Step 5: Write `Catalog::open` and the transaction guard**
+- [x] **Step 5: Write `Catalog::open` and the transaction guard**
 
 Replace `crates/diskrement-shell/src/catalog/mod.rs` with:
 
@@ -901,7 +901,7 @@ files for now so the module tree compiles:
 : > crates/diskrement-shell/src/catalog/model.rs
 ```
 
-- [ ] **Step 6: Write the test helper**
+- [x] **Step 6: Write the test helper**
 
 `crates/diskrement-shell/src/catalog/testutil.rs`:
 
@@ -928,7 +928,7 @@ pub(crate) fn temp_catalog() -> (TempDir, Catalog) {
 Add `tempfile` to the shell crate's dev-dependencies if it is not already there
 (`crates/diskrement-shell/Cargo.toml` — P0 added it; confirm before editing).
 
-- [ ] **Step 7: Run the tests to verify they pass**
+- [x] **Step 7: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -936,7 +936,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: `test result: ok. 8 passed`.
 
-- [ ] **Step 8: Write the schema-compatibility test**
+- [x] **Step 8: Write the schema-compatibility test**
 
 `crates/diskrement-shell/tests/fixture_schema.rs`:
 
@@ -1013,7 +1013,7 @@ This needs read access to the connection from outside the crate. Add to
     }
 ```
 
-- [ ] **Step 9: Run the schema test**
+- [x] **Step 9: Run the schema test**
 
 ```bash
 cargo test -p diskrement-shell --test fixture_schema
@@ -1026,7 +1026,7 @@ If it fails on a missing `sqlite_sequence`, that means no table with
 `check` clause, the transcription dropped a constraint; fix the DDL, never the
 test.
 
-- [ ] **Step 10: Verify lint and format, then commit**
+- [x] **Step 10: Verify lint and format, then commit**
 
 ```bash
 cargo test -p diskrement-shell \
@@ -1050,7 +1050,7 @@ explains semantics the field names do not.
 - Modify: `crates/diskrement-shell/src/catalog/model.rs`
 - Modify: `crates/diskrement-core/src/planner.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `crates/diskrement-core/src/planner.rs`, inside its existing
 `mod tests` block:
@@ -1107,7 +1107,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-core --lib && cargo test -p diskrement-shell --lib
@@ -1116,7 +1116,7 @@ cargo test -p diskrement-core --lib && cargo test -p diskrement-shell --lib
 Expected: compilation errors — `no method named as_str found for enum DiscStatus`,
 `cannot find type SessionState`.
 
-- [ ] **Step 3: Give `DiscStatus` its wire spellings**
+- [x] **Step 3: Give `DiscStatus` its wire spellings**
 
 In `crates/diskrement-core/src/planner.rs`, below the `DiscStatus` enum:
 
@@ -1155,7 +1155,7 @@ impl std::str::FromStr for DiscStatus {
 }
 ```
 
-- [ ] **Step 4: Write the model types**
+- [x] **Step 4: Write the model types**
 
 Prepend to `crates/diskrement-shell/src/catalog/model.rs`, above `mod tests`:
 
@@ -1409,7 +1409,7 @@ pub struct LostReport {
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-core --lib && cargo test -p diskrement-shell --lib
@@ -1417,7 +1417,7 @@ cargo test -p diskrement-core --lib && cargo test -p diskrement-shell --lib
 
 Expected: core `58 passed`, shell `10 passed`.
 
-- [ ] **Step 6: Verify lint and format, then commit**
+- [x] **Step 6: Verify lint and format, then commit**
 
 ```bash
 cargo test --workspace \
@@ -1438,7 +1438,7 @@ Port `CatalogStoreLive.createProject` and `.findProject`, and the assertions in
 - Modify: `crates/diskrement-shell/src/catalog/store.rs`
 - Modify: `crates/diskrement-shell/src/catalog/testutil.rs`
 
-- [ ] **Step 1: Extend the test helper**
+- [x] **Step 1: Extend the test helper**
 
 Append to `crates/diskrement-shell/src/catalog/testutil.rs`:
 
@@ -1467,7 +1467,7 @@ pub(crate) fn project_init(name: &str) -> ProjectInit {
 }
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Append to `crates/diskrement-shell/src/catalog/store.rs`:
 
@@ -1519,7 +1519,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run the tests to verify they fail**
+- [x] **Step 3: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -1527,7 +1527,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: compilation errors — `no method named create_project found for struct Catalog`.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/diskrement-shell/src/catalog/store.rs`, above `mod tests`:
 
@@ -1626,7 +1626,7 @@ Note `find_project` takes `&self`: it reads. Import only what this task uses —
 warnings are errors here, so `Transaction` arrives with the free functions in
 Task 5.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -1634,7 +1634,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: `test result: ok. 13 passed`.
 
-- [ ] **Step 6: Verify lint and format, then commit**
+- [x] **Step 6: Verify lint and format, then commit**
 
 ```bash
 cargo test --workspace \
@@ -1662,7 +1662,7 @@ is one transaction, so a crash before commit leaves the catalog untouched.
 - Modify: `crates/diskrement-shell/src/catalog/store.rs`
 - Modify: `crates/diskrement-shell/src/catalog/testutil.rs`
 
-- [ ] **Step 1: Extend the test helper**
+- [x] **Step 1: Extend the test helper**
 
 Append to `crates/diskrement-shell/src/catalog/testutil.rs`:
 
@@ -1733,7 +1733,7 @@ pub(crate) fn count(cat: &super::Catalog, table: &str) -> i64 {
 }
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Append inside the existing `mod tests` block in
 `crates/diskrement-shell/src/catalog/store.rs`:
@@ -1849,7 +1849,7 @@ Append inside the existing `mod tests` block in
     }
 ```
 
-- [ ] **Step 3: Run the tests to verify they fail**
+- [x] **Step 3: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -1857,7 +1857,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: compilation errors — `no method named apply_update found for struct Catalog`.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Add to the `impl Catalog` block in `crates/diskrement-shell/src/catalog/store.rs`:
 
@@ -2091,7 +2091,7 @@ use diskrement_core::{DiscStatus, DiscType, ManifestChangeKind, RelPath};
 use super::model::{CatalogUpdate, DiscWrite, FileWrite, Project, ProjectId, ProjectInit};
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -2099,7 +2099,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: `test result: ok. 17 passed`.
 
-- [ ] **Step 6: Verify lint and format, then commit**
+- [x] **Step 6: Verify lint and format, then commit**
 
 ```bash
 cargo test --workspace \
@@ -2124,7 +2124,7 @@ against a fixture catalog that does have one.
 **Files:**
 - Modify: `crates/diskrement-shell/src/catalog/read.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/diskrement-shell/src/catalog/read.rs`:
 
@@ -2289,7 +2289,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -2297,7 +2297,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: compilation errors — `no method named read_view found for struct Catalog`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/diskrement-shell/src/catalog/read.rs`, above `mod tests`:
 
@@ -2525,7 +2525,7 @@ impl Catalog {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -2533,7 +2533,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: `test result: ok. 21 passed`.
 
-- [ ] **Step 5: Verify lint and format, then commit**
+- [x] **Step 5: Verify lint and format, then commit**
 
 ```bash
 cargo test --workspace \
@@ -2558,7 +2558,7 @@ version). Keep them distinct — swapping them is a silent, plausible-looking bu
 **Files:**
 - Modify: `crates/diskrement-shell/src/catalog/read.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append inside `mod tests` in `crates/diskrement-shell/src/catalog/read.rs`:
 
@@ -2698,7 +2698,7 @@ Append inside `mod tests` in `crates/diskrement-shell/src/catalog/read.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -2706,7 +2706,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: compilation errors — `no method named archive_pointers found`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to the `impl Catalog` block in `crates/diskrement-shell/src/catalog/read.rs`:
 
@@ -2876,7 +2876,7 @@ use super::model::{ArchivePointer, FileHistoryEntry, VersionStatus};
 use diskrement_core::ManifestChangeKind;
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -2884,7 +2884,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: `test result: ok. 24 passed`.
 
-- [ ] **Step 5: Verify lint and format, then commit**
+- [x] **Step 5: Verify lint and format, then commit**
 
 ```bash
 cargo test --workspace \
@@ -2911,7 +2911,7 @@ versions a later session of that same disc hid.
 - Modify: `crates/diskrement-shell/src/catalog/read.rs`
 - Modify: `crates/diskrement-shell/src/catalog/store.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append inside `mod tests` in `crates/diskrement-shell/src/catalog/read.rs`:
 
@@ -3040,7 +3040,7 @@ Append inside `mod tests` in `crates/diskrement-shell/src/catalog/store.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -3049,7 +3049,7 @@ cargo test -p diskrement-shell --lib
 Expected: compilation errors — `no method named placements_for_disc found`,
 `no method named mark_verified found`.
 
-- [ ] **Step 3: Write the read implementations**
+- [x] **Step 3: Write the read implementations**
 
 Add to the `impl Catalog` block in `crates/diskrement-shell/src/catalog/read.rs`:
 
@@ -3154,7 +3154,7 @@ Add to the `impl Catalog` block in `crates/diskrement-shell/src/catalog/read.rs`
 Extend `read.rs`'s imports with
 `use super::model::{DiscRecordedContents, SupersededVersion};`.
 
-- [ ] **Step 4: Write `mark_verified`**
+- [x] **Step 4: Write `mark_verified`**
 
 Add to the `impl Catalog` block in `crates/diskrement-shell/src/catalog/store.rs`:
 
@@ -3189,7 +3189,7 @@ Add to the `impl Catalog` block in `crates/diskrement-shell/src/catalog/store.rs
     }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -3197,7 +3197,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: `test result: ok. 29 passed`.
 
-- [ ] **Step 6: Verify lint and format, then commit**
+- [x] **Step 6: Verify lint and format, then commit**
 
 ```bash
 cargo test --workspace \
@@ -3224,7 +3224,7 @@ touches the `disc` row not at all.
 **Files:**
 - Modify: `crates/diskrement-shell/src/catalog/store.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append inside `mod tests` in `crates/diskrement-shell/src/catalog/store.rs`:
 
@@ -3596,7 +3596,7 @@ Note the unused-import risk: `ContentHash` is imported above for readability but
 may not be referenced by these tests. If clippy flags it, delete the import
 rather than adding an allow.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -3604,7 +3604,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: compilation errors — `no method named mark_dead found for struct Catalog`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to the `impl Catalog` block in `crates/diskrement-shell/src/catalog/store.rs`:
 
@@ -3770,7 +3770,7 @@ use super::model::{LostReport, LostVersionEntry, ReburnEntry};
 use diskrement_core::ContentHash;
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -3784,7 +3784,7 @@ by a per-row flag. If `a_copy_on_an_already_dead_disc_no_longer_shields_a_versio
 fails, the `not exists (… disc_event …)` clause inside the shielding subquery is
 missing — that clause is what makes death cumulative.
 
-- [ ] **Step 5: Verify lint and format, then commit**
+- [x] **Step 5: Verify lint and format, then commit**
 
 ```bash
 cargo test --workspace \
@@ -3811,7 +3811,7 @@ connection; the double-apply reaches the same end state through the proven path.
 **Files:**
 - Modify: `crates/diskrement-shell/src/catalog/store.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append inside `mod tests` in `crates/diskrement-shell/src/catalog/store.rs`:
 
@@ -3867,7 +3867,7 @@ Append inside `mod tests` in `crates/diskrement-shell/src/catalog/store.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -3875,7 +3875,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: compilation errors — `no method named snapshot_to found`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to the `impl Catalog` block in `crates/diskrement-shell/src/catalog/store.rs`:
 
@@ -3907,7 +3907,7 @@ Add to the `impl Catalog` block in `crates/diskrement-shell/src/catalog/store.rs
 
 Add `use std::path::Path;` to `store.rs`'s imports.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -3915,7 +3915,7 @@ cargo test -p diskrement-shell --lib
 
 Expected: `test result: ok. 42 passed`.
 
-- [ ] **Step 5: Verify lint and format, then commit**
+- [x] **Step 5: Verify lint and format, then commit**
 
 ```bash
 cargo test --workspace \
@@ -3940,7 +3940,7 @@ it comes after the write and read paths rather than beside `apply_update`.
 **Files:**
 - Modify: `crates/diskrement-shell/src/catalog/store.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append inside `mod tests` in `crates/diskrement-shell/src/catalog/store.rs`:
 
@@ -4037,7 +4037,7 @@ Append inside `mod tests` in `crates/diskrement-shell/src/catalog/store.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Before running, comment out the `prop_assert_eq!` on the final view and confirm
 the rest passes; then restore it. A property test that has never failed has not
@@ -4053,7 +4053,7 @@ Expected first: compilation errors — `unresolved import diskrement_core::Chang
 until the import is added. Then, with the deliberate mutation in place, a
 shrunk counterexample naming the smallest scan sequence that breaks it.
 
-- [ ] **Step 3: Run the whole suite**
+- [x] **Step 3: Run the whole suite**
 
 ```bash
 cargo test -p diskrement-shell --lib
@@ -4065,7 +4065,7 @@ If it fails with `cannot tombstone unknown path`, `diff` and the store disagree
 about which paths are deletable — the change set's `deleted` must only ever name
 paths the view already held.
 
-- [ ] **Step 4: Verify lint and format, then commit**
+- [x] **Step 4: Verify lint and format, then commit**
 
 ```bash
 cargo test --workspace \
@@ -4091,7 +4091,7 @@ migration runner is a no-op on an already-current catalog.
 - Modify: `crates/diskrement-shell/tests/support/mod.rs`
 - Create: `crates/diskrement-shell/tests/fixture_catalog.rs`
 
-- [ ] **Step 1: Add the copy helper**
+- [x] **Step 1: Add the copy helper**
 
 Append to `crates/diskrement-shell/tests/support/mod.rs`:
 
@@ -4111,7 +4111,7 @@ pub fn fixture_copy(rel: &str) -> (tempfile::TempDir, PathBuf) {
 }
 ```
 
-- [ ] **Step 2: Write the test file**
+- [x] **Step 2: Write the test file**
 
 `crates/diskrement-shell/tests/fixture_catalog.rs`:
 
@@ -4400,7 +4400,7 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
 }
 ```
 
-- [ ] **Step 3: Run the tests**
+- [x] **Step 3: Run the tests**
 
 ```bash
 cargo test -p diskrement-shell --test fixture_catalog
@@ -4412,7 +4412,7 @@ A failure here is a compatibility failure, not a test bug: the expected values
 were read out of the corpus with `sqlite3` while this plan was written. If one
 disagrees, re-derive it from the fixture before changing anything.
 
-- [ ] **Step 4: Confirm the corpus is untouched, then commit**
+- [x] **Step 4: Confirm the corpus is untouched, then commit**
 
 ```bash
 git status --porcelain fixtures/
@@ -4445,7 +4445,7 @@ record sessions as BURNED.
 - Modify: `crates/diskrement-shell/tests/support/mod.rs`
 - Create: `crates/diskrement-shell/tests/fixture_replay.rs`
 
-- [ ] **Step 1: Add the logical dump helper**
+- [x] **Step 1: Add the logical dump helper**
 
 Append to `crates/diskrement-shell/tests/support/mod.rs`:
 
@@ -4519,7 +4519,7 @@ pub fn assert_dumps_match(expected: &[String], actual: &[String]) {
 }
 ```
 
-- [ ] **Step 2: Write the replay test**
+- [x] **Step 2: Write the replay test**
 
 `crates/diskrement-shell/tests/fixture_replay.rs`:
 
@@ -4675,7 +4675,7 @@ fn replaying_the_first_burn_reproduces_the_scala_catalog_row_for_row() {
 }
 ```
 
-- [ ] **Step 3: Run the test**
+- [x] **Step 3: Run the test**
 
 ```bash
 cargo test -p diskrement-shell --test fixture_replay
@@ -4693,7 +4693,7 @@ Failure modes worth recognising:
 - a `created_at` or `mtime` mismatch is a `catalog::time` bug and should have
   been caught by `tests/timestamps.rs` first.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git status --porcelain fixtures/
@@ -4713,7 +4713,7 @@ git commit -m "test(catalog): replay the first burn and diff against the Scala c
 - Modify: `CLAUDE.md`
 - Modify: `docs/superpowers/plans/2026-09-06-rust-rewrite-p2-catalog.md`
 
-- [ ] **Step 1: Write the crate README**
+- [x] **Step 1: Write the crate README**
 
 `crates/diskrement-shell/README.md`:
 
@@ -4765,7 +4765,7 @@ cross-implementation compatibility suite and consume the P0 fixture corpus:
 `fixture_catalog.rs` (reads), `fixture_replay.rs` (writes).
 ```
 
-- [ ] **Step 2: Record the Rust-era gotchas in `CLAUDE.md`**
+- [x] **Step 2: Record the Rust-era gotchas in `CLAUDE.md`**
 
 The spec (§7) says Rust-era gotchas are recorded in `CLAUDE.md` as they are
 discovered; the file is not rewritten for the Rust build until P9, so add a
@@ -4787,7 +4787,7 @@ These apply to the `crates/` tree only; the Scala gotchas above still govern
   runner and writes. Copy the file to a `TempDir` first.
 ```
 
-- [ ] **Step 3: Run the full verification**
+- [x] **Step 3: Run the full verification**
 
 ```bash
 cargo test --workspace \
@@ -4807,7 +4807,7 @@ Expected, with no failures and no warnings:
 | `diskrement-shell` `tests/timestamps.rs` | 2 |
 | `diskrement-cli` `tests/binary.rs` | 1 |
 
-- [ ] **Step 4: Confirm the Scala build is untouched**
+- [x] **Step 4: Confirm the Scala build is untouched**
 
 The Scala tree must keep working until P9 — it is how fixtures are re-harvested
 and how behavior the tests do not pin stays readable.
@@ -4818,7 +4818,7 @@ git status --porcelain core/ shell/ cli/ build.sbt project/ fixtures/
 
 Expected: no output.
 
-- [ ] **Step 5: Check off this plan and commit**
+- [x] **Step 5: Check off this plan and commit**
 
 Mark every checkbox in this document, append any execution deviations to the
 section at the end, and commit:
@@ -4828,7 +4828,7 @@ git add crates/diskrement-shell/README.md CLAUDE.md docs/superpowers/plans
 git commit -m "docs(catalog): document diskrement-shell's catalog and record P2 gotchas"
 ```
 
-- [ ] **Step 6: Merge the phase branch**
+- [x] **Step 6: Merge the phase branch**
 
 Per `CLAUDE.md`, phase work merges back into the rewrite's integration branch
 with an explicit merge commit, and the phase branch is then deleted.
@@ -4845,26 +4845,26 @@ git push origin --delete feat/rewrite-p2
 
 ## Phase P2 acceptance
 
-- [ ] The schema, both migrations, and every `check` constraint are transcribed
+- [x] The schema, both migrations, and every `check` constraint are transcribed
       verbatim, and a freshly migrated catalog's DDL matches a Scala-written
       one (`tests/fixture_schema.rs`).
-- [ ] `catalog::time` round-trips every timestamp in the fixture corpus
+- [x] `catalog::time` round-trips every timestamp in the fixture corpus
       byte-for-byte, covering 3- and 9-digit fractions and the whole-second case
       (`tests/timestamps.rs`).
-- [ ] All fifteen store operations are ported, with every assertion from the
+- [x] All fifteen store operations are ported, with every assertion from the
       sixteen Scala catalog specs represented.
-- [ ] `AppendOnlySpec` is ported as a proptest: across a random sequence of
+- [x] `AppendOnlySpec` is ported as a proptest: across a random sequence of
       scans, `read_view` equals the latest scan and `file_version` never
       shrinks (Task 11).
-- [ ] Marking a disc dead appends a `disc_event` and leaves the `disc` row
+- [x] Marking a disc dead appends a `disc_event` and leaves the `disc` row
       unchanged, asserted on the row itself and not only on the derived value.
-- [ ] `LOST` reads per physical copy: fixture 11 shows a@2 as `Lost` on disc 3
+- [x] `LOST` reads per physical copy: fixture 11 shows a@2 as `Lost` on disc 3
       and `Current` on disc 4 with the same content hash.
-- [ ] Replaying burn cycle 1 through `apply_update` reproduces the Scala
+- [x] Replaying burn cycle 1 through `apply_update` reproduces the Scala
       catalog row for row (`tests/fixture_replay.rs`).
-- [ ] `cargo test --workspace`, `cargo clippy --workspace --all-targets -D warnings`
+- [x] `cargo test --workspace`, `cargo clippy --workspace --all-targets -D warnings`
       and `cargo fmt --check` are all clean, at the test counts in Task 14.
-- [ ] `fixtures/`, the Scala tree, and the sbt build are byte-identical to their
+- [x] `fixtures/`, the Scala tree, and the sbt build are byte-identical to their
       state at the start of the phase.
 
 **Next:** phase P3 (fs: scanner, hasher, fingerprint cache, snapshot, and the
@@ -4893,3 +4893,27 @@ why, rather than leaving it in commit messages.)*
   replacement content: Step 5's block alone would leave the four new tests out
   and Step 7 expects `8 passed`. The "replace wholesale" instruction was read
   as replacing the task-1 skeleton, not the tests just written.
+
+### Task 11
+
+- The brief's verbatim `proptest!` block did not compile as pasted:
+  `ContentHash`, `ProjectId` and `FileWrite` were not yet in scope inside
+  `store.rs`'s child `mod tests` (only imported at the outer module level,
+  which does not propagate into a nested module). Added
+  `use crate::catalog::model::{FileWrite, ProjectId};` and extended the
+  `diskrement_core` import with `ContentHash`. No logic changed; a spec
+  reviewer independently confirmed the brief's snippet, taken literally, could
+  not have compiled without this.
+
+### Task 13
+
+- The implementer subagent completed Step 1 (the `dump_catalog`/
+  `assert_dumps_match` helpers in `tests/support/mod.rs`) verbatim, then hit
+  an API rate limit and terminated before writing `tests/fixture_replay.rs`
+  or committing. The controlling session finished Step 2 directly rather than
+  redispatching a fresh subagent, wrote `fixture_replay.rs` byte-for-byte per
+  the plan, and ran the full test/lint/format gate before committing. Both
+  the spec-compliance and code-quality reviews for this task were run with
+  extra scrutiny given the mixed provenance; both confirmed the committed
+  code is byte-for-byte identical to the plan's prescribed text with zero
+  deviation.

@@ -58,6 +58,19 @@ Caveat: the IT suite **silently skips itself** when the work area isn't on a CoW
 
 Known deferred debt, documented on purpose — don't casually "fix" it: `archivePointers` has no dead flag and is already baked onto burned discs; `writeDisc` doesn't refuse a dead disc; the fingerprint cache never prunes deleted paths; `copies>1` redundancy degrades silently.
 
+## Rust rewrite gotchas (P2+)
+
+These apply to the `crates/` tree only; the Scala gotchas above still govern
+`core/`, `shell/` and `cli/` until P9 deletes them.
+
+- **Fixture databases must be opened `?immutable=1`** (with
+  `OpenFlags::SQLITE_OPEN_URI`). A plain read-only open of a WAL database
+  creates `-wal`/`-shm` files beside it, dirtying `fixtures/`.
+- **SQLite pragmas need a real file.** An in-memory database always reports
+  `journal_mode=memory`, so a WAL assertion against one passes vacuously.
+- **Never open a fixture catalog with `Catalog::open`** — it runs the migration
+  runner and writes. Copy the file to a `TempDir` first.
+
 ## Repo etiquette
 
 - Feature work goes on a branch off `main` named `feat/<topic>`, merged back with an explicit merge commit titled `Merge feat/<branch>: <summary>`, then the branch is deleted locally and on `origin`. No PRs. Never commit feature work directly to `main`.
