@@ -64,6 +64,7 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
     let project_name = match &cli.command {
         Command::Init { name, .. } => name,
         Command::Scan { name, .. } => name,
+        Command::Plan { name, .. } => name,
         Command::Status { name, .. } => name,
     };
     let resolved = paths::resolve(
@@ -132,6 +133,27 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
             );
             let report = pipeline.scan(&name, verify, force)?;
             say(&render::scan_report(&report));
+            Ok(())
+        }
+        Command::Plan {
+            name,
+            disc_type,
+            finalize,
+        } => {
+            // The work dir comes from the project row, not the CLI
+            // (`Runner.withProject`). `plan` reports no progress.
+            let mut catalog = open_catalog(&resolved.catalog)?;
+            let p = find_or_fail(&catalog, &name)?;
+            let pipeline = Pipeline::new(
+                &mut catalog,
+                PipelinePaths {
+                    work_dir: PathBuf::from(&p.work_dir),
+                    scan_cache: paths::scan_cache_path(&resolved.catalog, &name),
+                },
+                &NoopSink,
+            );
+            let report = pipeline.plan(&name, disc_type, finalize)?;
+            say(&render::plan_report(&report));
             Ok(())
         }
         Command::Status { name } => {

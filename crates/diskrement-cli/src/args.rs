@@ -50,6 +50,16 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+    /// Plan the next disc from the staged scan.
+    Plan {
+        name: String,
+        /// Override the project's default disc type for this plan only.
+        #[arg(long)]
+        disc_type: Option<DiscType>,
+        /// Seal the disc even when everything fit.
+        #[arg(long, default_value_t = false)]
+        finalize: bool,
+    },
     /// Show discs, totals, and last burn.
     Status { name: String },
 }
@@ -181,5 +191,54 @@ mod tests {
     #[test]
     fn an_unknown_subcommand_is_rejected() {
         assert!(Cli::try_parse_from(["diskrement", "frobnicate", "p"]).is_err());
+    }
+
+    #[test]
+    fn plan_defaults_to_no_disc_type_override_and_no_finalize() {
+        let cli = Cli::try_parse_from(["diskrement", "plan", "photos"]).unwrap();
+        let Command::Plan {
+            name,
+            disc_type,
+            finalize,
+        } = cli.command
+        else {
+            panic!("not plan")
+        };
+        assert_eq!(name, "photos");
+        assert_eq!(disc_type, None);
+        assert!(!finalize);
+    }
+
+    #[test]
+    fn plan_takes_a_disc_type_override_and_the_finalize_flag() {
+        let cli = Cli::try_parse_from([
+            "diskrement",
+            "plan",
+            "photos",
+            "--disc-type",
+            "DVD_DL",
+            "--finalize",
+        ])
+        .unwrap();
+        let Command::Plan {
+            disc_type,
+            finalize,
+            ..
+        } = cli.command
+        else {
+            panic!("not plan")
+        };
+        assert_eq!(disc_type, Some(DiscType::DvdDl));
+        assert!(finalize);
+    }
+
+    #[test]
+    fn plan_rejects_an_unknown_disc_type() {
+        assert!(Cli::try_parse_from(["diskrement", "plan", "p", "--disc-type", "ZIP"]).is_err());
+    }
+
+    #[test]
+    fn plan_requires_a_project_name() {
+        assert!(Cli::try_parse_from(["diskrement", "plan"]).is_err());
     }
 }

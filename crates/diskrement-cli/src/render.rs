@@ -28,8 +28,6 @@ pub fn scan_report(r: &ScanReport) -> String {
 
 /// `Render.plan`. Three shapes: nothing to do, a bare seal, and the summary
 /// block with its optional deletion and oversize lines.
-// Consumed by `main` in the next task; the allow goes with it.
-#[allow(dead_code)]
 pub fn plan_report(p: &PlanReport) -> String {
     let d = &p.disc;
     if d.files.is_empty() && p.tombstones.is_empty() && p.oversized.is_empty() {
