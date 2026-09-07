@@ -2,6 +2,7 @@
 //! resolution, and — for scan — **writes no catalog rows**. P3 lands `init`,
 //! `scan` and `status`; later phases append the rest of the nine methods.
 
+pub mod planning;
 pub mod reports;
 pub mod staged;
 
@@ -9,7 +10,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use diskrement_core::{diff, DiscStatus, RelPath, ScannedFile};
+use diskrement_core::{diff, Capacity, DiscStatus, DiscType, RelPath, ScannedFile};
 
 use crate::catalog::model::{FileFingerprint, Project, ProjectId, ProjectInit, SessionState};
 use crate::catalog::Catalog;
@@ -20,7 +21,7 @@ use crate::fs::scanner::{self, parallelism_from_env, ScanOutput};
 use crate::fs::snapshot;
 use crate::progress::ProgressSink;
 
-use reports::{ScanReport, StatusReport};
+use reports::{PlanReport, ScanReport, StatusReport};
 
 /// The paths a pipeline needs, resolved by the CLI (`ProjectPaths` +
 /// `CachePath` in the Scala wiring). `work_dir` for `scan`/`status` comes from
@@ -170,6 +171,32 @@ impl<'a> Pipeline<'a> {
             hashed,
             scanned_files: files.len(),
         })
+    }
+
+    /// `plan`: the staged scan plus the catalog view decide the one disc this
+    /// cycle writes (`PipelineLive.plan`). Stages `staged/plan.json` and
+    /// writes **no catalog rows** — no `PLANNED` state is ever persisted; the
+    /// staged plan in the work dir is the recovery unit.
+    pub fn plan(
+        &self,
+        name: &str,
+        disc_type_override: Option<DiscType>,
+        finalize: bool,
+    ) -> Result<PlanReport, PipelineError> {
+        let p = self.project(name)?;
+        let scanned = staged::read_scan(&self.paths.work_dir)
+            .map_err(|e| Self::failed(format!("corrupt scan.json: {e}")))?
+            .ok_or_else(|| PipelineError::NoStagedScan(name.to_string()))?;
+        let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
+        let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
+        let disc_type = disc_type_override.unwrap_or(p.default_disc_type);
+        let cap = planning::effective_capacity(
+            Capacity::from_disc_type(disc_type, p.margin_percent),
+            planning::disc_bytes_from_env(),
+        );
+        let report = planning::plan_from(&view, &scanned, &states, disc_type, cap, finalize);
+        staged::write_plan(&self.paths.work_dir, &report).map_err(Self::failed)?;
+        Ok(report)
     }
 
     /// `status`: catalog reads only, never mutates (`PipelineLive.status`).
@@ -421,5 +448,173 @@ mod tests {
         assert_eq!(pl.scan("p", false, false).unwrap().hashed, Some(3));
         // nothing cached, so the forced scan re-hashes everything
         assert_eq!(pl.scan("p", false, true).unwrap().hashed, Some(3));
+    }
+
+    /// A project whose margin leaves 250_000 usable bytes, so large-ish files
+    /// spill and go oversized without touching `DISKREMENT_DISC_BYTES` — which
+    /// is process-global and unusable from parallel tests.
+    ///
+    /// Deviation from the plan's 99.9999998% → 50 bytes (the Scala
+    /// PipelineSpillSpec idiom): `Capacity::from_disc_type` quantises the
+    /// margin to thousandths of a percent, so 99.9999998% rounds to a full
+    /// 100% margin and 0 usable bytes — every file would be oversized. One
+    /// thousandth of a percent of a BD-R is 250_000 bytes, the smallest
+    /// non-zero usable capacity a margin can produce here; the files below
+    /// are sized to that.
+    fn tiny_project_init(env: &Env) -> ProjectInit {
+        ProjectInit {
+            margin_percent: 99.999,
+            ..project_init(env)
+        }
+    }
+
+    #[test]
+    fn plan_without_a_staged_scan_is_exit_2_with_the_run_scan_advice() {
+        let mut e = setup();
+        e.pipeline.init(&project_init(&e)).unwrap();
+        let err = e.pipeline.plan("p", None, false).unwrap_err();
+        assert_eq!(err.to_string(), "no staged scan for p (run scan)");
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn plan_on_an_unknown_project_fails_projectnotfound() {
+        let e = setup();
+        let err = e.pipeline.plan("nosuch", None, false).unwrap_err();
+        assert!(matches!(err, PipelineError::ProjectNotFound(_)));
+    }
+
+    #[test]
+    fn plan_stages_the_report_it_returns() {
+        let mut e = setup();
+        write_src(&e, "a.txt", b"aaaaa");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        e.pipeline.scan("p", false, false).unwrap();
+        let report = e.pipeline.plan("p", None, false).unwrap();
+        assert_eq!(report.disc.ordinal, 1);
+        assert_eq!(report.disc.files.len(), 1);
+        assert_eq!(report.disc_type, DiscType::BdR);
+        let staged_report = staged::read_plan(&e.work).unwrap().unwrap();
+        assert_eq!(staged_report, report);
+    }
+
+    #[test]
+    fn plan_uses_the_projects_default_disc_type_and_margin() {
+        let mut e = setup();
+        write_src(&e, "a.txt", b"a");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        e.pipeline.scan("p", false, false).unwrap();
+        let report = e.pipeline.plan("p", None, false).unwrap();
+        assert_eq!(
+            report.disc.usable_bytes,
+            diskrement_core::Capacity::from_disc_type(DiscType::BdR, 2.0).usable_bytes
+        );
+    }
+
+    #[test]
+    fn an_explicit_disc_type_overrides_the_projects_default() {
+        let mut e = setup();
+        write_src(&e, "a.txt", b"a");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        e.pipeline.scan("p", false, false).unwrap();
+        let report = e.pipeline.plan("p", Some(DiscType::Dvd), false).unwrap();
+        assert_eq!(report.disc_type, DiscType::Dvd);
+        assert_eq!(
+            report.disc.usable_bytes,
+            diskrement_core::Capacity::from_disc_type(DiscType::Dvd, 2.0).usable_bytes
+        );
+    }
+
+    #[test]
+    fn finalize_seals_a_disc_that_would_have_been_left_open() {
+        let mut e = setup();
+        write_src(&e, "a.txt", b"a");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        e.pipeline.scan("p", false, false).unwrap();
+        assert!(
+            !e.pipeline
+                .plan("p", None, false)
+                .unwrap()
+                .disc
+                .will_finalize
+        );
+        assert!(e.pipeline.plan("p", None, true).unwrap().disc.will_finalize);
+    }
+
+    #[test]
+    fn a_spilling_plan_seals_this_cycles_disc_and_reports_the_rest() {
+        let mut e = setup();
+        write_src(&e, "a.txt", &[b'a'; 200_000]);
+        write_src(&e, "b.txt", &[b'b'; 200_000]);
+        e.pipeline.init(&tiny_project_init(&e)).unwrap();
+        e.pipeline.scan("p", false, false).unwrap();
+        let report = e.pipeline.plan("p", None, false).unwrap();
+        assert_eq!(report.disc.files.len(), 1);
+        assert!(report.disc.will_finalize);
+        assert_eq!(report.remaining.more_discs, 1);
+        assert_eq!(report.remaining.more_files, 1);
+        assert_eq!(report.remaining.more_bytes, 200_000);
+    }
+
+    #[test]
+    fn a_file_larger_than_any_disc_is_surfaced_as_oversized() {
+        let mut e = setup();
+        write_src(&e, "big.txt", &[b'x'; 300_000]);
+        e.pipeline.init(&tiny_project_init(&e)).unwrap();
+        e.pipeline.scan("p", false, false).unwrap();
+        let report = e.pipeline.plan("p", None, false).unwrap();
+        assert_eq!(report.oversized.len(), 1);
+        assert_eq!(report.oversized[0].rel_path.as_str(), "big.txt");
+    }
+
+    #[test]
+    fn re_planning_overwrites_the_staged_plan_and_leaves_the_staged_scan() {
+        // `plan` does not consume the staged scan; `burn` clears staged state.
+        let mut e = setup();
+        write_src(&e, "a.txt", b"a");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        e.pipeline.scan("p", false, false).unwrap();
+        e.pipeline.plan("p", None, false).unwrap();
+        let second = e.pipeline.plan("p", None, true).unwrap();
+        assert!(second.disc.will_finalize);
+        assert_eq!(staged::read_plan(&e.work).unwrap().unwrap(), second);
+        assert_eq!(staged::read_scan(&e.work).unwrap().unwrap().len(), 1);
+    }
+
+    /// Row counts of every table `burn` writes. Spelled out here rather than
+    /// reached for through `crate::testutil` so the test does not depend on
+    /// the `testutil` feature being enabled for the lib's own unit tests.
+    fn burn_written_rows(pipeline: &Pipeline<'_>) -> Vec<String> {
+        let conn = pipeline.catalog.raw_connection_for_tests();
+        [
+            "disc",
+            "session",
+            "file_version",
+            "placement",
+            "change_record",
+        ]
+        .iter()
+        .map(|table| {
+            let n: i64 = conn
+                .query_row(&format!("select count(*) from {table}"), [], |r| r.get(0))
+                .expect("countable");
+            format!("{table}={n}")
+        })
+        .collect()
+    }
+
+    #[test]
+    fn plan_writes_no_catalog_rows() {
+        // The catalog is append-only and only `burn` appends. A plan that
+        // wrote rows would break the "no PLANNED rows are persisted"
+        // invariant: the staged plan in the work dir is the recovery unit.
+        let mut e = setup();
+        write_src(&e, "a.txt", b"a");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        e.pipeline.scan("p", false, false).unwrap();
+        let before = burn_written_rows(&e.pipeline);
+        e.pipeline.plan("p", None, false).unwrap();
+        assert_eq!(burn_written_rows(&e.pipeline), before);
+        assert!(before.iter().all(|line| line.ends_with("=0")), "{before:?}");
     }
 }

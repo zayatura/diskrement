@@ -3,7 +3,7 @@
 
 use diskrement_shell::catalog::model::{Project, ProjectId};
 use diskrement_shell::catalog::time;
-use diskrement_shell::pipeline::reports::{ScanReport, StatusReport};
+use diskrement_shell::pipeline::reports::{PlanReport, ScanReport, StatusReport};
 
 pub fn init_done(name: &str, id: ProjectId) -> String {
     format!("Created project {name} (id {}).", id.0)
@@ -24,6 +24,54 @@ pub fn scan_report(r: &ScanReport) -> String {
         ),
         None => summary,
     }
+}
+
+/// `Render.plan`. Three shapes: nothing to do, a bare seal, and the summary
+/// block with its optional deletion and oversize lines.
+pub fn plan_report(p: &PlanReport) -> String {
+    let d = &p.disc;
+    if d.files.is_empty() && p.tombstones.is_empty() && p.oversized.is_empty() {
+        return if d.will_finalize {
+            format!("Plan: finalize disc {} (seal; no new files).", d.ordinal)
+        } else {
+            "Nothing to burn: no changes to plan.".to_string()
+        };
+    }
+    let kind = if d.is_new {
+        "new disc".to_string()
+    } else {
+        format!("appending to open disc {}", d.ordinal)
+    };
+    let fin = if d.will_finalize {
+        "will FINALIZE"
+    } else {
+        "left OPEN"
+    };
+    let mut lines = vec![format!(
+        "Plan: disc {} ({kind}, {}) — {} files, {}, {fin}",
+        d.ordinal,
+        p.disc_type,
+        d.files.len(),
+        gb(d.total_used_bytes())
+    )];
+    lines.push(if p.remaining.more_discs == 0 {
+        "This disc completes the set.".to_string()
+    } else {
+        format!(
+            "~{} more files (~{} more discs) remain after this one.",
+            p.remaining.more_files, p.remaining.more_discs
+        )
+    });
+    if !p.tombstones.is_empty() {
+        lines.push(format!("Deletions: {}", p.tombstones.len()));
+    }
+    if !p.oversized.is_empty() {
+        lines.push("Oversized (cannot be placed):".to_string());
+        for f in &p.oversized {
+            lines.push(format!("  {}  {}", f.rel_path.as_str(), gb(f.size_bytes)));
+        }
+    }
+    lines.join("\n")
 }
 
 /// `f"${bytes / 1.0e9}%.1f GB"` (`Render.gb`).
@@ -191,5 +239,191 @@ mod tests {
         assert_eq!(gb(24_800_000_000), "24.8 GB");
         assert_eq!(gb(25_000_000_000), "25.0 GB");
         assert_eq!(gb(0), "0.0 GB");
+    }
+
+    use diskrement_core::{ContentHash, PlannedDisc, RelPath, ScannedFile};
+    use diskrement_shell::pipeline::reports::{PlanReport, RemainingEstimate};
+
+    fn scanned(rel: &str, size: u64) -> ScannedFile {
+        ScannedFile {
+            rel_path: RelPath(rel.into()),
+            content_hash: ContentHash("deadbeef".into()),
+            size_bytes: size,
+            mtime: ts(2026, 9, 5),
+        }
+    }
+
+    fn plan_of(
+        disc: PlannedDisc,
+        tombstones: Vec<&str>,
+        remaining: (usize, usize, u64),
+        oversized: Vec<ScannedFile>,
+    ) -> PlanReport {
+        PlanReport {
+            disc,
+            disc_type: DiscType::BdR,
+            tombstones: tombstones.into_iter().map(|t| RelPath(t.into())).collect(),
+            remaining: RemainingEstimate {
+                more_discs: remaining.0,
+                more_files: remaining.1,
+                more_bytes: remaining.2,
+            },
+            oversized,
+        }
+    }
+
+    /// `fixtures/run-manifest.txt` step 03 — the cross-implementation render
+    /// oracle, byte for byte.
+    #[test]
+    fn a_spilling_plan_renders_exactly_as_the_scala_build_printed_it() {
+        let report = plan_of(
+            PlannedDisc {
+                ordinal: 1,
+                is_new: true,
+                will_finalize: true,
+                files: vec![scanned("a.bin", 800)],
+                prior_used_bytes: 0,
+                usable_bytes: 1_000,
+            },
+            vec![],
+            (1, 1, 800),
+            vec![],
+        );
+        assert_eq!(
+            plan_report(&report),
+            "Plan: disc 1 (new disc, BD_R) — 1 files, 0.0 GB, will FINALIZE\n\
+             ~1 more files (~1 more discs) remain after this one."
+        );
+    }
+
+    /// `fixtures/run-manifest.txt` step 10 — a deletion rides along.
+    #[test]
+    fn a_plan_with_a_deletion_renders_exactly_as_the_scala_build_printed_it() {
+        let report = plan_of(
+            PlannedDisc {
+                ordinal: 3,
+                is_new: true,
+                will_finalize: false,
+                files: vec![scanned("a.bin", 800)],
+                prior_used_bytes: 0,
+                usable_bytes: 1_000,
+            },
+            vec!["b.bin"],
+            (0, 0, 0),
+            vec![],
+        );
+        assert_eq!(
+            plan_report(&report),
+            "Plan: disc 3 (new disc, BD_R) — 1 files, 0.0 GB, left OPEN\n\
+             This disc completes the set.\n\
+             Deletions: 1"
+        );
+    }
+
+    /// `fixtures/run-manifest.txt` step 18 — `plan --finalize` on a scan that
+    /// found nothing.
+    #[test]
+    fn sealing_an_empty_disc_renders_exactly_as_the_scala_build_printed_it() {
+        let report = plan_of(
+            PlannedDisc {
+                ordinal: 4,
+                is_new: false,
+                will_finalize: true,
+                files: vec![],
+                prior_used_bytes: 800,
+                usable_bytes: 1_000,
+            },
+            vec![],
+            (0, 0, 0),
+            vec![],
+        );
+        assert_eq!(
+            plan_report(&report),
+            "Plan: finalize disc 4 (seal; no new files)."
+        );
+    }
+
+    #[test]
+    fn a_plan_with_nothing_to_do_says_so() {
+        let report = plan_of(
+            PlannedDisc {
+                ordinal: 1,
+                is_new: false,
+                will_finalize: false,
+                files: vec![],
+                prior_used_bytes: 0,
+                usable_bytes: 25_000_000_000,
+            },
+            vec![],
+            (0, 0, 0),
+            vec![],
+        );
+        assert_eq!(plan_report(&report), "Nothing to burn: no changes to plan.");
+    }
+
+    #[test]
+    fn appending_to_an_open_disc_names_the_disc_and_says_left_open() {
+        let report = plan_of(
+            PlannedDisc {
+                ordinal: 2,
+                is_new: false,
+                will_finalize: false,
+                files: vec![scanned("a.bin", 3_200_000_000)],
+                prior_used_bytes: 10_000_000_000,
+                usable_bytes: 25_000_000_000,
+            },
+            vec![],
+            (0, 0, 0),
+            vec![],
+        );
+        assert_eq!(
+            plan_report(&report),
+            "Plan: disc 2 (appending to open disc 2, BD_R) — 1 files, 13.2 GB, left OPEN\n\
+             This disc completes the set."
+        );
+    }
+
+    #[test]
+    fn oversized_files_are_listed_under_the_summary() {
+        let report = plan_of(
+            PlannedDisc {
+                ordinal: 1,
+                is_new: true,
+                will_finalize: false,
+                files: vec![scanned("small.bin", 10)],
+                prior_used_bytes: 0,
+                usable_bytes: 25_000_000_000,
+            },
+            vec![],
+            (0, 0, 0),
+            vec![scanned("huge.bin", 99_000_000_000)],
+        );
+        assert_eq!(
+            plan_report(&report),
+            "Plan: disc 1 (new disc, BD_R) — 1 files, 0.0 GB, left OPEN\n\
+             This disc completes the set.\n\
+             Oversized (cannot be placed):\n\
+             \x20 huge.bin  99.0 GB"
+        );
+    }
+
+    /// An oversize-only plan still prints the summary block rather than
+    /// "nothing to burn": the disc is empty but there is something to say.
+    #[test]
+    fn an_oversize_only_plan_is_not_nothing_to_burn() {
+        let report = plan_of(
+            PlannedDisc {
+                ordinal: 1,
+                is_new: true,
+                will_finalize: false,
+                files: vec![],
+                prior_used_bytes: 0,
+                usable_bytes: 1_000,
+            },
+            vec![],
+            (0, 0, 0),
+            vec![scanned("huge.bin", 5_000)],
+        );
+        assert!(plan_report(&report).starts_with("Plan: disc 1 (new disc, BD_R) — 0 files"));
     }
 }

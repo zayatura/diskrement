@@ -2534,34 +2534,96 @@ git push origin --delete feat/rewrite-p4 2>/dev/null || true
 
 ## Phase exit bar (spec §9, P4 row)
 
-- [ ] **Staged JSON semantically identical to the fixture's** — Task 6's
+- [x] **Staged JSON semantically identical to the fixture's** — Task 6's
   `the_staged_plan_json_is_semantically_identical_to_the_fixtures` compares
   parsed values against both harvested `plan.json` files, and the two
   re-planning tests compare the whole `PlanReport` structurally.
-- [ ] Planner wiring ported: diff → plan → one-disc-per-cycle reduction,
+- [x] Planner wiring ported: diff → plan → one-disc-per-cycle reduction,
   including the empty-open-disc skip (Tasks 4, 5, 6).
-- [ ] Staged store complete: `plan.json` write/read plus `clear`, with the
+- [x] Staged store complete: `plan.json` write/read plus `clear`, with the
   frozen field spellings pinned (Tasks 1, 2).
-- [ ] `plan --finalize` seals a non-full disc, and seals an empty open disc
+- [x] `plan --finalize` seals a non-full disc, and seals an empty open disc
   after a no-op scan (Tasks 4, 7, 9).
-- [ ] Oversize surfaced by `plan` and rendered (Tasks 4, 7, 9); the
+- [x] Oversize surfaced by `plan` and rendered (Tasks 4, 7, 9); the
   `OversizedFiles` error and its exit 3 pinned for P5's `burn` (Task 3).
-- [ ] `StalePlan` message pinned, including the negative assertion that it
+- [x] `StalePlan` message pinned, including the negative assertion that it
   never says "reset" (Task 3).
-- [ ] `DISKREMENT_DISC_BYTES` may only shrink, and stays out of `--help`
+- [x] `DISKREMENT_DISC_BYTES` may only shrink, and stays out of `--help`
   (Tasks 4, 9).
-- [ ] Render matches `run-manifest.txt` steps 03, 10 and 18 byte for byte
+- [x] Render matches `run-manifest.txt` steps 03, 10 and 18 byte for byte
   (Task 7).
-- [ ] The differential suite passes in all three modes for every scenario
+- [x] The differential suite passes in all three modes for every scenario
   reachable with `init`/`scan`/`status`/`plan`: 6 compared, 1 skipped loudly
   (Task 10).
-- [ ] Routine suite, clippy `-D warnings`, fmt clean; the Scala tree and
+- [x] Routine suite, clippy `-D warnings`, fmt clean; the Scala tree and
   `fixtures/` untouched.
-- [ ] Execution deviations appended below as they occur.
+- [x] Execution deviations appended below as they occur.
 
 ## Execution deviations
 
-(appended during execution)
+All eleven tasks executed on `feat/rewrite-p4` (commits `98059a7`..`c31b867`),
+each with its own task review; the phase exit bar above is met, with two
+count adjustments recorded below. Deviations, in commit order:
+
+1. **Rustfmt reflows (Tasks 3, 4, 5, 6, 8, 9, 10, cosmetic).** Several of the
+   plan's verbatim code blocks were not `cargo fmt --check`-clean at the
+   repo's line width; `cargo fmt` re-wrapped the affected lines. Token- and
+   string-identical; every occurrence disclosed in the task's report.
+2. **Task 5 — `tiny_project_init` margin adapted: 99.9999998% → 99.999%.**
+   The brief's helper assumed Scala's exact (`BigDecimal`) margin semantics
+   ("~50 usable bytes"), but the P1-landed `Capacity::from_disc_type`
+   quantises the margin to thousandths of a percent, so 99.9999998% rounds
+   to a full 100% margin — **0 usable bytes** — and no margin value can
+   produce a usable capacity in 1..249_999 bytes on BD-R (quantisation
+   granularity is 250_000 bytes). The spill/oversize unit tests could never
+   pass as written. Adapted to margin 99.999% → exactly 250_000 usable
+   bytes, spill files 2×200_000, oversize file 300_000; the assertions pin
+   the same behaviors (spill seals with 1 file, remaining 1/1/200_000;
+   oversize surfaced), and the values are valid under both current and
+   exact-semantics core. Core untouched — the P1 quantisation decision
+   stands (its doc comment argues it is far below anything meaningful for
+   `--margin` users, which is true).
+3. **Task 6 — `sha256sum -c` needs CWD=`fixtures/`.** The manifest's entries
+   are fixtures-relative, so the plan's literal
+   `sha256sum -c fixtures/SHA256SUMS --quiet` from the repo root cannot pass
+   for anyone. Run as `(cd fixtures && sha256sum -c SHA256SUMS --quiet)`.
+   Plan-command typo, not a code issue.
+4. **Task 8 — the companion comment above `plan_report` went with the
+   `#[allow(dead_code)]`.** The brief's letter said to delete only the
+   attribute, but the comment ("consumed by `main` in the next task") would
+   have been false after consumption.
+5. **Task 10 — an extra fix commit before the scenario commit:
+   `db0c23e` "fix(difftest): pin source mtimes so a scenario's environment
+   is deterministic".** The deterministic-self-check flaked (1-in-6):
+   back-to-back `write` steps whose kernel mtimes straddle a coarse-clock
+   tick flip the instant-ordinal equality classes between runs, so two runs
+   of the same scenario could disagree. The runner now pins each written
+   file's mtime from the write index (whole-second base, per-file distinct;
+   `modify` builds on `Step::Write`, so a superseding write still sorts
+   later, keeping the fingerprint cache's fast path honest). No
+   normalization rule was widened; the frozen corpus never sees this (it was
+   harvested once). Adds one unit test, so the routine bar settles at
+   **278 passed** rather than the planned 277.
+6. **Final differential counts (all three modes):** bootstrap 7 scenarios
+   reproduced identically; all-rust 6 compared / 1 skipped; interleaved
+   6 compared / 1 skipped (harvest-replay skip reason printed). clap and
+   zio-cli agreed on the exit code for the bogus `--disc-type ZIP` step —
+   no exit-ladder finding.
+
+Deferred notes for later phases (discovered here, deliberately not acted on):
+
+- **P5:** `burn_written_rows`'s table list is exhaustive only once `burn`
+  exists — revisit when the burn task lands.
+- **P5 plan doc:** the live harness pins source mtimes while the frozen
+  corpus carries harvest-time values; the instant-ordinals normalization
+  erases the difference (only equality relations survive), but a P5
+  scenario touching both worlds should know the absolute values diverge.
+- **P9 parity checklist:** (a) `resolve_disc_bytes` accepts values in
+  `(Long::MAX, u64::MAX]` where Scala's `toLongOption` returns `None` —
+  unreachable through `effective_capacity`, which ignores anything at or
+  above the real capacity. (b) A catalog carrying a margin with more than
+  three decimal places would plan different usable capacities in Scala and
+  Rust (exact vs quantised); no scenario or fixture does.
 
 ## Spec coverage
 

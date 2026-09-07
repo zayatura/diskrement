@@ -126,3 +126,172 @@ mod p3 {
             .stderr(contains("error:"));
     }
 }
+
+mod p4 {
+    use super::*;
+
+    fn cmd() -> Command {
+        Command::cargo_bin("diskrement").expect("binary builds")
+    }
+
+    /// A scratch project with `sizes` written into the source tree, already
+    /// init'd and scanned. Returns the temp dir, the catalog path and the work
+    /// dir.
+    fn scanned_project(
+        sizes: &[(&str, usize)],
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for (name, size) in sizes {
+            std::fs::write(src.join(name), vec![b'x'; *size]).unwrap();
+        }
+        let catalog = root.join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let work = root.join("work");
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["init", "p", "--source"])
+            .arg(&src)
+            .arg("--work-dir")
+            .arg(&work)
+            .assert()
+            .success();
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["scan", "p"])
+            .assert()
+            .success();
+        (dir, catalog, work)
+    }
+
+    #[test]
+    fn plan_stages_a_plan_and_prints_the_summary() {
+        let (_dir, catalog, work) = scanned_project(&[("a.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .assert()
+            .success()
+            .stdout(
+                contains("Plan: disc 1 (new disc, BD_R) —")
+                    .and(contains("left OPEN"))
+                    .and(contains("This disc completes the set.")),
+            );
+        assert!(work.join("staged/plan.json").is_file());
+        // The staged scan survives: `plan` does not consume it.
+        assert!(work.join("staged/scan.json").is_file());
+    }
+
+    #[test]
+    fn plan_finalize_seals_the_disc() {
+        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p", "--finalize"])
+            .assert()
+            .success()
+            .stdout(contains("will FINALIZE"));
+    }
+
+    #[test]
+    fn plan_disc_type_overrides_the_projects_default() {
+        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p", "--disc-type", "DVD"])
+            .assert()
+            .success()
+            .stdout(contains("(new disc, DVD)"));
+    }
+
+    /// The shrink-only capacity override, end to end. Two 800-byte files
+    /// against a 1000-byte disc: the plan spills and seals.
+    #[test]
+    fn the_disc_bytes_override_shrinks_capacity_and_spills() {
+        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800), ("b.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .env("DISKREMENT_DISC_BYTES", "1000")
+            .assert()
+            .success()
+            .stdout(contains("will FINALIZE").and(contains(
+                "~1 more files (~1 more discs) remain after this one.",
+            )));
+    }
+
+    /// A value at or above the margin-adjusted capacity is ignored, so the
+    /// override can never plan past the safety margin.
+    #[test]
+    fn the_disc_bytes_override_never_grows_capacity() {
+        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800), ("b.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .env("DISKREMENT_DISC_BYTES", "999999999999")
+            .assert()
+            .success()
+            .stdout(contains("This disc completes the set."));
+    }
+
+    #[test]
+    fn an_oversized_file_is_listed_but_the_plan_still_succeeds() {
+        let (_dir, catalog, _work) = scanned_project(&[("big.bin", 800), ("small.bin", 100)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .env("DISKREMENT_DISC_BYTES", "500")
+            .assert()
+            .success()
+            .stdout(contains("Oversized (cannot be placed):").and(contains("big.bin")));
+    }
+
+    #[test]
+    fn plan_without_a_staged_scan_exits_2_and_says_to_run_scan() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let catalog = root.join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["init", "p", "--source"])
+            .arg(root.join("src"))
+            .arg("--work-dir")
+            .arg(root.join("work"))
+            .assert()
+            .success();
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .assert()
+            .code(2)
+            .stderr(contains("no staged scan for p (run scan)"));
+    }
+
+    #[test]
+    fn plan_on_an_unknown_project_exits_2() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let catalog = dir.path().join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "nosuch"])
+            .assert()
+            .code(2)
+            .stderr(contains("project not found: nosuch"));
+    }
+}

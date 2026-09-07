@@ -24,3 +24,28 @@ pub struct StatusReport {
     pub total_current_files: usize,
     pub last_burn_at: Option<DateTime<Utc>>,
 }
+
+use diskrement_core::{DiscType, PlannedDisc, RelPath, ScannedFile};
+
+/// How much outstanding change did NOT fit on the disc planned this cycle
+/// (`Pipeline.scala`'s `RemainingEstimate`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemainingEstimate {
+    pub more_discs: usize,
+    pub more_files: usize,
+    pub more_bytes: u64,
+}
+
+/// The single disc this cycle will write, plus what spills to later cycles
+/// (`Pipeline.scala`'s `PlanReport`).
+///
+/// `tombstones` are the whole scan's deletions rather than this disc's: on a
+/// cross-cycle spill they attach to the session actually written this cycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanReport {
+    pub disc: PlannedDisc,
+    pub disc_type: DiscType,
+    pub tombstones: Vec<RelPath>,
+    pub remaining: RemainingEstimate,
+    pub oversized: Vec<ScannedFile>,
+}

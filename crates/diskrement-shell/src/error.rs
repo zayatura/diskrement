@@ -62,6 +62,23 @@ pub(crate) fn is_unique_violation(e: &rusqlite::Error) -> bool {
 pub enum PipelineError {
     #[error("project not found: {0}")]
     ProjectNotFound(String),
+    #[error("no staged scan for {0} (run scan)")]
+    NoStagedScan(String),
+    #[error("no staged plan for {0} (run plan)")]
+    NoStagedPlan(String),
+    /// `plan` alone is the whole recovery: the staged scan and the snapshot
+    /// both survive, and `plan` re-reads the view and the disc states. Never
+    /// advise `reset` — it deletes `workDir/staging`, the staged-disc
+    /// verifier's evidence.
+    #[error("staged plan is stale: {0} (re-run plan)")]
+    StalePlan(String),
+    /// Surfaced by `plan` in its report and refused by `burn` (P5): the
+    /// two-stage oversize check.
+    #[error(
+        "oversized files cannot be placed: {}",
+        .0.iter().map(diskrement_core::RelPath::as_str).collect::<Vec<_>>().join(", ")
+    )]
+    OversizedFiles(Vec<diskrement_core::RelPath>),
     // The field is `src`, not `source`: thiserror reserves a field named
     // `source` for the error chain and would demand `PathBuf: Error`.
     #[error("work dir {work} is not on the same filesystem as source {src}")]
@@ -83,8 +100,13 @@ pub enum PipelineError {
 impl PipelineError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            PipelineError::ProjectNotFound(_) => 2,
-            PipelineError::NotSameFilesystem { .. } | PipelineError::NotCowCapable { .. } => 3,
+            PipelineError::ProjectNotFound(_)
+            | PipelineError::NoStagedScan(_)
+            | PipelineError::NoStagedPlan(_)
+            | PipelineError::StalePlan(_) => 2,
+            PipelineError::NotSameFilesystem { .. }
+            | PipelineError::NotCowCapable { .. }
+            | PipelineError::OversizedFiles(_) => 3,
             PipelineError::Failed(_) => 5,
         }
     }
@@ -93,6 +115,7 @@ impl PipelineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diskrement_core::RelPath;
 
     #[test]
     fn exit_codes_are_the_contract_for_the_p3_variants() {
@@ -145,5 +168,53 @@ mod tests {
             PipelineError::Failed("project already exists: p".into()).to_string(),
             "internal error: project already exists: p (this is a bug)"
         );
+    }
+
+    #[test]
+    fn staged_state_errors_are_exit_2_and_oversize_is_exit_3() {
+        assert_eq!(PipelineError::NoStagedScan("p".into()).exit_code(), 2);
+        assert_eq!(PipelineError::NoStagedPlan("p".into()).exit_code(), 2);
+        assert_eq!(PipelineError::StalePlan("d".into()).exit_code(), 2);
+        assert_eq!(
+            PipelineError::OversizedFiles(vec![RelPath("huge.bin".into())]).exit_code(),
+            3
+        );
+    }
+
+    #[test]
+    fn the_staged_state_messages_match_the_scala_render_verbatim() {
+        assert_eq!(
+            PipelineError::NoStagedScan("photos".into()).to_string(),
+            "no staged scan for photos (run scan)"
+        );
+        assert_eq!(
+            PipelineError::NoStagedPlan("photos".into()).to_string(),
+            "no staged plan for photos (run plan)"
+        );
+        assert_eq!(
+            PipelineError::OversizedFiles(vec![
+                RelPath("huge.bin".into()),
+                RelPath("also/huge.bin".into())
+            ])
+            .to_string(),
+            "oversized files cannot be placed: huge.bin, also/huge.bin"
+        );
+    }
+
+    /// The one assertion `ExitMappingSpec` makes negatively: `reset` deletes
+    /// `workDir/staging`, which is the staged-disc verifier's evidence, so the
+    /// advertised recovery from a stale plan is `plan` and only `plan`.
+    #[test]
+    fn stale_plan_advises_re_running_plan_and_never_mentions_reset() {
+        let msg =
+            PipelineError::StalePlan("disc 3 was marked dead after this plan was staged".into())
+                .to_string();
+        assert_eq!(
+            msg,
+            "staged plan is stale: disc 3 was marked dead after this plan was \
+             staged (re-run plan)"
+        );
+        assert!(msg.contains("re-run plan"), "{msg}");
+        assert!(!msg.contains("reset"), "{msg}");
     }
 }
