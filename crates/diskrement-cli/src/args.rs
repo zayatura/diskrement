@@ -74,7 +74,7 @@ pub enum Command {
     /// Burn the staged plan (with confirmation).
     Burn {
         name: String,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, short = 'y', default_value_t = false)]
         yes: bool,
     },
 }
@@ -255,5 +255,26 @@ mod tests {
     #[test]
     fn plan_requires_a_project_name() {
         assert!(Cli::try_parse_from(["diskrement", "plan"]).is_err());
+    }
+
+    #[test]
+    fn burn_yes_accepts_the_y_alias_exactly_as_the_long_form() {
+        for argv in [
+            vec!["diskrement", "burn", "p", "--yes"],
+            vec!["diskrement", "burn", "p", "-y"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Command::Burn { name, yes } = cli.command else {
+                panic!("not burn")
+            };
+            assert_eq!(name, "p");
+            assert!(yes);
+        }
+        assert!(!matches!(
+            Cli::try_parse_from(["diskrement", "burn", "p"])
+                .unwrap()
+                .command,
+            Command::Burn { yes: true, .. }
+        ));
     }
 }

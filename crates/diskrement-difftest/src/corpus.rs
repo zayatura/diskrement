@@ -183,8 +183,8 @@ pub fn burn_basics() -> Scenario {
             cmd("plan p", &["plan", "p"]),
             cmd("burn p --yes", &["burn", "p", "--yes"]),
             cmd("status p", &["status", "p"]),
-            // Nothing changed, so the next cycle has nothing to plan — and the
-            // burn that follows must fail identically on both sides.
+            // Nothing changed, so this second cycle has nothing to plan: the
+            // "Nothing to burn" answer must agree on both sides.
             cmd("scan p", &["scan", "p"]),
             cmd("plan p", &["plan", "p"]),
         ],

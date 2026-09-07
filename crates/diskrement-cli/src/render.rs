@@ -75,7 +75,6 @@ pub fn plan_report(p: &PlanReport) -> String {
 }
 
 /// `f"${bytes / 1.0e9}%.1f GB"` (`Render.gb`).
-#[allow(dead_code)]
 pub fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1.0e9)
 }
@@ -102,7 +101,6 @@ pub fn burn_report(r: &BurnReport) -> String {
     )
 }
 
-#[allow(dead_code)]
 pub fn status_report(p: &Project, r: &StatusReport) -> String {
     // Two spaces after the project name; margin is %.1f plus a literal %.
     let mut out = format!(
