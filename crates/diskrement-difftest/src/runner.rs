@@ -34,6 +34,7 @@ pub const PROJECT: &str = "p";
 /// otherwise block that scenario forever.
 pub const RUST_IMPLEMENTED: &[&str] = &[
     "burn",
+    "disc",
     "frobnicate",
     "history",
     "init",
