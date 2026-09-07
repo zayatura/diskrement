@@ -74,6 +74,18 @@ pub enum PipelineError {
     /// verifier's evidence.
     #[error("staged plan is stale: {0} (re-run plan)")]
     StalePlan(String),
+    /// A `--disc` ordinal that names no disc in this project.
+    ///
+    /// The ordinal is `i64` because zio-cli let a negative value through to
+    /// the domain, and the exit ladder — not clap's argument parser — is the
+    /// contract for what happens next.
+    #[error("no disc with ordinal {0}")]
+    UnknownDisc(i64),
+    /// A `--disc` ordinal that names a disc marked dead. A *sweep* skips dead
+    /// discs quietly; naming one is an assertion of intent, and answering it
+    /// with a reassuring exit 0 would be a lie.
+    #[error("disc {0} is marked dead")]
+    DiscIsDead(i64),
     /// Surfaced by `plan` in its report and refused by `burn` (P5): the
     /// two-stage oversize check.
     #[error(
@@ -109,6 +121,8 @@ impl PipelineError {
             | PipelineError::NoStagedScan(_)
             | PipelineError::NoStagedPlan(_)
             | PipelineError::SnapshotMissing(_)
+            | PipelineError::UnknownDisc(_)
+            | PipelineError::DiscIsDead(_)
             | PipelineError::StalePlan(_) => 2,
             PipelineError::NotSameFilesystem { .. }
             | PipelineError::NotCowCapable { .. }
@@ -289,5 +303,29 @@ mod tests {
             PipelineError::Burn(BurnError::Aborted).to_string(),
             "aborted by operator"
         );
+    }
+
+    #[test]
+    fn disc_state_errors_are_exit_2_with_their_messages() {
+        assert_eq!(PipelineError::UnknownDisc(9).exit_code(), 2);
+        assert_eq!(PipelineError::DiscIsDead(3).exit_code(), 2);
+        assert_eq!(
+            PipelineError::UnknownDisc(99).to_string(),
+            "no disc with ordinal 99"
+        );
+        assert_eq!(
+            PipelineError::DiscIsDead(3).to_string(),
+            "disc 3 is marked dead"
+        );
+    }
+
+    /// zio-cli let a negative `--disc` reach the domain, so the contract
+    /// answer is exit 2 with the ordinal echoed back — not an argument error.
+    /// Verified against the staged Scala launcher.
+    #[test]
+    fn a_negative_ordinal_is_a_lookup_failure_not_an_argument_error() {
+        let e = PipelineError::UnknownDisc(-1);
+        assert_eq!(e.to_string(), "no disc with ordinal -1");
+        assert_eq!(e.exit_code(), 2);
     }
 }
