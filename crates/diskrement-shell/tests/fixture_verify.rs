@@ -119,7 +119,8 @@ fn a_corrupted_corpus_payload_is_caught_and_blocks_the_transition() {
 }
 
 /// `DEAD` is derived from `disc_event`, and the corpus's disc 3 proves it: the
-/// `disc.status` column still reads OPEN there. A sweep skips it silently.
+/// `disc.status` column still reads OPEN there. A sweep skips it silently and
+/// must leave that column exactly as it found it.
 #[test]
 fn a_sweep_skips_a_dead_disc_without_mentioning_it() {
     let mut env = env("catalog/08-after-mark-dead.sqlite", "work/02-after-plan3");
@@ -129,6 +130,17 @@ fn a_sweep_skips_a_dead_disc_without_mentioning_it() {
         vec![1, 2],
         "disc 3 is dead and must not appear"
     );
+
+    // The stored column, not the derived state: `read_disc_states` answers DEAD
+    // from `disc_event` no matter what the row says, so it could not catch an
+    // illegal update-in-place here.
+    let conn = env.catalog.raw_connection_for_tests();
+    let status: String = conn
+        .query_row("select status from disc where ordinal = 3", [], |r| {
+            r.get(0)
+        })
+        .expect("the dead disc's row is still there");
+    assert_eq!(status, "OPEN", "verify must touch no disc row");
 }
 
 /// Naming a dead disc is an assertion of intent about it, and gets an answer.
@@ -141,6 +153,7 @@ fn naming_the_dead_disc_is_an_error_rather_than_a_silent_success() {
     assert_eq!(err.exit_code(), 2);
 }
 
+/// Naming an ordinal the corpus never had is a lookup failure, not a silent exit 0.
 #[test]
 fn naming_an_ordinal_the_corpus_never_had_is_unknown_disc() {
     let mut env = env("catalog/05-after-burn2.sqlite", "work/02-after-plan3");

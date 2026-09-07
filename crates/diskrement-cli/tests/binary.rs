@@ -304,6 +304,7 @@ mod p5 {
         // Never touch a real drive from a test.
         c.env("DISKREMENT_BURNER", "simulated");
         c.env("DISKREMENT_HASH_PARALLELISM", "2");
+        c.env_remove("DISKREMENT_DISC_BYTES");
         c
     }
 
@@ -496,6 +497,7 @@ mod p6 {
         let mut c = Command::cargo_bin("diskrement").expect("binary builds");
         c.env("DISKREMENT_BURNER", "simulated");
         c.env_remove("DISKREMENT_DEVICE");
+        c.env_remove("DISKREMENT_DISC_BYTES");
         c
     }
 
