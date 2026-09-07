@@ -19,8 +19,8 @@ use diskrement_core::{
 use crate::burn::verifier::{DiscExpectation, Verifier};
 use crate::burn::{json, Burner, DiscIdentity, DiscImage, DiscMetadata};
 use crate::catalog::model::{
-    CatalogUpdate, DiscWrite, FileFingerprint, FileWrite, Project, ProjectId, ProjectInit, Session,
-    SessionState, SessionWrite,
+    CatalogUpdate, DiscWrite, FileFingerprint, FileHistoryEntry, FileWrite, Project, ProjectId,
+    ProjectInit, Session, SessionState, SessionWrite,
 };
 use crate::catalog::Catalog;
 use crate::error::PipelineError;
@@ -494,6 +494,50 @@ impl<'a> Pipeline<'a> {
             mismatches: outcome.mismatches,
             skipped: outcome.skipped,
         })
+    }
+
+    /// `history`: every version of one path, oldest first
+    /// (`PipelineLive.history`). Catalog reads only.
+    pub fn history(
+        &self,
+        name: &str,
+        rel_path: &RelPath,
+    ) -> Result<Vec<FileHistoryEntry>, PipelineError> {
+        let p = self.project(name)?;
+        self.catalog
+            .file_history(p.id, rel_path)
+            .map_err(Self::failed)
+    }
+
+    /// `reset`: discard the cycle in progress (`PipelineLive.reset`).
+    ///
+    /// Four deletions, in order: the staged scan and plan, the temporary burn
+    /// catalog, the staging trees, and the snapshot. The live catalog and the
+    /// fingerprint sidecar are deliberately untouched — a reset discards a
+    /// cycle, not history.
+    ///
+    /// Destroying `staging/` is why a `StalePlan` never advises `reset`: those
+    /// trees are the staged verifier's only evidence.
+    pub fn reset(&self, name: &str) -> Result<(), PipelineError> {
+        self.project(name)?;
+        staged::clear(&self.paths.work_dir).map_err(Self::failed)?;
+
+        let burn_catalog = self.paths.work_dir.join("burn-catalog.sqlite");
+        match std::fs::remove_file(&burn_catalog) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Self::failed(e)),
+        }
+
+        let staging = self.paths.work_dir.join("staging");
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging).map_err(Self::failed)?;
+        }
+
+        snapshot::release(&SnapshotHandle {
+            root: self.paths.work_dir.join("snapshot"),
+        });
+        Ok(())
     }
 }
 
@@ -1498,5 +1542,125 @@ mod verify_tests {
         assert!(!reports[0].skipped);
         assert!(reports[0].mismatches.is_empty());
         assert_eq!(verified_discs(&env), vec![1]);
+    }
+
+    fn run_reset(env: &mut Env, name: &str) -> Result<(), PipelineError> {
+        let pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &NoopSink,
+        );
+        pipeline.reset(name)
+    }
+
+    #[test]
+    fn reset_clears_the_staged_state_the_staging_trees_and_the_snapshot() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        // A burn already consumed the staged plan and released the snapshot,
+        // so put a cycle-in-progress back on disk for reset to find.
+        std::fs::create_dir_all(env.work.join("snapshot")).unwrap();
+        std::fs::write(env.work.join("snapshot/a.txt"), b"aaa").unwrap();
+        std::fs::write(env.work.join("burn-catalog.sqlite"), b"stale").unwrap();
+        staged::write_scan(&env.work, &[]).unwrap();
+        assert!(env.work.join("staging/disc-1").is_dir());
+
+        run_reset(&mut env, "p").unwrap();
+
+        assert!(staged::read_scan(&env.work).unwrap().is_none());
+        assert!(staged::read_plan(&env.work).unwrap().is_none());
+        assert!(!env.work.join("staged").exists());
+        assert!(!env.work.join("snapshot").exists());
+        assert!(!env.work.join("burn-catalog.sqlite").exists());
+        assert!(!env.work.join("staging").exists(), "staging is destroyed");
+    }
+
+    /// Reset is idempotent: nothing to delete is not an error.
+    #[test]
+    fn resetting_an_already_clean_work_dir_succeeds() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        run_reset(&mut env, "p").unwrap();
+        run_reset(&mut env, "p").unwrap();
+    }
+
+    /// Reset discards a cycle, not history: the catalog is untouched.
+    #[test]
+    fn reset_leaves_the_catalog_alone() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        run_reset(&mut env, "p").unwrap();
+        let sessions = env
+            .catalog
+            .sessions_by_state(ProjectId(1), SessionState::Burned)
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].disc_ordinal, 1);
+    }
+
+    #[test]
+    fn reset_on_an_unknown_project_is_project_not_found() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        let err = run_reset(&mut env, "nosuch").unwrap_err();
+        assert!(matches!(err, PipelineError::ProjectNotFound(_)), "{err}");
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn history_reports_the_burned_version_of_a_path() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        let pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &NoopSink,
+        );
+        let entries = pipeline
+            .history("p", &RelPath("a.txt".to_string()))
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].disc_ordinal, 1);
+        assert_eq!(entries[0].session_ordinal, 1);
+        assert_eq!(entries[0].size_bytes, 3);
+        assert_eq!(
+            entries[0].status,
+            crate::catalog::model::VersionStatus::Current
+        );
+    }
+
+    #[test]
+    fn history_of_an_unknown_path_is_empty_not_an_error() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        let pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &NoopSink,
+        );
+        assert!(pipeline
+            .history("p", &RelPath("nope.txt".to_string()))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn history_on_an_unknown_project_is_project_not_found() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        let pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &NoopSink,
+        );
+        let err = pipeline
+            .history("nosuch", &RelPath("a.txt".to_string()))
+            .unwrap_err();
+        assert!(matches!(err, PipelineError::ProjectNotFound(_)), "{err}");
     }
 }
