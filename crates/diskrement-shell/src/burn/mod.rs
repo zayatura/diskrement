@@ -9,6 +9,7 @@
 pub mod cmd;
 pub mod json;
 pub mod media;
+pub mod reader;
 pub mod simulated;
 pub mod snapshot_writer;
 pub mod stager;
