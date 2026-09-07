@@ -86,6 +86,15 @@ pub enum PipelineError {
     /// with a reassuring exit 0 would be a lie.
     #[error("disc {0} is marked dead")]
     DiscIsDead(i64),
+    /// A `disc mark-dead` naming a disc that already carries a `MARKED_DEAD`
+    /// event.
+    ///
+    /// The ordinal is `u32`, not the `i64` `UnknownDisc` and `DiscIsDead`
+    /// carry: `disc mark-dead`'s ordinal is validated in the *parser*
+    /// (`Commands.scala`), so a non-positive value never reaches the domain.
+    /// `verify --disc`'s does, which is why that one stays signed.
+    #[error("disc {0} is already marked dead")]
+    DiscAlreadyDead(u32),
     /// Surfaced by `plan` in its report and refused by `burn` (P5): the
     /// two-stage oversize check.
     #[error(
@@ -123,6 +132,7 @@ impl PipelineError {
             | PipelineError::SnapshotMissing(_)
             | PipelineError::UnknownDisc(_)
             | PipelineError::DiscIsDead(_)
+            | PipelineError::DiscAlreadyDead(_)
             | PipelineError::StalePlan(_) => 2,
             PipelineError::NotSameFilesystem { .. }
             | PipelineError::NotCowCapable { .. }
@@ -327,5 +337,46 @@ mod tests {
         let e = PipelineError::UnknownDisc(-1);
         assert_eq!(e.to_string(), "no disc with ordinal -1");
         assert_eq!(e.exit_code(), 2);
+    }
+
+    /// A second `disc mark-dead` on the same disc. The catalog would refuse it
+    /// too, but as `IllegalStatusTransition` — which travels as `Failed` and
+    /// exits 5. The Scala build answers 2, so the pipeline pre-checks and
+    /// raises this instead.
+    #[test]
+    fn marking_a_dead_disc_again_is_exit_2_with_its_own_message() {
+        assert_eq!(PipelineError::DiscAlreadyDead(1).exit_code(), 2);
+        assert_eq!(
+            PipelineError::DiscAlreadyDead(1).to_string(),
+            "disc 1 is already marked dead"
+        );
+    }
+
+    /// Three exit-2 disc errors, three distinct sentences. `DiscIsDead` is
+    /// what a *named* `verify` target answers; `DiscAlreadyDead` is what a
+    /// repeated mark-dead answers; `UnknownDisc` is neither. Collapsing any
+    /// two would lose the operator's only clue about which mistake they made.
+    #[test]
+    fn the_three_disc_errors_read_differently_at_the_same_exit_code() {
+        let messages = [
+            PipelineError::UnknownDisc(3).to_string(),
+            PipelineError::DiscIsDead(3).to_string(),
+            PipelineError::DiscAlreadyDead(3).to_string(),
+        ];
+        assert_eq!(
+            messages,
+            [
+                "no disc with ordinal 3",
+                "disc 3 is marked dead",
+                "disc 3 is already marked dead",
+            ]
+        );
+        assert!([
+            PipelineError::UnknownDisc(3).exit_code(),
+            PipelineError::DiscIsDead(3).exit_code(),
+            PipelineError::DiscAlreadyDead(3).exit_code(),
+        ]
+        .iter()
+        .all(|c| *c == 2));
     }
 }
