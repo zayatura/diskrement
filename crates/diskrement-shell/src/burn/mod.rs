@@ -169,15 +169,18 @@ pub enum BurnError {
     Aborted,
 }
 
-/// The burn backends. One variant now; P8 adds `Real`.
+/// The burn backends. `--burner real|simulated` selects between them, and the
+/// verifier arm moves with it (spec §5.2).
 pub enum Burner<'a> {
     Simulated(simulated::SimulatedBurner<'a>),
+    Real(xorriso::burner::XorrisoBurner<'a>),
 }
 
 impl Burner<'_> {
     pub fn burn(&self, image: &DiscImage) -> Result<BurnResult, BurnError> {
         match self {
             Burner::Simulated(b) => b.burn(image),
+            Burner::Real(b) => b.burn(image),
         }
     }
 }
