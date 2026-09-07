@@ -1713,7 +1713,7 @@ mod mark_dead_tests {
     use crate::burn::simulated::SimulatedBurner;
     use crate::burn::verifier::{StagingVerifier, Verifier};
     use crate::burn::Burner;
-    use crate::catalog::model::ProjectInit;
+    use crate::catalog::model::{ProjectInit, VersionStatus};
     use crate::progress::NoopSink;
 
     struct Env {
@@ -1822,7 +1822,6 @@ mod mark_dead_tests {
         pipeline.mark_dead("p", ordinal, at(500))
     }
 
-    #[allow(dead_code)]
     fn run_plan(env: &mut Env) -> Result<PlanReport, PipelineError> {
         let work = env.work.clone();
         let scan_cache = env.scan_cache.clone();
@@ -1837,7 +1836,6 @@ mod mark_dead_tests {
         pipeline.plan("p", None, false)
     }
 
-    #[allow(dead_code)]
     fn run_verify(env: &mut Env, disc: Option<i64>) -> Result<Vec<VerifyReport>, PipelineError> {
         let work = env.work.clone();
         let scan_cache = env.scan_cache.clone();
@@ -1941,6 +1939,129 @@ mod mark_dead_tests {
             derived.iter().find(|s| s.ordinal == 1).map(|s| s.status),
             Some(DiscStatus::Dead),
             "and the derived read must still say DEAD"
+        );
+    }
+
+    /// The whole coaster workflow in one test (`PipelineMarkDeadSpec`'s first
+    /// case). Disc 1 takes two sessions, so it holds one superseded version
+    /// (b@1) and two current ones (a@1, b@2) — one of each casualty class.
+    #[test]
+    fn a_dead_discs_live_files_re_plan_onto_a_fresh_disc() {
+        let mut e = env();
+        cycle(&mut e, &[("a.txt", b"aaa"), ("b.txt", b"bbb")], at(10));
+        // A second session on the same open disc supersedes b.txt in place.
+        cycle(&mut e, &[("a.txt", b"aaa"), ("b.txt", b"bbbb")], at(20));
+
+        let report = run_mark_dead(&mut e, 1).expect("mark-dead succeeds");
+        assert_eq!(report.disc_ordinal, 1);
+        assert_eq!(
+            report
+                .lost
+                .iter()
+                .map(|l| (l.rel_path.as_str(), l.session_ordinal))
+                .collect::<Vec<_>>(),
+            vec![("b.txt", 1)],
+            "only the superseded version is permanently gone"
+        );
+        assert_eq!(
+            report
+                .reburn
+                .iter()
+                .map(|r| r.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"],
+            "both current versions re-queue, ordered by path"
+        );
+
+        // The disc reads DEAD and is no longer the open disc.
+        let status = {
+            let work = e.work.clone();
+            let scan_cache = e.scan_cache.clone();
+            let pipeline = Pipeline::new(
+                &mut e.catalog,
+                PipelinePaths {
+                    work_dir: work,
+                    scan_cache,
+                },
+                &NoopSink,
+            );
+            pipeline.status("p").unwrap()
+        };
+        assert_eq!(
+            status
+                .discs
+                .iter()
+                .find(|d| d.ordinal == 1)
+                .map(|d| d.status),
+            Some(DiscStatus::Dead)
+        );
+        assert_eq!(status.open_disc_ordinal, None);
+        assert_eq!(
+            status.total_current_files, 0,
+            "the view drops versions whose only copy is dead"
+        );
+
+        // The recovery cycle plans both live files onto a brand-new disc 2.
+        stage(&e, &[("a.txt", b"aaa"), ("b.txt", b"bbbb")]);
+        let plan = run_plan(&mut e).expect("plan succeeds");
+        assert!(plan.disc.is_new);
+        assert_eq!(plan.disc.ordinal, 2);
+        assert_eq!(
+            plan.disc
+                .files
+                .iter()
+                .map(|f| f.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+
+        cycle(&mut e, &[("a.txt", b"aaa"), ("b.txt", b"bbbb")], at(30));
+
+        // The sweep skips the dead disc silently and checks only disc 2.
+        let reports = run_verify(&mut e, None).expect("verify succeeds");
+        assert_eq!(
+            reports.iter().map(|r| r.disc_ordinal).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(reports
+            .iter()
+            .all(|r| !r.skipped && r.mismatches.is_empty()));
+
+        // Naming the dead disc, though, is an assertion of intent and an error.
+        let named = run_verify(&mut e, Some(1)).unwrap_err();
+        assert!(matches!(named, PipelineError::DiscIsDead(1)), "{named:?}");
+    }
+
+    /// LOST is per physical copy, not per content hash (CLAUDE.md). b@2 and
+    /// b@3 share one hash: the copy on the dead disc reads LOST and the copy
+    /// on the recovery disc reads CURRENT, and no test may collapse them.
+    #[test]
+    fn two_copies_of_one_hash_read_lost_and_current() {
+        let mut e = env();
+        cycle(&mut e, &[("b.txt", b"bbb")], at(10));
+        cycle(&mut e, &[("b.txt", b"bbbb")], at(20));
+        run_mark_dead(&mut e, 1).expect("mark-dead succeeds");
+        cycle(&mut e, &[("b.txt", b"bbbb")], at(30));
+
+        let history = e
+            .catalog
+            .file_history(ProjectId(1), &RelPath("b.txt".to_string()))
+            .expect("history reads");
+
+        assert_eq!(
+            history
+                .iter()
+                .map(|h| (h.disc_ordinal, h.session_ordinal, h.status))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 1, VersionStatus::Lost),
+                (1, 2, VersionStatus::Lost),
+                (2, 1, VersionStatus::Current),
+            ]
+        );
+        assert_eq!(
+            history[1].content_hash, history[2].content_hash,
+            "the last two versions share a hash — LOST is about the copy, not the bytes"
         );
     }
 }
