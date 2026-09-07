@@ -12,6 +12,7 @@ pub mod simulated;
 pub mod snapshot_writer;
 pub mod stager;
 pub mod verifier;
+pub mod xorriso;
 
 use std::path::PathBuf;
 
