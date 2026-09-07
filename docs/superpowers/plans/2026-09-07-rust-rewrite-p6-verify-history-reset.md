@@ -3282,8 +3282,54 @@ git branch -d feat/rewrite-p6
 
 ## Execution deviations
 
-_To be filled in during Task 11._
+- **rustfmt reflows throughout.** The briefs' verbatim test/impl code was
+  reformatted by `cargo fmt` in several tasks (wrapped `assert_eq!`s, the
+  `RUST_IMPLEMENTED` const went one-per-line, minor call-site wrapping). All
+  mechanical; no assertion or string changed.
+- **Task 7 Step 5 restore command.** `git checkout` could not restore
+  `reset.snap` because the file was untracked at that moment; an inverse `sed`
+  restored the authored byte content instead. The committed `.snap` was
+  verified byte-identical to the plan's authored text, and the FAIL→PASS proof
+  was observed both ways.
+- **Task 10, incidental dedupe.** While editing `runner.rs`, a pre-existing
+  accidentally duplicated doc-comment block was removed (comment-only hunk,
+  verified by review). No code semantics touched.
+- **Final-review fix wave (`3a8fff0`), not in the original task list:**
+  (a) `a_sweep_skips_a_dead_disc_without_mentioning_it` now also asserts disc
+  3's **stored** `disc.status` is still `OPEN` after the sweep, via the
+  pre-existing `#[doc(hidden)] raw_connection_for_tests()` — per CLAUDE.md's
+  "also assert the row itself is unchanged" discipline (`read_disc_states`
+  derives from `disc_event` and would mask an illegal update-in-place);
+  (b) `cmd()` in `binary.rs` `mod p5` and `mod p6` now
+  `env_remove("DISKREMENT_DISC_BYTES")` so an ambient value cannot split the
+  fixture burn across two discs; (c) a doc comment was added to
+  `naming_an_ordinal_the_corpus_never_had_is_unknown_disc` to match its
+  siblings.
+- **Ordinal-range divergence (sanctioned, recorded).** Scala's
+  `Options.integer("disc").map(_.toInt)` truncates to 32 bits — `--disc
+  4294967297` would wrap to 1 and *verify disc 1*. The Rust port's `i64`
+  answers `UnknownDisc`, and clap exits 1 beyond `i64::MAX`. The `i64` choice
+  is right; the divergence only manifests on ordinals no corpus ever has.
+  **P7 corollary:** Scala's `disc mark-dead` validates positive-in-range at
+  *parse* time (`Commands.scala`); P7 must mirror that boundary with a clap
+  `value_parser`, or mark-dead's reject-vs-domain split will drift.
+- **Verification command note.** `sha256sum -c fixtures/SHA256SUMS` must be
+  run from *inside* `fixtures/` — the manifest's paths are relative to it.
+  From the repo root every line fails spuriously.
 
 ## Execution verification
 
-_To be filled in during Task 11._
+- `cargo test --workspace`: **413 passed, 0 failed, 3 ignored** (baseline
+  349/3 → +64).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+- `git status --porcelain fixtures/`: empty; `sha256sum -c SHA256SUMS`
+  (from `fixtures/`): verifies.
+- Differential suite, all three modes
+  (`DISKREMENT_SCALA_BIN` = staged launcher): **bootstrap reproduced 11
+  scenarios identically; all-rust 10 compared / 1 skipped; interleaved
+  10 compared / 1 skipped** — the skip is `harvest-replay`, which needs P7's
+  `disc mark-dead`, exactly as the plan predicts.
+- `sbt clean test`: 74 + 156 = **230 passed, 0 failed** — the Scala tree is
+  untouched and green.
+
