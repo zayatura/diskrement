@@ -768,3 +768,447 @@ mod p6_render_tests {
         assert_eq!(reset_done("photos"), "Reset photos.");
     }
 }
+
+/// Snapshot galleries covering every line the CLI prints.
+///
+/// These pin Rust against Rust: they catch drift introduced by a refactor, and
+/// they cannot catch a divergence from the Scala build — `run-manifest.txt` and
+/// the `assert_eq!` oracles above are what do that. Snapshots are authored by
+/// hand for the same reason; one generated from the code under test would
+/// assert nothing.
+#[cfg(test)]
+mod snapshots {
+    use super::*;
+    use chrono::TimeZone as _;
+    use diskrement_core::{
+        ContentHash, DiscState, DiscStatus, DiscType, PlannedDisc, RelPath, ScannedFile,
+    };
+    use diskrement_shell::catalog::model::{FileHistoryEntry, VersionStatus};
+    use diskrement_shell::pipeline::reports::{
+        BurnReport, DiscBurn, PlanReport, RemainingEstimate, ScanReport, StatusReport, VerifyReport,
+    };
+
+    /// Join labelled renders into one reviewable document.
+    fn gallery(sections: &[(&str, String)]) -> String {
+        sections
+            .iter()
+            .map(|(title, body)| format!("## {title}\n{body}"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// `prepend_module_to_snapshot => false` makes the file name exactly
+    /// `<name>.snap`, so the committed paths are predictable and hand-writable.
+    fn check(name: &str, doc: String) {
+        insta::with_settings!({
+            snapshot_path => "snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_snapshot!(name, doc);
+        });
+    }
+
+    fn ts(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    }
+
+    fn scanned(rel: &str, size: u64) -> ScannedFile {
+        ScannedFile {
+            rel_path: RelPath(rel.to_string()),
+            content_hash: ContentHash("deadbeef".to_string()),
+            size_bytes: size,
+            mtime: ts(2026, 9, 5, 14, 3, 0),
+        }
+    }
+
+    fn scan_of(
+        a: usize,
+        m: usize,
+        d: usize,
+        u: usize,
+        hashed: Option<usize>,
+        total: usize,
+    ) -> ScanReport {
+        ScanReport {
+            added: a,
+            modified: m,
+            deleted: d,
+            unchanged: u,
+            hashed,
+            scanned_files: total,
+        }
+    }
+
+    fn plan_of(
+        disc: PlannedDisc,
+        tombstones: &[&str],
+        remaining: (usize, usize, u64),
+        oversized: Vec<ScannedFile>,
+    ) -> PlanReport {
+        PlanReport {
+            disc,
+            disc_type: DiscType::BdR,
+            tombstones: tombstones
+                .iter()
+                .map(|t| RelPath((*t).to_string()))
+                .collect(),
+            remaining: RemainingEstimate {
+                more_discs: remaining.0,
+                more_files: remaining.1,
+                more_bytes: remaining.2,
+            },
+            oversized,
+        }
+    }
+
+    fn disc(ordinal: u32, status: DiscStatus, used: u64, usable: u64) -> DiscState {
+        DiscState {
+            ordinal,
+            status,
+            usable_bytes: usable,
+            used_bytes: used,
+        }
+    }
+
+    fn project(name: &str, source: &str) -> Project {
+        Project {
+            id: ProjectId(1),
+            name: name.to_string(),
+            source_root: source.to_string(),
+            work_dir: "/srv/work".to_string(),
+            default_disc_type: DiscType::BdR,
+            margin_percent: 2.0,
+            copies: 1,
+            created_at: ts(2026, 1, 1, 0, 0, 0),
+        }
+    }
+
+    fn burn_of(ordinal: u32, label: &str, finalized: bool, more_discs: usize) -> BurnReport {
+        BurnReport {
+            disc: DiscBurn {
+                ordinal,
+                label: label.to_string(),
+                finalized,
+                staging_dir: "/srv/work/staging/disc-1".into(),
+                image_bytes: 4096,
+            },
+            remaining: RemainingEstimate {
+                more_discs,
+                more_files: 1,
+                more_bytes: 800,
+            },
+        }
+    }
+
+    fn verify_of(ordinal: u32, checked: usize, mismatches: &[&str], skipped: bool) -> VerifyReport {
+        VerifyReport {
+            disc_ordinal: ordinal,
+            files_checked: checked,
+            mismatches: mismatches
+                .iter()
+                .map(|m| RelPath((*m).to_string()))
+                .collect(),
+            skipped,
+        }
+    }
+
+    fn version(hash: &str, size: u64, d: u32, s: u32, status: VersionStatus) -> FileHistoryEntry {
+        FileHistoryEntry {
+            content_hash: ContentHash(hash.to_string()),
+            size_bytes: size,
+            disc_ordinal: d,
+            session_ordinal: s,
+            status,
+        }
+    }
+
+    #[test]
+    fn init_gallery() {
+        check(
+            "init",
+            gallery(&[
+                ("a fresh project", init_done("photos", ProjectId(7))),
+                ("a multi-digit id", init_done("archive", ProjectId(42))),
+            ]),
+        );
+    }
+
+    #[test]
+    fn scan_gallery() {
+        check(
+            "scan",
+            gallery(&[
+                (
+                    "a fresh scan",
+                    scan_report(&scan_of(2, 1, 0, 3, Some(3), 6)),
+                ),
+                (
+                    "a reused staged scan (no Hashed line)",
+                    scan_report(&scan_of(2, 1, 0, 3, None, 6)),
+                ),
+                (
+                    "nothing changed",
+                    scan_report(&scan_of(0, 0, 0, 6, Some(0), 6)),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn plan_gallery() {
+        check(
+            "plan",
+            gallery(&[
+                (
+                    "nothing to do",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 1,
+                            is_new: false,
+                            will_finalize: false,
+                            files: vec![],
+                            prior_used_bytes: 0,
+                            usable_bytes: 25_000_000_000,
+                        },
+                        &[],
+                        (0, 0, 0),
+                        vec![],
+                    )),
+                ),
+                (
+                    "a bare seal (run-manifest step 18)",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 4,
+                            is_new: false,
+                            will_finalize: true,
+                            files: vec![],
+                            prior_used_bytes: 800,
+                            usable_bytes: 1_000,
+                        },
+                        &[],
+                        (0, 0, 0),
+                        vec![],
+                    )),
+                ),
+                (
+                    "a spilling plan (run-manifest step 03)",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 1,
+                            is_new: true,
+                            will_finalize: true,
+                            files: vec![scanned("a.bin", 800)],
+                            prior_used_bytes: 0,
+                            usable_bytes: 1_000,
+                        },
+                        &[],
+                        (1, 1, 800),
+                        vec![],
+                    )),
+                ),
+                (
+                    "appending to an open disc",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 2,
+                            is_new: false,
+                            will_finalize: false,
+                            files: vec![scanned("a.bin", 3_200_000_000)],
+                            prior_used_bytes: 10_000_000_000,
+                            usable_bytes: 25_000_000_000,
+                        },
+                        &[],
+                        (0, 0, 0),
+                        vec![],
+                    )),
+                ),
+                (
+                    "a deletion rides along (run-manifest step 10)",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 3,
+                            is_new: true,
+                            will_finalize: false,
+                            files: vec![scanned("a.bin", 800)],
+                            prior_used_bytes: 0,
+                            usable_bytes: 1_000,
+                        },
+                        &["b.bin"],
+                        (0, 0, 0),
+                        vec![],
+                    )),
+                ),
+                (
+                    "oversized files",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 1,
+                            is_new: true,
+                            will_finalize: false,
+                            files: vec![scanned("small.bin", 10)],
+                            prior_used_bytes: 0,
+                            usable_bytes: 25_000_000_000,
+                        },
+                        &[],
+                        (0, 0, 0),
+                        vec![scanned("huge.bin", 99_000_000_000)],
+                    )),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn status_gallery() {
+        let two = StatusReport {
+            discs: vec![
+                disc(1, DiscStatus::Finalized, 24_800_000_000, 25_000_000_000),
+                disc(2, DiscStatus::Open, 3_200_000_000, 25_000_000_000),
+            ],
+            open_disc_ordinal: Some(2),
+            total_current_files: 556,
+            last_burn_at: Some(ts(2026, 6, 21, 14, 3, 0)),
+        };
+        let fresh = StatusReport {
+            discs: vec![],
+            open_disc_ordinal: None,
+            total_current_files: 0,
+            last_burn_at: None,
+        };
+        let with_dead = StatusReport {
+            discs: vec![
+                disc(1, DiscStatus::Finalized, 0, 0),
+                disc(2, DiscStatus::Open, 0, 0),
+                disc(3, DiscStatus::Dead, 0, 0),
+                disc(4, DiscStatus::Finalized, 0, 0),
+            ],
+            open_disc_ordinal: Some(2),
+            total_current_files: 1,
+            last_burn_at: Some(ts(2026, 9, 5, 20, 1, 3)),
+        };
+        check(
+            "status",
+            gallery(&[
+                (
+                    "two discs, one open",
+                    status_report(&project("photos", "/srv/photos"), &two),
+                ),
+                (
+                    "nothing burned yet",
+                    status_report(&project("photos", "/srv/photos"), &fresh),
+                ),
+                (
+                    "a dead disc in the table (run-manifest step 20 shape)",
+                    status_report(&project("p", "/srv/source"), &with_dead),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn burn_gallery() {
+        check(
+            "burn",
+            gallery(&[
+                (
+                    "a finalized disc with more to come (run-manifest step 04)",
+                    burn_report(&burn_of(1, "p disc 1", true, 1)),
+                ),
+                (
+                    "an open disc, set complete (run-manifest step 08)",
+                    burn_report(&burn_of(2, "p disc 2", false, 0)),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn verify_gallery() {
+        check(
+            "verify",
+            gallery(&[
+                ("nothing burned", verify_report(&[])),
+                (
+                    "a clean sweep (run-manifest step 21)",
+                    verify_report(&[
+                        verify_of(1, 1, &[], false),
+                        verify_of(2, 1, &[], false),
+                        verify_of(4, 0, &[], false),
+                    ]),
+                ),
+                (
+                    "a skipped disc",
+                    verify_report(&[verify_of(3, 0, &[], true)]),
+                ),
+                (
+                    "mismatches",
+                    verify_report(&[verify_of(2, 5, &["bad/file.jpg", "other.raw"], false)]),
+                ),
+                (
+                    "a mixed sweep",
+                    verify_report(&[
+                        verify_of(1, 1, &[], false),
+                        verify_of(2, 0, &[], true),
+                        verify_of(3, 2, &["gone.bin"], false),
+                    ]),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn history_gallery() {
+        let a1 = "8e19511b7991430a1950f27907234183151bb0dbf1fbf28cd5b765088feb9f70";
+        let a2 = "e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77";
+        let b1 = "3413ff9e166e40ad8798e36609f28433496ee3a0f8984f73d33b0a80ffef2a89";
+        check(
+            "history",
+            gallery(&[
+                ("no history", history(&RelPath("nope.bin".to_string()), &[])),
+                (
+                    "three versions, one lost (run-manifest step 16)",
+                    history(
+                        &RelPath("a.bin".to_string()),
+                        &[
+                            version(a1, 800, 1, 1, VersionStatus::Superseded),
+                            version(a2, 800, 3, 1, VersionStatus::Lost),
+                            version(a2, 800, 4, 1, VersionStatus::Current),
+                        ],
+                    ),
+                ),
+                (
+                    "a deleted path (run-manifest step 22)",
+                    history(
+                        &RelPath("b.bin".to_string()),
+                        &[version(b1, 800, 2, 1, VersionStatus::Deleted)],
+                    ),
+                ),
+                (
+                    "the GB column",
+                    history(
+                        &RelPath("big/movie.mkv".to_string()),
+                        &[version(
+                            "a1b2c3",
+                            12_300_000_000,
+                            7,
+                            2,
+                            VersionStatus::Current,
+                        )],
+                    ),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn reset_gallery() {
+        check(
+            "reset",
+            gallery(&[
+                ("a one-word project", reset_done("p")),
+                ("a longer name", reset_done("photos")),
+            ]),
+        );
+    }
+}
