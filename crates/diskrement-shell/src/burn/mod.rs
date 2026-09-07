@@ -16,6 +16,9 @@ pub mod stager;
 pub mod verifier;
 pub mod xorriso;
 
+#[cfg(any(test, feature = "testutil"))]
+pub mod testkit;
+
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -70,6 +73,19 @@ pub struct DiscImage {
     pub files: Vec<ScannedFile>,
     pub metadata: DiscMetadata,
     pub close_disc: bool,
+}
+
+/// Operator interaction during real burns and verifies: insert-disc
+/// confirmations and live progress lines. The CLI supplies a console
+/// implementation; tests script one.
+///
+/// `&self` rather than `&mut self`: a scripted implementation mutates through
+/// interior mutability, and the burner holds the operator immutably alongside
+/// everything else it borrows.
+pub trait BurnOperator {
+    /// Show `message` and wait. `false` means abort (burn) or skip (verify).
+    fn confirm_insert(&self, message: &str) -> bool;
+    fn progress(&self, line: &str);
 }
 
 /// What a burn produced.
