@@ -1,0 +1,9 @@
+---
+source: crates/diskrement-cli/src/render.rs
+expression: doc
+---
+## a one-word project
+Reset p.
+
+## a longer name
+Reset photos.

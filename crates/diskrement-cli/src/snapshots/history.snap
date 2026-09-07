@@ -1,0 +1,20 @@
+---
+source: crates/diskrement-cli/src/render.rs
+expression: doc
+---
+## no history
+No history for nope.bin.
+
+## three versions, one lost (run-manifest step 16)
+a.bin
+  v1  disc 1 / session 1   0.0 GB  8e19511b7991430a1950f27907234183151bb0dbf1fbf28cd5b765088feb9f70  SUPERSEDED
+  v2  disc 3 / session 1   0.0 GB  e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77  LOST
+  v3  disc 4 / session 1   0.0 GB  e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77  CURRENT
+
+## a deleted path (run-manifest step 22)
+b.bin
+  v1  disc 2 / session 1   0.0 GB  3413ff9e166e40ad8798e36609f28433496ee3a0f8984f73d33b0a80ffef2a89  DELETED
+
+## the GB column
+big/movie.mkv
+  v1  disc 7 / session 2   12.3 GB  a1b2c3  CURRENT

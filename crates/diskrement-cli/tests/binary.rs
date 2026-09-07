@@ -304,6 +304,7 @@ mod p5 {
         // Never touch a real drive from a test.
         c.env("DISKREMENT_BURNER", "simulated");
         c.env("DISKREMENT_HASH_PARALLELISM", "2");
+        c.env_remove("DISKREMENT_DISC_BYTES");
         c
     }
 
@@ -486,5 +487,217 @@ mod p5 {
 
         assert!(p.work.join("staging/disc-1/data/a.bin").is_file());
         assert!(p.work.join("staging/disc-2/data/b.bin").is_file());
+    }
+}
+
+mod p6 {
+    use super::*;
+
+    fn cmd() -> Command {
+        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
+        c.env("DISKREMENT_BURNER", "simulated");
+        c.env_remove("DISKREMENT_DEVICE");
+        c.env_remove("DISKREMENT_DISC_BYTES");
+        c
+    }
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        catalog: std::path::PathBuf,
+        work: std::path::PathBuf,
+    }
+
+    /// init → scan → plan → burn, leaving one burned disc with two files
+    /// staged. Every later assertion in this module starts here.
+    fn burned_project() -> Fixture {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
+        std::fs::write(source.join("nested/c.bin"), vec![b'c'; 100]).unwrap();
+        let catalog = root.join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let work = root.join("work");
+
+        let base = |c: &std::path::Path| {
+            let mut x = cmd();
+            x.arg("--catalog").arg(c);
+            x
+        };
+        base(&catalog)
+            .args(["init", "p", "--source"])
+            .arg(&source)
+            .arg("--work-dir")
+            .arg(&work)
+            .assert()
+            .success();
+        base(&catalog).args(["scan", "p"]).assert().success();
+        base(&catalog).args(["plan", "p"]).assert().success();
+        base(&catalog)
+            .args(["burn", "p", "--yes"])
+            .assert()
+            .success();
+
+        Fixture {
+            _dir: dir,
+            catalog,
+            work,
+        }
+    }
+
+    fn run(f: &Fixture, args: &[&str]) -> assert_cmd::assert::Assert {
+        let mut c = cmd();
+        c.arg("--catalog").arg(&f.catalog);
+        c.args(args).assert()
+    }
+
+    #[test]
+    fn verify_of_a_clean_burn_exits_0_and_names_every_disc() {
+        let f = burned_project();
+        run(&f, &["verify", "p"])
+            .success()
+            .stdout("disc 1: 2 files OK ✓\n");
+    }
+
+    /// Result-driven exit: corruption found is a successful run with a bad
+    /// outcome, and its code is 4, not one of the error-ladder codes.
+    #[test]
+    fn a_corrupted_staged_file_exits_4_and_lists_the_path() {
+        let f = burned_project();
+        std::fs::write(f.work.join("staging/disc-1/data/a.bin"), b"CORRUPT").unwrap();
+        run(&f, &["verify", "p"])
+            .failure()
+            .code(4)
+            .stdout("disc 1: 2 checked, 1 MISMATCH:\n  a.bin\n");
+    }
+
+    #[test]
+    fn verifying_a_named_disc_that_does_not_exist_exits_2() {
+        let f = burned_project();
+        run(&f, &["verify", "p", "--disc", "99"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal 99"));
+    }
+
+    /// The parser must not turn a negative ordinal into an argument error:
+    /// the Scala build answers it from the domain, with exit 2.
+    #[test]
+    fn a_negative_disc_ordinal_is_a_lookup_failure_not_an_argument_error() {
+        let f = burned_project();
+        run(&f, &["verify", "p", "--disc", "-1"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal -1"));
+    }
+
+    #[test]
+    fn verify_before_any_burn_says_there_is_nothing_to_check() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let catalog = dir.path().join("cat.sqlite");
+        let source = dir.path().join("source");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&source).unwrap();
+        let mut c = cmd();
+        c.arg("--catalog")
+            .arg(&catalog)
+            .args(["init", "p", "--source"])
+            .arg(&source)
+            .arg("--work-dir")
+            .arg(&work)
+            .assert()
+            .success();
+        let mut c = cmd();
+        c.arg("--catalog")
+            .arg(&catalog)
+            .args(["verify", "p"])
+            .assert()
+            .success()
+            .stdout("Nothing to verify: no burned discs.\n");
+    }
+
+    #[test]
+    fn history_prints_one_line_per_version() {
+        let f = burned_project();
+        run(&f, &["history", "p", "nested/c.bin"]).success().stdout(
+            contains("nested/c.bin\n")
+                .and(contains("  v1  disc 1 / session 1   0.0 GB  "))
+                .and(contains("  CURRENT")),
+        );
+    }
+
+    #[test]
+    fn history_of_an_unknown_path_says_so_and_exits_0() {
+        let f = burned_project();
+        run(&f, &["history", "p", "nope.bin"])
+            .success()
+            .stdout("No history for nope.bin.\n");
+    }
+
+    /// `reset` destroys the staging trees, so the next verify skips the disc
+    /// rather than reporting it clean — and the catalog still knows the disc
+    /// was burned.
+    #[test]
+    fn reset_clears_the_work_dir_and_the_next_verify_skips() {
+        let f = burned_project();
+        assert!(f.work.join("staging/disc-1").is_dir());
+        run(&f, &["reset", "p"]).success().stdout("Reset p.\n");
+        assert!(!f.work.join("staging").exists());
+        assert!(!f.work.join("snapshot").exists());
+        run(&f, &["verify", "p"])
+            .success()
+            .stdout("disc 1: skipped (not checked)\n");
+        run(&f, &["status", "p"])
+            .success()
+            .stdout(contains("  #1   "));
+    }
+
+    #[test]
+    fn planning_after_a_reset_needs_a_fresh_scan() {
+        let f = burned_project();
+        run(&f, &["scan", "p"]).success();
+        run(&f, &["reset", "p"]).success();
+        run(&f, &["plan", "p"])
+            .failure()
+            .code(2)
+            .stderr(contains("no staged scan for p (run scan)"));
+    }
+
+    #[test]
+    fn the_three_new_commands_exit_2_on_an_unknown_project() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let catalog = dir.path().join("cat.sqlite");
+        for args in [
+            vec!["verify", "nosuch"],
+            vec!["history", "nosuch", "a.bin"],
+            vec!["reset", "nosuch"],
+        ] {
+            let mut c = cmd();
+            c.arg("--catalog")
+                .arg(&catalog)
+                .args(&args)
+                .assert()
+                .failure()
+                .code(2)
+                .stderr(contains("project not found: nosuch"));
+        }
+    }
+
+    /// Until P8 lands the disc verifier, a real-backend verify must refuse
+    /// rather than silently check the staging tree.
+    #[test]
+    fn verify_on_the_real_backend_refuses_until_p8() {
+        let f = burned_project();
+        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
+        c.env("DISKREMENT_BURNER", "real")
+            .env("DISKREMENT_DEVICE", "/dev/sr0")
+            .arg("--catalog")
+            .arg(&f.catalog)
+            .args(["verify", "p"])
+            .assert()
+            .failure()
+            .code(5)
+            .stderr(contains("the real disc verifier is not implemented yet"));
     }
 }

@@ -1,0 +1,9 @@
+---
+source: crates/diskrement-cli/src/render.rs
+expression: doc
+---
+## a fresh project
+Created project photos (id 7).
+
+## a multi-digit id
+Created project archive (id 42).

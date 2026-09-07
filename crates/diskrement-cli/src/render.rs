@@ -1,9 +1,12 @@
 //! Output rendering (`Render.scala`). Success text goes to stdout; error text
 //! is `PipelineError`'s `Display` and goes to stderr with its exit code.
 
-use diskrement_shell::catalog::model::{Project, ProjectId};
+use diskrement_core::RelPath;
+use diskrement_shell::catalog::model::{FileHistoryEntry, Project, ProjectId};
 use diskrement_shell::catalog::time;
-use diskrement_shell::pipeline::reports::{BurnReport, PlanReport, ScanReport, StatusReport};
+use diskrement_shell::pipeline::reports::{
+    BurnReport, PlanReport, ScanReport, StatusReport, VerifyReport,
+};
 
 pub fn init_done(name: &str, id: ProjectId) -> String {
     format!("Created project {name} (id {}).", id.0)
@@ -135,6 +138,81 @@ pub fn status_report(p: &Project, r: &StatusReport) -> String {
         r.total_current_files, last
     ));
     out
+}
+
+/// `Render.verify`. One block per disc, in sweep order; an empty sweep is a
+/// sentence rather than a blank line.
+pub fn verify_report(reports: &[VerifyReport]) -> String {
+    if reports.is_empty() {
+        return "Nothing to verify: no burned discs.".to_string();
+    }
+    reports
+        .iter()
+        .map(|v| {
+            if v.skipped {
+                format!("disc {}: skipped (not checked)", v.disc_ordinal)
+            } else if v.mismatches.is_empty() {
+                // "files" is not pluralised in the Scala original, and
+                // run-manifest step 21 prints "disc 4: 0 files OK".
+                format!("disc {}: {} files OK ✓", v.disc_ordinal, v.files_checked)
+            } else {
+                let listed = v
+                    .mismatches
+                    .iter()
+                    .map(|p| format!("  {}", p.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "disc {}: {} checked, {} MISMATCH:\n{listed}",
+                    v.disc_ordinal,
+                    v.files_checked,
+                    v.mismatches.len()
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Result-driven exit (`Render.verifyExit`): a verify that finds corruption is
+/// a **successful run with a bad outcome**, so it exits 4 rather than taking
+/// the error ladder. A skipped disc found nothing and is not corruption.
+pub fn verify_exit(reports: &[VerifyReport]) -> u8 {
+    if reports.iter().any(|r| !r.mismatches.is_empty()) {
+        4
+    } else {
+        0
+    }
+}
+
+/// `Render.history`. The path, then one `v<n>` line per version, oldest first.
+///
+/// The column spacing is contract: two spaces after `v<n>`, **three** after the
+/// session, two around the hash.
+pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
+    if entries.is_empty() {
+        return format!("No history for {}.", rel_path.as_str());
+    }
+    let mut lines = vec![rel_path.as_str().to_string()];
+    for (i, e) in entries.iter().enumerate() {
+        lines.push(format!(
+            "  v{}  disc {} / session {}   {}  {}  {}",
+            i + 1,
+            e.disc_ordinal,
+            e.session_ordinal,
+            gb(e.size_bytes),
+            e.content_hash,
+            e.status
+        ));
+    }
+    lines.join("\n")
+}
+
+/// The `reset` confirmation. It lives in `Runner.scala`'s dispatch rather than
+/// in `Render.scala`; it is a renderer here so the snapshot gallery can cover
+/// every line the CLI prints.
+pub fn reset_done(name: &str) -> String {
+    format!("Reset {name}.")
 }
 
 #[cfg(test)]
@@ -502,5 +580,631 @@ mod burn_render_tests {
             .unwrap()
             .to_string();
         assert_eq!(line, "✔ Wrote disc 1  —  label: \"p disc 1\"");
+    }
+}
+
+#[cfg(test)]
+mod p6_render_tests {
+    use super::*;
+    use diskrement_core::{ContentHash, RelPath};
+    use diskrement_shell::catalog::model::{FileHistoryEntry, VersionStatus};
+    use diskrement_shell::pipeline::reports::VerifyReport;
+
+    fn report(ordinal: u32, checked: usize, mismatches: &[&str], skipped: bool) -> VerifyReport {
+        VerifyReport {
+            disc_ordinal: ordinal,
+            files_checked: checked,
+            mismatches: mismatches
+                .iter()
+                .map(|m| RelPath((*m).to_string()))
+                .collect(),
+            skipped,
+        }
+    }
+
+    fn entry(
+        hash: &str,
+        size: u64,
+        disc: u32,
+        session: u32,
+        status: VersionStatus,
+    ) -> FileHistoryEntry {
+        FileHistoryEntry {
+            content_hash: ContentHash(hash.to_string()),
+            size_bytes: size,
+            disc_ordinal: disc,
+            session_ordinal: session,
+            status,
+        }
+    }
+
+    #[test]
+    fn an_empty_verify_says_there_is_nothing_to_check() {
+        assert_eq!(verify_report(&[]), "Nothing to verify: no burned discs.");
+    }
+
+    /// `fixtures/run-manifest.txt` step 05, byte for byte.
+    #[test]
+    fn a_clean_disc_matches_the_render_oracle() {
+        assert_eq!(
+            verify_report(&[report(1, 1, &[], false)]),
+            "disc 1: 1 files OK ✓"
+        );
+    }
+
+    /// `fixtures/run-manifest.txt` step 21, byte for byte — including the
+    /// sealed disc's zero-file line and the absence of the dead disc 3.
+    #[test]
+    fn a_three_disc_sweep_matches_the_render_oracle() {
+        assert_eq!(
+            verify_report(&[
+                report(1, 1, &[], false),
+                report(2, 1, &[], false),
+                report(4, 0, &[], false),
+            ]),
+            "disc 1: 1 files OK ✓\n\
+             disc 2: 1 files OK ✓\n\
+             disc 4: 0 files OK ✓"
+        );
+    }
+
+    #[test]
+    fn a_skipped_disc_is_reported_as_not_checked() {
+        assert_eq!(
+            verify_report(&[report(3, 0, &[], true)]),
+            "disc 3: skipped (not checked)"
+        );
+    }
+
+    /// Transcribed from the staged Scala launcher on a corrupted staging tree.
+    #[test]
+    fn mismatches_are_listed_under_their_disc() {
+        assert_eq!(
+            verify_report(&[report(1, 2, &["a.bin"], false)]),
+            "disc 1: 2 checked, 1 MISMATCH:\n  a.bin"
+        );
+        assert_eq!(
+            verify_report(&[report(2, 5, &["bad/file.jpg", "other.raw"], false)]),
+            "disc 2: 5 checked, 2 MISMATCH:\n  bad/file.jpg\n  other.raw"
+        );
+    }
+
+    #[test]
+    fn a_mixed_sweep_puts_one_disc_per_block_in_order() {
+        assert_eq!(
+            verify_report(&[
+                report(1, 1, &[], false),
+                report(2, 0, &[], true),
+                report(3, 2, &["gone.bin"], false),
+            ]),
+            "disc 1: 1 files OK ✓\n\
+             disc 2: skipped (not checked)\n\
+             disc 3: 2 checked, 1 MISMATCH:\n  gone.bin"
+        );
+    }
+
+    /// A verify that finds corruption is a *successful run with a bad
+    /// outcome*: exit 4, not an error exit (`Render.verifyExit`).
+    #[test]
+    fn the_verify_exit_code_is_driven_by_the_result() {
+        assert_eq!(verify_exit(&[]), 0);
+        assert_eq!(verify_exit(&[report(1, 10, &[], false)]), 0);
+        assert_eq!(verify_exit(&[report(1, 0, &[], true)]), 0);
+        assert_eq!(
+            verify_exit(&[report(1, 10, &[], false), report(2, 5, &["bad"], false)]),
+            4
+        );
+    }
+
+    #[test]
+    fn an_empty_history_names_the_path() {
+        assert_eq!(
+            history(&RelPath("nope.bin".to_string()), &[]),
+            "No history for nope.bin."
+        );
+    }
+
+    /// `fixtures/run-manifest.txt` step 16, byte for byte. LOST is per
+    /// physical copy: v2 and v3 share a content hash and read differently.
+    #[test]
+    fn the_three_version_history_matches_the_render_oracle() {
+        let a1 = "8e19511b7991430a1950f27907234183151bb0dbf1fbf28cd5b765088feb9f70";
+        let a2 = "e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77";
+        assert_eq!(
+            history(
+                &RelPath("a.bin".to_string()),
+                &[
+                    entry(a1, 800, 1, 1, VersionStatus::Superseded),
+                    entry(a2, 800, 3, 1, VersionStatus::Lost),
+                    entry(a2, 800, 4, 1, VersionStatus::Current),
+                ]
+            ),
+            format!(
+                "a.bin\n\
+                 \x20 v1  disc 1 / session 1   0.0 GB  {a1}  SUPERSEDED\n\
+                 \x20 v2  disc 3 / session 1   0.0 GB  {a2}  LOST\n\
+                 \x20 v3  disc 4 / session 1   0.0 GB  {a2}  CURRENT"
+            )
+        );
+    }
+
+    /// `fixtures/run-manifest.txt` step 22, byte for byte.
+    #[test]
+    fn a_deleted_paths_history_matches_the_render_oracle() {
+        let b1 = "3413ff9e166e40ad8798e36609f28433496ee3a0f8984f73d33b0a80ffef2a89";
+        assert_eq!(
+            history(
+                &RelPath("b.bin".to_string()),
+                &[entry(b1, 800, 2, 1, VersionStatus::Deleted)]
+            ),
+            format!("b.bin\n\x20 v1  disc 2 / session 1   0.0 GB  {b1}  DELETED")
+        );
+    }
+
+    #[test]
+    fn the_history_gb_column_uses_the_same_one_decimal_format() {
+        assert_eq!(
+            history(
+                &RelPath("big/movie.mkv".to_string()),
+                &[entry(
+                    "a1b2c3",
+                    12_300_000_000,
+                    7,
+                    2,
+                    VersionStatus::Current
+                )]
+            ),
+            "big/movie.mkv\n\x20 v1  disc 7 / session 2   12.3 GB  a1b2c3  CURRENT"
+        );
+    }
+
+    #[test]
+    fn reset_names_the_project_it_cleared() {
+        assert_eq!(reset_done("p"), "Reset p.");
+        assert_eq!(reset_done("photos"), "Reset photos.");
+    }
+}
+
+/// Snapshot galleries covering every line the CLI prints.
+///
+/// These pin Rust against Rust: they catch drift introduced by a refactor, and
+/// they cannot catch a divergence from the Scala build — `run-manifest.txt` and
+/// the `assert_eq!` oracles above are what do that. Snapshots are authored by
+/// hand for the same reason; one generated from the code under test would
+/// assert nothing.
+#[cfg(test)]
+mod snapshots {
+    use super::*;
+    use chrono::TimeZone as _;
+    use diskrement_core::{
+        ContentHash, DiscState, DiscStatus, DiscType, PlannedDisc, RelPath, ScannedFile,
+    };
+    use diskrement_shell::catalog::model::{FileHistoryEntry, VersionStatus};
+    use diskrement_shell::pipeline::reports::{
+        BurnReport, DiscBurn, PlanReport, RemainingEstimate, ScanReport, StatusReport, VerifyReport,
+    };
+
+    /// Join labelled renders into one reviewable document.
+    fn gallery(sections: &[(&str, String)]) -> String {
+        sections
+            .iter()
+            .map(|(title, body)| format!("## {title}\n{body}"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// `prepend_module_to_snapshot => false` makes the file name exactly
+    /// `<name>.snap`, so the committed paths are predictable and hand-writable.
+    fn check(name: &str, doc: String) {
+        insta::with_settings!({
+            snapshot_path => "snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_snapshot!(name, doc);
+        });
+    }
+
+    fn ts(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    }
+
+    fn scanned(rel: &str, size: u64) -> ScannedFile {
+        ScannedFile {
+            rel_path: RelPath(rel.to_string()),
+            content_hash: ContentHash("deadbeef".to_string()),
+            size_bytes: size,
+            mtime: ts(2026, 9, 5, 14, 3, 0),
+        }
+    }
+
+    fn scan_of(
+        a: usize,
+        m: usize,
+        d: usize,
+        u: usize,
+        hashed: Option<usize>,
+        total: usize,
+    ) -> ScanReport {
+        ScanReport {
+            added: a,
+            modified: m,
+            deleted: d,
+            unchanged: u,
+            hashed,
+            scanned_files: total,
+        }
+    }
+
+    fn plan_of(
+        disc: PlannedDisc,
+        tombstones: &[&str],
+        remaining: (usize, usize, u64),
+        oversized: Vec<ScannedFile>,
+    ) -> PlanReport {
+        PlanReport {
+            disc,
+            disc_type: DiscType::BdR,
+            tombstones: tombstones
+                .iter()
+                .map(|t| RelPath((*t).to_string()))
+                .collect(),
+            remaining: RemainingEstimate {
+                more_discs: remaining.0,
+                more_files: remaining.1,
+                more_bytes: remaining.2,
+            },
+            oversized,
+        }
+    }
+
+    fn disc(ordinal: u32, status: DiscStatus, used: u64, usable: u64) -> DiscState {
+        DiscState {
+            ordinal,
+            status,
+            usable_bytes: usable,
+            used_bytes: used,
+        }
+    }
+
+    fn project(name: &str, source: &str) -> Project {
+        Project {
+            id: ProjectId(1),
+            name: name.to_string(),
+            source_root: source.to_string(),
+            work_dir: "/srv/work".to_string(),
+            default_disc_type: DiscType::BdR,
+            margin_percent: 2.0,
+            copies: 1,
+            created_at: ts(2026, 1, 1, 0, 0, 0),
+        }
+    }
+
+    fn burn_of(ordinal: u32, label: &str, finalized: bool, more_discs: usize) -> BurnReport {
+        BurnReport {
+            disc: DiscBurn {
+                ordinal,
+                label: label.to_string(),
+                finalized,
+                staging_dir: "/srv/work/staging/disc-1".into(),
+                image_bytes: 4096,
+            },
+            remaining: RemainingEstimate {
+                more_discs,
+                more_files: 1,
+                more_bytes: 800,
+            },
+        }
+    }
+
+    fn verify_of(ordinal: u32, checked: usize, mismatches: &[&str], skipped: bool) -> VerifyReport {
+        VerifyReport {
+            disc_ordinal: ordinal,
+            files_checked: checked,
+            mismatches: mismatches
+                .iter()
+                .map(|m| RelPath((*m).to_string()))
+                .collect(),
+            skipped,
+        }
+    }
+
+    fn version(hash: &str, size: u64, d: u32, s: u32, status: VersionStatus) -> FileHistoryEntry {
+        FileHistoryEntry {
+            content_hash: ContentHash(hash.to_string()),
+            size_bytes: size,
+            disc_ordinal: d,
+            session_ordinal: s,
+            status,
+        }
+    }
+
+    #[test]
+    fn init_gallery() {
+        check(
+            "init",
+            gallery(&[
+                ("a fresh project", init_done("photos", ProjectId(7))),
+                ("a multi-digit id", init_done("archive", ProjectId(42))),
+            ]),
+        );
+    }
+
+    #[test]
+    fn scan_gallery() {
+        check(
+            "scan",
+            gallery(&[
+                (
+                    "a fresh scan",
+                    scan_report(&scan_of(2, 1, 0, 3, Some(3), 6)),
+                ),
+                (
+                    "a reused staged scan (no Hashed line)",
+                    scan_report(&scan_of(2, 1, 0, 3, None, 6)),
+                ),
+                (
+                    "nothing changed",
+                    scan_report(&scan_of(0, 0, 0, 6, Some(0), 6)),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn plan_gallery() {
+        check(
+            "plan",
+            gallery(&[
+                (
+                    "nothing to do",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 1,
+                            is_new: false,
+                            will_finalize: false,
+                            files: vec![],
+                            prior_used_bytes: 0,
+                            usable_bytes: 25_000_000_000,
+                        },
+                        &[],
+                        (0, 0, 0),
+                        vec![],
+                    )),
+                ),
+                (
+                    "a bare seal (run-manifest step 18)",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 4,
+                            is_new: false,
+                            will_finalize: true,
+                            files: vec![],
+                            prior_used_bytes: 800,
+                            usable_bytes: 1_000,
+                        },
+                        &[],
+                        (0, 0, 0),
+                        vec![],
+                    )),
+                ),
+                (
+                    "a spilling plan (run-manifest step 03)",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 1,
+                            is_new: true,
+                            will_finalize: true,
+                            files: vec![scanned("a.bin", 800)],
+                            prior_used_bytes: 0,
+                            usable_bytes: 1_000,
+                        },
+                        &[],
+                        (1, 1, 800),
+                        vec![],
+                    )),
+                ),
+                (
+                    "appending to an open disc",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 2,
+                            is_new: false,
+                            will_finalize: false,
+                            files: vec![scanned("a.bin", 3_200_000_000)],
+                            prior_used_bytes: 10_000_000_000,
+                            usable_bytes: 25_000_000_000,
+                        },
+                        &[],
+                        (0, 0, 0),
+                        vec![],
+                    )),
+                ),
+                (
+                    "a deletion rides along (run-manifest step 10)",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 3,
+                            is_new: true,
+                            will_finalize: false,
+                            files: vec![scanned("a.bin", 800)],
+                            prior_used_bytes: 0,
+                            usable_bytes: 1_000,
+                        },
+                        &["b.bin"],
+                        (0, 0, 0),
+                        vec![],
+                    )),
+                ),
+                (
+                    "oversized files",
+                    plan_report(&plan_of(
+                        PlannedDisc {
+                            ordinal: 1,
+                            is_new: true,
+                            will_finalize: false,
+                            files: vec![scanned("small.bin", 10)],
+                            prior_used_bytes: 0,
+                            usable_bytes: 25_000_000_000,
+                        },
+                        &[],
+                        (0, 0, 0),
+                        vec![scanned("huge.bin", 99_000_000_000)],
+                    )),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn status_gallery() {
+        let two = StatusReport {
+            discs: vec![
+                disc(1, DiscStatus::Finalized, 24_800_000_000, 25_000_000_000),
+                disc(2, DiscStatus::Open, 3_200_000_000, 25_000_000_000),
+            ],
+            open_disc_ordinal: Some(2),
+            total_current_files: 556,
+            last_burn_at: Some(ts(2026, 6, 21, 14, 3, 0)),
+        };
+        let fresh = StatusReport {
+            discs: vec![],
+            open_disc_ordinal: None,
+            total_current_files: 0,
+            last_burn_at: None,
+        };
+        let with_dead = StatusReport {
+            discs: vec![
+                disc(1, DiscStatus::Finalized, 0, 0),
+                disc(2, DiscStatus::Open, 0, 0),
+                disc(3, DiscStatus::Dead, 0, 0),
+                disc(4, DiscStatus::Finalized, 0, 0),
+            ],
+            open_disc_ordinal: Some(2),
+            total_current_files: 1,
+            last_burn_at: Some(ts(2026, 9, 5, 20, 1, 3)),
+        };
+        check(
+            "status",
+            gallery(&[
+                (
+                    "two discs, one open",
+                    status_report(&project("photos", "/srv/photos"), &two),
+                ),
+                (
+                    "nothing burned yet",
+                    status_report(&project("photos", "/srv/photos"), &fresh),
+                ),
+                (
+                    "a dead disc in the table (run-manifest step 20 shape)",
+                    status_report(&project("p", "/srv/source"), &with_dead),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn burn_gallery() {
+        check(
+            "burn",
+            gallery(&[
+                (
+                    "a finalized disc with more to come (run-manifest step 04)",
+                    burn_report(&burn_of(1, "p disc 1", true, 1)),
+                ),
+                (
+                    "an open disc, set complete (run-manifest step 08)",
+                    burn_report(&burn_of(2, "p disc 2", false, 0)),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn verify_gallery() {
+        check(
+            "verify",
+            gallery(&[
+                ("nothing burned", verify_report(&[])),
+                (
+                    "a clean sweep (run-manifest step 21)",
+                    verify_report(&[
+                        verify_of(1, 1, &[], false),
+                        verify_of(2, 1, &[], false),
+                        verify_of(4, 0, &[], false),
+                    ]),
+                ),
+                (
+                    "a skipped disc",
+                    verify_report(&[verify_of(3, 0, &[], true)]),
+                ),
+                (
+                    "mismatches",
+                    verify_report(&[verify_of(2, 5, &["bad/file.jpg", "other.raw"], false)]),
+                ),
+                (
+                    "a mixed sweep",
+                    verify_report(&[
+                        verify_of(1, 1, &[], false),
+                        verify_of(2, 0, &[], true),
+                        verify_of(3, 2, &["gone.bin"], false),
+                    ]),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn history_gallery() {
+        let a1 = "8e19511b7991430a1950f27907234183151bb0dbf1fbf28cd5b765088feb9f70";
+        let a2 = "e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77";
+        let b1 = "3413ff9e166e40ad8798e36609f28433496ee3a0f8984f73d33b0a80ffef2a89";
+        check(
+            "history",
+            gallery(&[
+                ("no history", history(&RelPath("nope.bin".to_string()), &[])),
+                (
+                    "three versions, one lost (run-manifest step 16)",
+                    history(
+                        &RelPath("a.bin".to_string()),
+                        &[
+                            version(a1, 800, 1, 1, VersionStatus::Superseded),
+                            version(a2, 800, 3, 1, VersionStatus::Lost),
+                            version(a2, 800, 4, 1, VersionStatus::Current),
+                        ],
+                    ),
+                ),
+                (
+                    "a deleted path (run-manifest step 22)",
+                    history(
+                        &RelPath("b.bin".to_string()),
+                        &[version(b1, 800, 2, 1, VersionStatus::Deleted)],
+                    ),
+                ),
+                (
+                    "the GB column",
+                    history(
+                        &RelPath("big/movie.mkv".to_string()),
+                        &[version(
+                            "a1b2c3",
+                            12_300_000_000,
+                            7,
+                            2,
+                            VersionStatus::Current,
+                        )],
+                    ),
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn reset_gallery() {
+        check(
+            "reset",
+            gallery(&[
+                ("a one-word project", reset_done("p")),
+                ("a longer name", reset_done("photos")),
+            ]),
+        );
     }
 }

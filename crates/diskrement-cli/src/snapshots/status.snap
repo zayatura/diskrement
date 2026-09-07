@@ -1,0 +1,24 @@
+---
+source: crates/diskrement-cli/src/render.rs
+expression: doc
+---
+## two discs, one open
+Project photos  (source /srv/photos, BD_R, margin 2.0%)
+Discs:
+  #1   FINALIZED  24.8 GB / 25.0 GB
+  #2   OPEN       3.2 GB / 25.0 GB  <- open
+Current files: 556      Last burn: 2026-06-21T14:03:00Z
+
+## nothing burned yet
+Project photos  (source /srv/photos, BD_R, margin 2.0%)
+Discs:
+Current files: 0      Last burn: never
+
+## a dead disc in the table (run-manifest step 20 shape)
+Project p  (source /srv/source, BD_R, margin 2.0%)
+Discs:
+  #1   FINALIZED  0.0 GB / 0.0 GB
+  #2   OPEN       0.0 GB / 0.0 GB  <- open
+  #3   DEAD       0.0 GB / 0.0 GB
+  #4   FINALIZED  0.0 GB / 0.0 GB
+Current files: 1      Last burn: 2026-09-05T20:01:03Z

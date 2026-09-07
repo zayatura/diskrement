@@ -1,0 +1,25 @@
+---
+source: crates/diskrement-cli/src/render.rs
+expression: doc
+---
+## nothing burned
+Nothing to verify: no burned discs.
+
+## a clean sweep (run-manifest step 21)
+disc 1: 1 files OK ✓
+disc 2: 1 files OK ✓
+disc 4: 0 files OK ✓
+
+## a skipped disc
+disc 3: skipped (not checked)
+
+## mismatches
+disc 2: 5 checked, 2 MISMATCH:
+  bad/file.jpg
+  other.raw
+
+## a mixed sweep
+disc 1: 1 files OK ✓
+disc 2: skipped (not checked)
+disc 3: 2 checked, 1 MISMATCH:
+  gone.bin

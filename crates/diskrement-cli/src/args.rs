@@ -77,6 +77,22 @@ pub enum Command {
         #[arg(long, short = 'y', default_value_t = false)]
         yes: bool,
     },
+    /// Discard staged scan/plan state.
+    Reset { name: String },
+    /// Re-hash burned disc(s) against the catalog.
+    ///
+    /// `allow_negative_numbers` and the `i64` type are deliberate: zio-cli let
+    /// `--disc -1` reach the domain, which answers with exit 2. Rejecting it
+    /// here would be exit 1, and the exit ladder is contract (spec §3.2).
+    #[command(allow_negative_numbers = true)]
+    Verify {
+        name: String,
+        /// Check only this disc instead of sweeping every live disc.
+        #[arg(long)]
+        disc: Option<i64>,
+    },
+    /// Show the full version history of one file.
+    History { name: String, rel_path: String },
 }
 
 #[cfg(test)]
@@ -255,6 +271,65 @@ mod tests {
     #[test]
     fn plan_requires_a_project_name() {
         assert!(Cli::try_parse_from(["diskrement", "plan"]).is_err());
+    }
+
+    #[test]
+    fn verify_takes_an_optional_disc_ordinal() {
+        let sweep = Cli::try_parse_from(["diskrement", "verify", "p"]).unwrap();
+        let Command::Verify { name, disc } = sweep.command else {
+            panic!("not verify")
+        };
+        assert_eq!(name, "p");
+        assert_eq!(disc, None);
+
+        let one = Cli::try_parse_from(["diskrement", "verify", "p", "--disc", "3"]).unwrap();
+        let Command::Verify { disc, .. } = one.command else {
+            panic!("not verify")
+        };
+        assert_eq!(disc, Some(3));
+    }
+
+    /// zio-cli let a negative ordinal through to the domain, which answers it
+    /// with exit 2. Rejecting it in the parser would be exit 1 — an exit-code
+    /// divergence, which §3.2 does not sanction.
+    #[test]
+    fn verify_accepts_a_negative_disc_ordinal_and_leaves_it_to_the_domain() {
+        let cli = Cli::try_parse_from(["diskrement", "verify", "p", "--disc", "-1"]).unwrap();
+        let Command::Verify { disc, .. } = cli.command else {
+            panic!("not verify")
+        };
+        assert_eq!(disc, Some(-1));
+    }
+
+    #[test]
+    fn verify_rejects_a_non_numeric_disc_ordinal() {
+        assert!(Cli::try_parse_from(["diskrement", "verify", "p", "--disc", "abc"]).is_err());
+    }
+
+    #[test]
+    fn history_takes_a_project_and_a_relative_path() {
+        let cli = Cli::try_parse_from(["diskrement", "history", "p", "nested/a.bin"]).unwrap();
+        let Command::History { name, rel_path } = cli.command else {
+            panic!("not history")
+        };
+        assert_eq!(name, "p");
+        assert_eq!(rel_path, "nested/a.bin");
+    }
+
+    #[test]
+    fn history_requires_both_arguments() {
+        assert!(Cli::try_parse_from(["diskrement", "history", "p"]).is_err());
+        assert!(Cli::try_parse_from(["diskrement", "history"]).is_err());
+    }
+
+    #[test]
+    fn reset_takes_only_a_name() {
+        let cli = Cli::try_parse_from(["diskrement", "reset", "p"]).unwrap();
+        let Command::Reset { name } = cli.command else {
+            panic!("not reset")
+        };
+        assert_eq!(name, "p");
+        assert!(Cli::try_parse_from(["diskrement", "reset"]).is_err());
     }
 
     #[test]
