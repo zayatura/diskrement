@@ -1,9 +1,12 @@
 //! Output rendering (`Render.scala`). Success text goes to stdout; error text
 //! is `PipelineError`'s `Display` and goes to stderr with its exit code.
 
-use diskrement_shell::catalog::model::{Project, ProjectId};
+use diskrement_core::RelPath;
+use diskrement_shell::catalog::model::{FileHistoryEntry, Project, ProjectId};
 use diskrement_shell::catalog::time;
-use diskrement_shell::pipeline::reports::{BurnReport, PlanReport, ScanReport, StatusReport};
+use diskrement_shell::pipeline::reports::{
+    BurnReport, PlanReport, ScanReport, StatusReport, VerifyReport,
+};
 
 pub fn init_done(name: &str, id: ProjectId) -> String {
     format!("Created project {name} (id {}).", id.0)
@@ -135,6 +138,85 @@ pub fn status_report(p: &Project, r: &StatusReport) -> String {
         r.total_current_files, last
     ));
     out
+}
+
+/// `Render.verify`. One block per disc, in sweep order; an empty sweep is a
+/// sentence rather than a blank line.
+#[allow(dead_code)]
+pub fn verify_report(reports: &[VerifyReport]) -> String {
+    if reports.is_empty() {
+        return "Nothing to verify: no burned discs.".to_string();
+    }
+    reports
+        .iter()
+        .map(|v| {
+            if v.skipped {
+                format!("disc {}: skipped (not checked)", v.disc_ordinal)
+            } else if v.mismatches.is_empty() {
+                // "files" is not pluralised in the Scala original, and
+                // run-manifest step 21 prints "disc 4: 0 files OK".
+                format!("disc {}: {} files OK ✓", v.disc_ordinal, v.files_checked)
+            } else {
+                let listed = v
+                    .mismatches
+                    .iter()
+                    .map(|p| format!("  {}", p.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "disc {}: {} checked, {} MISMATCH:\n{listed}",
+                    v.disc_ordinal,
+                    v.files_checked,
+                    v.mismatches.len()
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Result-driven exit (`Render.verifyExit`): a verify that finds corruption is
+/// a **successful run with a bad outcome**, so it exits 4 rather than taking
+/// the error ladder. A skipped disc found nothing and is not corruption.
+#[allow(dead_code)]
+pub fn verify_exit(reports: &[VerifyReport]) -> u8 {
+    if reports.iter().any(|r| !r.mismatches.is_empty()) {
+        4
+    } else {
+        0
+    }
+}
+
+/// `Render.history`. The path, then one `v<n>` line per version, oldest first.
+///
+/// The column spacing is contract: two spaces after `v<n>`, **three** after the
+/// session, two around the hash.
+#[allow(dead_code)]
+pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
+    if entries.is_empty() {
+        return format!("No history for {}.", rel_path.as_str());
+    }
+    let mut lines = vec![rel_path.as_str().to_string()];
+    for (i, e) in entries.iter().enumerate() {
+        lines.push(format!(
+            "  v{}  disc {} / session {}   {}  {}  {}",
+            i + 1,
+            e.disc_ordinal,
+            e.session_ordinal,
+            gb(e.size_bytes),
+            e.content_hash,
+            e.status
+        ));
+    }
+    lines.join("\n")
+}
+
+/// The `reset` confirmation. It lives in `Runner.scala`'s dispatch rather than
+/// in `Render.scala`; it is a renderer here so the snapshot gallery can cover
+/// every line the CLI prints.
+#[allow(dead_code)]
+pub fn reset_done(name: &str) -> String {
+    format!("Reset {name}.")
 }
 
 #[cfg(test)]
@@ -502,5 +584,187 @@ mod burn_render_tests {
             .unwrap()
             .to_string();
         assert_eq!(line, "✔ Wrote disc 1  —  label: \"p disc 1\"");
+    }
+}
+
+#[cfg(test)]
+mod p6_render_tests {
+    use super::*;
+    use diskrement_core::{ContentHash, RelPath};
+    use diskrement_shell::catalog::model::{FileHistoryEntry, VersionStatus};
+    use diskrement_shell::pipeline::reports::VerifyReport;
+
+    fn report(ordinal: u32, checked: usize, mismatches: &[&str], skipped: bool) -> VerifyReport {
+        VerifyReport {
+            disc_ordinal: ordinal,
+            files_checked: checked,
+            mismatches: mismatches
+                .iter()
+                .map(|m| RelPath((*m).to_string()))
+                .collect(),
+            skipped,
+        }
+    }
+
+    fn entry(
+        hash: &str,
+        size: u64,
+        disc: u32,
+        session: u32,
+        status: VersionStatus,
+    ) -> FileHistoryEntry {
+        FileHistoryEntry {
+            content_hash: ContentHash(hash.to_string()),
+            size_bytes: size,
+            disc_ordinal: disc,
+            session_ordinal: session,
+            status,
+        }
+    }
+
+    #[test]
+    fn an_empty_verify_says_there_is_nothing_to_check() {
+        assert_eq!(verify_report(&[]), "Nothing to verify: no burned discs.");
+    }
+
+    /// `fixtures/run-manifest.txt` step 05, byte for byte.
+    #[test]
+    fn a_clean_disc_matches_the_render_oracle() {
+        assert_eq!(
+            verify_report(&[report(1, 1, &[], false)]),
+            "disc 1: 1 files OK ✓"
+        );
+    }
+
+    /// `fixtures/run-manifest.txt` step 21, byte for byte — including the
+    /// sealed disc's zero-file line and the absence of the dead disc 3.
+    #[test]
+    fn a_three_disc_sweep_matches_the_render_oracle() {
+        assert_eq!(
+            verify_report(&[
+                report(1, 1, &[], false),
+                report(2, 1, &[], false),
+                report(4, 0, &[], false),
+            ]),
+            "disc 1: 1 files OK ✓\n\
+             disc 2: 1 files OK ✓\n\
+             disc 4: 0 files OK ✓"
+        );
+    }
+
+    #[test]
+    fn a_skipped_disc_is_reported_as_not_checked() {
+        assert_eq!(
+            verify_report(&[report(3, 0, &[], true)]),
+            "disc 3: skipped (not checked)"
+        );
+    }
+
+    /// Transcribed from the staged Scala launcher on a corrupted staging tree.
+    #[test]
+    fn mismatches_are_listed_under_their_disc() {
+        assert_eq!(
+            verify_report(&[report(1, 2, &["a.bin"], false)]),
+            "disc 1: 2 checked, 1 MISMATCH:\n  a.bin"
+        );
+        assert_eq!(
+            verify_report(&[report(2, 5, &["bad/file.jpg", "other.raw"], false)]),
+            "disc 2: 5 checked, 2 MISMATCH:\n  bad/file.jpg\n  other.raw"
+        );
+    }
+
+    #[test]
+    fn a_mixed_sweep_puts_one_disc_per_block_in_order() {
+        assert_eq!(
+            verify_report(&[
+                report(1, 1, &[], false),
+                report(2, 0, &[], true),
+                report(3, 2, &["gone.bin"], false),
+            ]),
+            "disc 1: 1 files OK ✓\n\
+             disc 2: skipped (not checked)\n\
+             disc 3: 2 checked, 1 MISMATCH:\n  gone.bin"
+        );
+    }
+
+    /// A verify that finds corruption is a *successful run with a bad
+    /// outcome*: exit 4, not an error exit (`Render.verifyExit`).
+    #[test]
+    fn the_verify_exit_code_is_driven_by_the_result() {
+        assert_eq!(verify_exit(&[]), 0);
+        assert_eq!(verify_exit(&[report(1, 10, &[], false)]), 0);
+        assert_eq!(verify_exit(&[report(1, 0, &[], true)]), 0);
+        assert_eq!(
+            verify_exit(&[report(1, 10, &[], false), report(2, 5, &["bad"], false)]),
+            4
+        );
+    }
+
+    #[test]
+    fn an_empty_history_names_the_path() {
+        assert_eq!(
+            history(&RelPath("nope.bin".to_string()), &[]),
+            "No history for nope.bin."
+        );
+    }
+
+    /// `fixtures/run-manifest.txt` step 16, byte for byte. LOST is per
+    /// physical copy: v2 and v3 share a content hash and read differently.
+    #[test]
+    fn the_three_version_history_matches_the_render_oracle() {
+        let a1 = "8e19511b7991430a1950f27907234183151bb0dbf1fbf28cd5b765088feb9f70";
+        let a2 = "e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77";
+        assert_eq!(
+            history(
+                &RelPath("a.bin".to_string()),
+                &[
+                    entry(a1, 800, 1, 1, VersionStatus::Superseded),
+                    entry(a2, 800, 3, 1, VersionStatus::Lost),
+                    entry(a2, 800, 4, 1, VersionStatus::Current),
+                ]
+            ),
+            format!(
+                "a.bin\n\
+                 \x20 v1  disc 1 / session 1   0.0 GB  {a1}  SUPERSEDED\n\
+                 \x20 v2  disc 3 / session 1   0.0 GB  {a2}  LOST\n\
+                 \x20 v3  disc 4 / session 1   0.0 GB  {a2}  CURRENT"
+            )
+        );
+    }
+
+    /// `fixtures/run-manifest.txt` step 22, byte for byte.
+    #[test]
+    fn a_deleted_paths_history_matches_the_render_oracle() {
+        let b1 = "3413ff9e166e40ad8798e36609f28433496ee3a0f8984f73d33b0a80ffef2a89";
+        assert_eq!(
+            history(
+                &RelPath("b.bin".to_string()),
+                &[entry(b1, 800, 2, 1, VersionStatus::Deleted)]
+            ),
+            format!("b.bin\n\x20 v1  disc 2 / session 1   0.0 GB  {b1}  DELETED")
+        );
+    }
+
+    #[test]
+    fn the_history_gb_column_uses_the_same_one_decimal_format() {
+        assert_eq!(
+            history(
+                &RelPath("big/movie.mkv".to_string()),
+                &[entry(
+                    "a1b2c3",
+                    12_300_000_000,
+                    7,
+                    2,
+                    VersionStatus::Current
+                )]
+            ),
+            "big/movie.mkv\n\x20 v1  disc 7 / session 2   12.3 GB  a1b2c3  CURRENT"
+        );
+    }
+
+    #[test]
+    fn reset_names_the_project_it_cleared() {
+        assert_eq!(reset_done("p"), "Reset p.");
+        assert_eq!(reset_done("photos"), "Reset photos.");
     }
 }
