@@ -42,6 +42,14 @@ pub struct Snapshot {
     /// sha256 hex — the bytes must match exactly, but printing them on failure
     /// would be useless.
     pub disc_data: BTreeMap<String, String>,
+    /// Each staged disc's embedded `catalog.sqlite`, dumped logically and
+    /// keyed `disc-N`.
+    ///
+    /// It is a *copy* of the catalog compared above, so a drift shows up
+    /// twice — deliberately: the embedded snapshot is written by a different
+    /// path (`snapshot_to` + `apply_update_to` on a work copy), and comparing
+    /// it separately says which of the two paths drifted.
+    pub disc_catalogs: BTreeMap<String, Vec<String>>,
 }
 
 /// Open a database that the run just wrote, read-only and without disturbing it.
@@ -141,6 +149,7 @@ pub fn snapshot(run: &RunOutcome, norm: &mut Normalizer) -> Snapshot {
 
     let mut disc_json = BTreeMap::new();
     let mut disc_data = BTreeMap::new();
+    let mut disc_catalogs = BTreeMap::new();
     let staging = run.scratch.work.join("staging");
     let mut discs: Vec<std::path::PathBuf> = std::fs::read_dir(&staging)
         .map(|rd| {
@@ -169,10 +178,17 @@ pub fn snapshot(run: &RunOutcome, norm: &mut Normalizer) -> Snapshot {
                 }
             }
         }
-        // The embedded catalog.sqlite is deliberately not compared here: it is a
-        // *copy* of the catalog already compared above, and comparing it twice
-        // would report one drift as two failures. P5's differential task adds it
-        // once `burn` writes it.
+        // The embedded catalog.sqlite is a *copy* of the catalog compared
+        // above, so a drift shows up twice — deliberately: it is written by a
+        // different path (`snapshot_to` + `apply_update_to` on a work copy),
+        // and comparing it separately says which of the two paths drifted.
+        let embedded = meta.join("catalog.sqlite");
+        if embedded.is_file() {
+            disc_catalogs.insert(
+                disc_name.clone(),
+                dump_normalized(&embedded, CATALOG_TABLES, norm),
+            );
+        }
         let data = disc.join("data");
         for path in walk_files(&data) {
             let rel = path
@@ -194,6 +210,7 @@ pub fn snapshot(run: &RunOutcome, norm: &mut Normalizer) -> Snapshot {
         staged,
         disc_json,
         disc_data,
+        disc_catalogs,
     }
 }
 
@@ -266,6 +283,12 @@ pub fn differences(a: &Snapshot, b: &Snapshot) -> Vec<String> {
     diff_maps("staged json", &a.staged, &b.staged, &mut out);
     diff_maps("disc json", &a.disc_json, &b.disc_json, &mut out);
     diff_maps("disc data", &a.disc_data, &b.disc_data, &mut out);
+    diff_maps(
+        "disc catalogs",
+        &a.disc_catalogs,
+        &b.disc_catalogs,
+        &mut out,
+    );
     out
 }
 
@@ -297,6 +320,7 @@ mod tests {
             staged: Default::default(),
             disc_json: Default::default(),
             disc_data: Default::default(),
+            disc_catalogs: Default::default(),
         }
     }
 

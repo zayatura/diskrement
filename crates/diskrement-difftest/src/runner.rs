@@ -39,7 +39,7 @@ pub const PROJECT: &str = "p";
 /// unknown-subcommand *probe*, which exercises the argument parser (fully
 /// implemented, `Expect::ExitOnly`) rather than a command, and would
 /// otherwise block that scenario forever.
-pub const RUST_IMPLEMENTED: &[&str] = &["frobnicate", "init", "plan", "scan", "status"];
+pub const RUST_IMPLEMENTED: &[&str] = &["burn", "frobnicate", "init", "plan", "scan", "status"];
 
 /// Why a differential run cannot happen here.
 ///
