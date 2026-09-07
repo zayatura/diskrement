@@ -76,4 +76,42 @@ pub fn fixture_text(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
 
+/// Recursively copy a fixture directory into `dest`, preserving file mtimes.
+///
+/// Mtimes matter because the staged tree inherits them from the snapshot; a
+/// copy that dropped them would still pass a byte comparison, but it would
+/// quietly stop testing the metadata half of the stager.
+pub fn copy_tree(src: &Path, dest: &Path) {
+    std::fs::create_dir_all(dest).expect("creating the destination");
+    for entry in walkdir::WalkDir::new(src).follow_links(false) {
+        let entry = entry.expect("readable fixture entry");
+        let rel = entry.path().strip_prefix(src).expect("walked from src");
+        let target = dest.join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target).expect("creating a directory");
+        } else if entry.file_type().is_file() {
+            std::fs::copy(entry.path(), &target).expect("copying a file");
+            let mtime = entry
+                .metadata()
+                .expect("readable metadata")
+                .modified()
+                .expect("a modification time");
+            std::fs::File::options()
+                .write(true)
+                .open(&target)
+                .expect("reopening the copy")
+                .set_modified(mtime)
+                .expect("restoring the mtime");
+        }
+    }
+}
+
+/// Copy a whole fixture work dir into a temp dir and return both.
+pub fn fixture_work_copy(rel: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::TempDir::new().expect("a writable temp directory");
+    let dest = dir.path().join("work");
+    copy_tree(&fixtures_dir().join(rel), &dest);
+    (dir, dest)
+}
+
 pub use diskrement_shell::testutil::{assert_dumps_match, dump_catalog, CATALOG_TABLES};
