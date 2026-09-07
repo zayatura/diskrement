@@ -323,11 +323,11 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
 /// The verification backend, chosen by the same one decision that chooses the
 /// burner (spec §5.2): verifying a simulated burn by mounting a physical disc
 /// is meaningless, so the two arms move together.
-fn resolve_verifier(
+fn resolve_verifier<'a>(
     burner: Option<args::BurnerKind>,
-    device: Option<&str>,
-    work_dir: &std::path::Path,
-) -> Result<Verifier, PipelineError> {
+    device: Option<&'a str>,
+    work_dir: &'a std::path::Path,
+) -> Result<Verifier<'a>, PipelineError> {
     match backend::resolve(burner, device, &env_lookup) {
         backend::Backend::Simulated => Ok(Verifier::Staging(StagingVerifier::new(
             work_dir.join("staging"),
