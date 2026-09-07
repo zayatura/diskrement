@@ -83,9 +83,9 @@ impl BurnDevice {
 
 /// Expected burn failures.
 ///
-/// P5 defines only what P5 can raise, plus `Aborted`, which carries the exit-0
-/// contract. P8 adds the xorriso and media variants with the code that raises
-/// them.
+/// One variant per failure the operator can act on. The exit ladder maps every
+/// one of them to 6 except `Aborted`, which is a successful run that wrote
+/// nothing and exits 0 (spec §3.2).
 #[derive(Debug, thiserror::Error)]
 pub enum BurnError {
     #[error("content hash mismatch for {rel_path}: expected {expected}, got {actual}")]
@@ -103,6 +103,33 @@ pub enum BurnError {
     Io(#[source] std::io::Error),
     #[error("xorriso is not available: {0} (install the libisoburn/xorriso package)")]
     ToolMissing(String),
+    #[error("xorriso {0} is too old (need 1.5 or newer)")]
+    ToolTooOld(String),
+    #[error("burner device not found: {0}")]
+    DeviceNotFound(String),
+    #[error(
+        "no permission to open {0} — add your user to the 'optical' group \
+         (sudo usermod -aG optical <user>) and log in again"
+    )]
+    DevicePermissionDenied(String),
+    /// Constructed nowhere in this crate, exactly as in the Scala build — it
+    /// is pinned by `ExitMappingSpec` as the representative exit-6 failure and
+    /// is kept for that reason alone. `NotBlank`, `DiscClosed`, `ForeignDisc`
+    /// and `WrongDisc` are the four Scala variants nothing constructs *and*
+    /// nothing pins; they are deliberately not ported.
+    #[error("no disc in {0}")]
+    NoMedia(String),
+    #[error("insufficient media capacity: need {needed_bytes} bytes, only {free_bytes} free")]
+    InsufficientCapacity { needed_bytes: u64, free_bytes: u64 },
+    #[error("xorriso failed (exit {exit_code}): {}", output_tail.join(" | "))]
+    BurnFailed {
+        exit_code: i32,
+        output_tail: Vec<String>,
+    },
+    #[error("post-burn sanity check failed: {0}")]
+    PostBurnCheckFailed(String),
+    #[error("could not mount the disc for verification: {0}")]
+    MountFailed(String),
     #[error("aborted by operator")]
     Aborted,
 }

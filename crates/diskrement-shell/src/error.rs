@@ -379,4 +379,65 @@ mod tests {
         .iter()
         .all(|c| *c == 2));
     }
+
+    /// Every media/burner failure is exit 6, and every message is the Scala
+    /// one verbatim (`Burn.scala`). The abort is the single exception, and it
+    /// is already pinned above.
+    #[test]
+    fn the_media_and_tool_errors_are_exit_6_with_their_scala_messages() {
+        use crate::burn::BurnError;
+
+        let cases: Vec<(BurnError, &str)> = vec![
+            (
+                BurnError::ToolMissing("cannot launch xorriso: nope".into()),
+                "xorriso is not available: cannot launch xorriso: nope \
+                 (install the libisoburn/xorriso package)",
+            ),
+            (
+                BurnError::ToolTooOld("1.4.2".into()),
+                "xorriso 1.4.2 is too old (need 1.5 or newer)",
+            ),
+            (
+                BurnError::DeviceNotFound("/dev/sr9".into()),
+                "burner device not found: /dev/sr9",
+            ),
+            (
+                BurnError::DevicePermissionDenied("/dev/sr0".into()),
+                "no permission to open /dev/sr0 — add your user to the 'optical' group \
+                 (sudo usermod -aG optical <user>) and log in again",
+            ),
+            (BurnError::NoMedia("/dev/sr0".into()), "no disc in /dev/sr0"),
+            (
+                BurnError::InsufficientCapacity {
+                    needed_bytes: 1_000,
+                    free_bytes: 10,
+                },
+                "insufficient media capacity: need 1000 bytes, only 10 free",
+            ),
+            (
+                BurnError::BurnFailed {
+                    exit_code: 5,
+                    output_tail: vec!["FAILURE : write error".into(), "aborting".into()],
+                },
+                "xorriso failed (exit 5): FAILURE : write error | aborting",
+            ),
+            (
+                BurnError::PostBurnCheckFailed("expected …, found: None".into()),
+                "post-burn sanity check failed: expected …, found: None",
+            ),
+            (
+                BurnError::MountFailed("udisksctl gave no mount point".into()),
+                "could not mount the disc for verification: udisksctl gave no mount point",
+            ),
+        ];
+
+        for (err, message) in cases {
+            assert_eq!(err.to_string(), message);
+            assert_eq!(
+                PipelineError::Burn(err).exit_code(),
+                6,
+                "every burn failure but an abort is 6"
+            );
+        }
+    }
 }
