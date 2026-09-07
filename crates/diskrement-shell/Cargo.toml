@@ -16,6 +16,12 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# Runtime, not just dev (spec §5.4 lists it under Dev): the media inspector,
+# the disc reader and the tier-2 verifier all extract to a temporary file, and
+# hand-rolling O_EXCL naming in a world-writable directory is a wheel with a
+# symlink-attack surface. Already in the lockfile as a dev-dependency, so the
+# dependency tree is unchanged.
+tempfile.workspace = true
 thiserror.workspace = true
 walkdir.workspace = true
 

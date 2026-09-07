@@ -8,6 +8,7 @@
 
 pub mod cmd;
 pub mod json;
+pub mod media;
 pub mod simulated;
 pub mod snapshot_writer;
 pub mod stager;
@@ -28,6 +29,22 @@ pub struct DiscIdentity {
     pub disc_ordinal: u32,
     pub session_ordinal: u32,
     pub created_at: DateTime<Utc>,
+}
+
+/// Scala's case-class `toString`, reproduced because it is interpolated into
+/// `PostBurnCheckFailed`'s detail and into the verifier's re-prompt line
+/// (spec §3.2: output wording is contract outside clap's argument errors).
+impl std::fmt::Display for DiscIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DiscIdentity({},{},{},{})",
+            self.project_name,
+            self.disc_ordinal,
+            self.session_ordinal,
+            crate::catalog::time::format(&self.created_at)
+        )
+    }
 }
 
 /// The whole `/.diskrement` payload for one disc.
