@@ -81,7 +81,6 @@ pub fn gb(bytes: u64) -> String {
 }
 
 /// `Render.burn`. One disc per cycle, so there is exactly one block.
-#[allow(dead_code)]
 pub fn burn_report(r: &BurnReport) -> String {
     let d = &r.disc;
     let status = if d.finalized {

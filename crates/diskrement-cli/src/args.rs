@@ -7,6 +7,15 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use diskrement_core::DiscType;
 
+/// The burn backend, as a flag. zio-cli's `Options.enumeration` rejected an
+/// unknown value as an argument error and clap's `ValueEnum` does the same.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum BurnerKind {
+    Real,
+    Simulated,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "diskrement",
@@ -21,7 +30,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub device: Option<String>,
     #[arg(long, global = true)]
-    pub burner: Option<String>,
+    pub burner: Option<BurnerKind>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -62,6 +71,12 @@ pub enum Command {
     },
     /// Show discs, totals, and last burn.
     Status { name: String },
+    /// Burn the staged plan (with confirmation).
+    Burn {
+        name: String,
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
 }
 
 #[cfg(test)]
