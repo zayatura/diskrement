@@ -411,7 +411,7 @@ impl<'a> Pipeline<'a> {
         &mut self,
         name: &str,
         disc_ordinal: Option<i64>,
-        verifier: &Verifier,
+        verifier: &Verifier<'_>,
     ) -> Result<Vec<VerifyReport>, PipelineError> {
         let p = self.project(name)?;
         let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
@@ -457,7 +457,7 @@ impl<'a> Pipeline<'a> {
         p: &Project,
         ordinal: u32,
         sessions: &[Session],
-        verifier: &Verifier,
+        verifier: &Verifier<'_>,
     ) -> Result<VerifyReport, PipelineError> {
         let latest_session = self
             .catalog

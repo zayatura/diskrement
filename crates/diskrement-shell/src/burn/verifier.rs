@@ -11,7 +11,10 @@ use std::path::PathBuf;
 
 use diskrement_core::{ContentHash, RelPath};
 
-use crate::burn::BurnError;
+use crate::burn::cmd::Exec;
+use crate::burn::media::{MediaInspector, MediaStatus};
+use crate::burn::reader::DiscReader;
+use crate::burn::{BurnDevice, BurnError, BurnOperator, DiscIdentity};
 use crate::catalog::model::SupersededVersion;
 use crate::fs::hasher;
 use crate::fs::scanner::relativize;
@@ -100,15 +103,158 @@ impl StagingVerifier {
     }
 }
 
-/// The verification backends. One variant now; P8 adds `Disc`.
-pub enum Verifier {
-    Staging(StagingVerifier),
+/// Read-back verification of physical (or image) media.
+///
+/// Tier 1 is the merged `/data` view: every file on the disc hashed against
+/// `visible`, and every expected file missing from the disc counted as a
+/// mismatch. Tier 2 is the versions this disc's later sessions hid, extracted
+/// from the session that recorded them. An operator decline skips the disc.
+pub struct DiscVerifier<'a> {
+    device: BurnDevice,
+    exec: &'a dyn Exec,
+    operator: &'a dyn BurnOperator,
 }
 
-impl Verifier {
+impl<'a> DiscVerifier<'a> {
+    pub fn new(device: BurnDevice, exec: &'a dyn Exec, operator: &'a dyn BurnOperator) -> Self {
+        DiscVerifier {
+            device,
+            exec,
+            operator,
+        }
+    }
+
+    pub fn verify(&self, exp: &DiscExpectation) -> Result<VerifyOutcome, BurnError> {
+        if !self.await_disc(exp)? {
+            return Ok(VerifyOutcome {
+                files_checked: 0,
+                mismatches: Vec::new(),
+                skipped: true,
+            });
+        }
+        let (checked_1, mut mismatches) = self.tier1(exp)?;
+        let (checked_2, tier2) = self.tier2(exp)?;
+        mismatches.extend(tier2);
+        mismatches.sort();
+        mismatches.dedup();
+        Ok(VerifyOutcome {
+            files_checked: checked_1 + checked_2,
+            mismatches,
+            skipped: false,
+        })
+    }
+
+    /// The insert loop. Unlike the burner's, *any* session ordinal of the
+    /// right disc is acceptable, and a decline is a skip rather than an abort.
+    fn await_disc(&self, exp: &DiscExpectation) -> Result<bool, BurnError> {
+        let prompt = format!(
+            "Insert disc {} of '{}' into {} to verify it (or decline to skip this disc).",
+            exp.disc_ordinal,
+            exp.project_name,
+            self.device.xorriso_address()
+        );
+        let matches = |id: &DiscIdentity| {
+            id.project_name == exp.project_name && id.disc_ordinal == exp.disc_ordinal
+        };
+        loop {
+            if !self.operator.confirm_insert(&prompt) {
+                return Ok(false);
+            }
+            let status = MediaInspector::new(self.device.clone(), self.exec).inspect()?;
+            let ok = match &status {
+                MediaStatus::Appendable {
+                    identity: Some(id), ..
+                } => matches(id),
+                MediaStatus::Closed(Some(id)) => matches(id),
+                _ => false,
+            };
+            if ok {
+                return Ok(true);
+            }
+            self.operator.progress(&format!(
+                "Not the expected disc (found: {status}). Swap discs and confirm again."
+            ));
+        }
+    }
+
+    /// The merged view: what a mount shows.
+    fn tier1(&self, exp: &DiscExpectation) -> Result<(usize, Vec<RelPath>), BurnError> {
+        let reader = DiscReader::new(self.device.clone(), self.exec);
+        reader.with_data_tree(|data_dir| {
+            let mut files = Vec::new();
+            for entry in walkdir::WalkDir::new(data_dir).sort_by_file_name() {
+                let entry = entry.map_err(|e| BurnError::Io(std::io::Error::other(e)))?;
+                if entry.file_type().is_file() {
+                    files.push(entry.into_path());
+                }
+            }
+
+            let mut found = BTreeMap::new();
+            let mut mismatches = Vec::new();
+            for file in &files {
+                let rel = relativize(data_dir, file);
+                let actual = hasher::hash(file).map_err(BurnError::Io)?;
+                if exp.visible.get(&rel) != Some(&actual) {
+                    mismatches.push(rel.clone());
+                }
+                found.insert(rel, actual);
+            }
+            let missing: Vec<RelPath> = exp
+                .visible
+                .keys()
+                .filter(|rel| !found.contains_key(*rel))
+                .cloned()
+                .collect();
+
+            let checked = files.len() + missing.len();
+            mismatches.extend(missing);
+            Ok((checked, mismatches))
+        })
+    }
+
+    /// The versions later sessions of this same disc hid.
+    ///
+    /// Each extraction goes to its own fresh path, so nothing depends on
+    /// whether osirrox would overwrite an existing file, and an extraction or
+    /// hash failure is a mismatch rather than an error: an archived version
+    /// that cannot be read is precisely the finding `verify` exists for.
+    fn tier2(&self, exp: &DiscExpectation) -> Result<(usize, Vec<RelPath>), BurnError> {
+        if exp.superseded.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+        let dir = tempfile::TempDir::new().map_err(BurnError::Io)?;
+        let reader = DiscReader::new(self.device.clone(), self.exec);
+        let mut mismatches = Vec::new();
+        for (i, sv) in exp.superseded.iter().enumerate() {
+            let dest = dir.path().join(format!("tier2-{i}.bin"));
+            let checked = reader
+                .extract_from_session(
+                    sv.session_ordinal,
+                    &format!("/data/{}", sv.rel_path.as_str()),
+                    &dest,
+                )
+                .and_then(|()| hasher::hash(&dest).map_err(BurnError::Io));
+            match checked {
+                Ok(actual) if actual == sv.content_hash => {}
+                _ => mismatches.push(sv.rel_path.clone()),
+            }
+        }
+        Ok((exp.superseded.len(), mismatches))
+    }
+}
+
+/// The verification backends, chosen by the same decision that chooses the
+/// burner (spec §5.2).
+pub enum Verifier<'a> {
+    Staging(StagingVerifier),
+    Disc(DiscVerifier<'a>),
+}
+
+impl Verifier<'_> {
     pub fn verify(&self, exp: &DiscExpectation) -> Result<VerifyOutcome, BurnError> {
         match self {
             Verifier::Staging(v) => v.verify(exp),
+            Verifier::Disc(v) => v.verify(exp),
         }
     }
 }
@@ -243,5 +389,155 @@ mod tests {
                 RelPath("z.bin".to_string()),
             ]
         );
+    }
+
+    mod disc {
+        use super::*;
+        use crate::burn::cmd::CmdOutput;
+        use crate::burn::testkit::ScriptedOperator;
+        use crate::burn::BurnDevice;
+        use std::cell::RefCell;
+
+        const APPENDABLE: &[&str] = &[
+            "Media status : is written , is appendable",
+            "Media summary: 1 session, 57 data blocks, 114k data, 23g free",
+            "Media space  : 500000s",
+        ];
+        const IDENTITY: &str = r#"{"projectName":"photos","discOrdinal":1,"sessionOrdinal":1,"createdAt":"2026-08-30T10:00:00Z"}"#;
+        const OTHER_DISC: &str = r#"{"projectName":"photos","discOrdinal":9,"sessionOrdinal":1,"createdAt":"2026-08-30T10:00:00Z"}"#;
+
+        fn expectation() -> DiscExpectation {
+            DiscExpectation {
+                project_name: "photos".to_string(),
+                disc_ordinal: 1,
+                latest_session: BTreeMap::new(),
+                visible: BTreeMap::new(),
+                superseded: Vec::new(),
+            }
+        }
+
+        /// A queue of identity payloads, one per `-extract` of project.json.
+        struct Toc {
+            identities: RefCell<std::collections::VecDeque<&'static str>>,
+        }
+
+        impl Toc {
+            fn new(ids: &[&'static str]) -> Self {
+                Toc {
+                    identities: RefCell::new(ids.iter().copied().collect()),
+                }
+            }
+
+            fn respond(
+                &self,
+                cmd: &[String],
+                _: &mut dyn FnMut(&str),
+            ) -> Result<CmdOutput, BurnError> {
+                if cmd.iter().any(|a| a == "-toc") {
+                    return Ok(CmdOutput {
+                        exit_code: 0,
+                        lines: APPENDABLE.iter().map(|s| (*s).to_string()).collect(),
+                    });
+                }
+                if cmd.iter().any(|a| a == "-extract") {
+                    // `args::extract` ends with `<disc path> <destination>`,
+                    // so the two tails say which read this is.
+                    let disc_path = &cmd[cmd.len() - 2];
+                    let dest = cmd.last().expect("a destination");
+                    if disc_path == "/.diskrement/project.json" {
+                        let json = self
+                            .identities
+                            .borrow_mut()
+                            .pop_front()
+                            .expect("the script ran out of identities");
+                        std::fs::write(dest, json).expect("writable destination");
+                    } else {
+                        // A `/data` extraction produces a directory; an empty
+                        // one is the right answer for an empty expectation.
+                        std::fs::create_dir_all(dest).expect("writable destination");
+                    }
+                    return Ok(CmdOutput {
+                        exit_code: 0,
+                        lines: Vec::new(),
+                    });
+                }
+                Ok(CmdOutput {
+                    exit_code: 0,
+                    lines: Vec::new(),
+                })
+            }
+        }
+
+        /// Declining is a skip, not an abort: `verify` sweeps many discs and
+        /// the operator may not have all of them to hand. A skipped disc is
+        /// never marked verified — that is what the flag is for.
+        #[test]
+        fn a_declined_disc_is_skipped_and_nothing_is_read() {
+            let toc = Toc::new(&[]);
+            let exec = |c: &[String], l: &mut dyn FnMut(&str)| toc.respond(c, l);
+            let op = ScriptedOperator::new(&[false]);
+            let verifier =
+                DiscVerifier::new(BurnDevice::RealDevice("/dev/sr0".to_string()), &exec, &op);
+            assert_eq!(
+                verifier.verify(&expectation()).unwrap(),
+                VerifyOutcome {
+                    files_checked: 0,
+                    mismatches: Vec::new(),
+                    skipped: true,
+                }
+            );
+            assert_eq!(
+                op.log(),
+                vec!["Insert disc 1 of 'photos' into /dev/sr0 to verify it \
+                     (or decline to skip this disc)."
+                    .to_string()]
+            );
+        }
+
+        /// The wrong disc re-prompts, and the message carries the `MediaStatus`
+        /// rendering the operator needs to see what is actually in the drive
+        /// (the plan's D3).
+        #[test]
+        fn the_wrong_disc_re_prompts_naming_what_was_found() {
+            let toc = Toc::new(&[OTHER_DISC]);
+            let exec = |c: &[String], l: &mut dyn FnMut(&str)| toc.respond(c, l);
+            // Confirm once with the wrong disc, then give up.
+            let op = ScriptedOperator::new(&[true, false]);
+            let outcome =
+                DiscVerifier::new(BurnDevice::RealDevice("/dev/sr0".to_string()), &exec, &op)
+                    .verify(&expectation())
+                    .unwrap();
+            assert!(outcome.skipped);
+            assert!(
+                op.said(
+                    "Not the expected disc (found: Appendable(1024000000,1,\
+                     Some(DiscIdentity(photos,9,1,2026-08-30T10:00:00Z)))). \
+                     Swap discs and confirm again."
+                ),
+                "{:?}",
+                op.log()
+            );
+        }
+
+        /// Any session ordinal of the right disc is acceptable to `verify` —
+        /// unlike a top-off, which demands exactly the previous one.
+        #[test]
+        fn the_right_disc_at_any_session_is_accepted() {
+            let toc = Toc::new(&[IDENTITY]);
+            let exec = |c: &[String], l: &mut dyn FnMut(&str)| toc.respond(c, l);
+            let op = ScriptedOperator::new(&[true]);
+            // No `visible`, no `superseded`: the disc is accepted and both
+            // tiers have nothing to check. The extraction of `/data` is what
+            // an image-backed run exercises (tests/xorriso_image.rs).
+            let outcome = DiscVerifier::new(
+                BurnDevice::ImageFile(std::path::PathBuf::from("/tmp/none.iso")),
+                &exec,
+                &op,
+            )
+            .verify(&expectation())
+            .unwrap();
+            assert!(!outcome.skipped);
+            assert_eq!(outcome.files_checked, 0);
+        }
     }
 }

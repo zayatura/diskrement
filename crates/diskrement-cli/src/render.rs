@@ -4,6 +4,7 @@
 use diskrement_core::RelPath;
 use diskrement_shell::catalog::model::{FileHistoryEntry, LostReport, Project, ProjectId};
 use diskrement_shell::catalog::time;
+use diskrement_shell::error::PipelineError;
 use diskrement_shell::pipeline::reports::{
     BurnReport, PlanReport, ScanReport, StatusReport, VerifyReport,
 };
@@ -257,6 +258,18 @@ pub fn mark_dead(r: &LostReport) -> String {
 /// every line the CLI prints.
 pub fn reset_done(name: &str) -> String {
     format!("Reset {name}.")
+}
+
+/// The stderr line for a failed run (`Render.handle`'s message half).
+///
+/// `PipelineError`'s own `Display` is the message everywhere except an aborted
+/// burn: that one is not a fault to report but an action the operator took, so
+/// it reads as `Aborted.` and exits 0.
+pub fn error_line(err: &PipelineError) -> String {
+    match err {
+        PipelineError::Burn(diskrement_shell::burn::BurnError::Aborted) => "Aborted.".to_string(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -567,6 +580,29 @@ mod tests {
             vec![scanned("huge.bin", 5_000)],
         );
         assert!(plan_report(&report).starts_with("Plan: disc 1 (new disc, BD_R) — 0 files"));
+    }
+
+    /// `Render.handle`'s one special case: an aborted burn is a successful run
+    /// that wrote nothing, so it renders as `Aborted.` and exits 0 — not as
+    /// the error's own "aborted by operator" wording.
+    #[test]
+    fn an_aborted_burn_renders_as_aborted_and_nothing_else_is_special() {
+        use diskrement_shell::burn::BurnError;
+        use diskrement_shell::error::PipelineError;
+
+        assert_eq!(
+            error_line(&PipelineError::Burn(BurnError::Aborted)),
+            "Aborted."
+        );
+        assert_eq!(PipelineError::Burn(BurnError::Aborted).exit_code(), 0);
+        assert_eq!(
+            error_line(&PipelineError::Burn(BurnError::NoMedia("/dev/sr0".into()))),
+            "no disc in /dev/sr0"
+        );
+        assert_eq!(
+            error_line(&PipelineError::ProjectNotFound("photos".into())),
+            "project not found: photos"
+        );
     }
 }
 

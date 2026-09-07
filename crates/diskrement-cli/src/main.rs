@@ -10,13 +10,15 @@ mod prompt;
 mod render;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use args::Command;
 use clap::Parser as _;
-use diskrement_shell::burn::verifier::{StagingVerifier, Verifier};
-use diskrement_shell::burn::{simulated::SimulatedBurner, Burner};
+use diskrement_shell::burn::cmd::{self, CmdOutput, Exec};
+use diskrement_shell::burn::verifier::{DiscVerifier, StagingVerifier, Verifier};
+use diskrement_shell::burn::xorriso::burner::XorrisoBurner;
+use diskrement_shell::burn::{simulated::SimulatedBurner, BurnError, Burner};
 use diskrement_shell::catalog::model::{Project, ProjectInit};
 use diskrement_shell::catalog::Catalog;
 use diskrement_shell::error::PipelineError;
@@ -32,7 +34,7 @@ fn main() -> ExitCode {
         Ok(cli) => match dispatch(cli) {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
-                eprintln!("{err}");
+                eprintln!("{}", render::error_line(&err));
                 ExitCode::from(err.exit_code() as u8)
             }
         },
@@ -46,6 +48,16 @@ fn main() -> ExitCode {
 fn env_lookup(k: &str) -> Option<String> {
     std::env::var(k).ok()
 }
+
+/// The production `Exec`.
+///
+/// A `fn` pointer, not a closure: the blanket impl in `burn::cmd` is
+/// higher-ranked over both reference arguments, and a `fn` pointer type
+/// satisfies it for every lifetime with no inference to go wrong.
+/// `&SYSTEM_EXEC` then coerces to `&dyn Exec` wherever a burner or a verifier
+/// needs one.
+type SystemExec = fn(&[String], &mut dyn FnMut(&str)) -> Result<CmdOutput, BurnError>;
+const SYSTEM_EXEC: SystemExec = cmd::system;
 
 fn home() -> PathBuf {
     std::env::var("HOME")
@@ -194,25 +206,19 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             // at `plan` time, and re-planning here would silently discard a
             // `plan --disc-type ...` choice. `render::burn_report` then reports
             // what was actually written.
+            let par = diskrement_shell::fs::scanner::parallelism_from_env();
+            for w in &par.warnings {
+                eprintln!("{w}");
+            }
+            let exec = SYSTEM_EXEC;
+            let operator = prompt::ConsoleOperator;
             let burner = match backend::resolve(cli.burner, cli.device.as_deref(), &env_lookup) {
                 backend::Backend::Simulated => {
-                    let par = diskrement_shell::fs::scanner::parallelism_from_env();
-                    for w in &par.warnings {
-                        eprintln!("{w}");
-                    }
                     Burner::Simulated(SimulatedBurner::new(&sink, par.value))
                 }
-                // P8 replaces this arm with the xorriso burner. Refusing here
-                // rather than falling back to the simulated backend is the
-                // point: a silently simulated burn is a divergence nothing in
-                // the differential harness would catch.
-                backend::Backend::Real(device) => {
-                    return Err(PipelineError::Failed(format!(
-                        "the real burner is not implemented yet (device {}); \
-                         re-run with --burner simulated",
-                        device.xorriso_address()
-                    )))
-                }
+                backend::Backend::Real(device) => Burner::Real(XorrisoBurner::new(
+                    device, &exec, &operator, &sink, par.value,
+                )),
             };
 
             if !prompt::confirm(&format!("Burn the staged plan for {name}?"), yes) {
@@ -250,11 +256,15 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
         Command::Verify { name, disc } => {
             let mut catalog = open_catalog(&resolved.catalog)?;
             let p = find_or_fail(&catalog, &name)?;
+            let exec = SYSTEM_EXEC;
+            let operator = prompt::ConsoleOperator;
             let verifier = resolve_verifier(
                 cli.burner,
                 cli.device.as_deref(),
                 std::path::Path::new(&p.work_dir),
-            )?;
+                &exec,
+                &operator,
+            );
             let mut pipeline = Pipeline::new(
                 &mut catalog,
                 PipelinePaths {
@@ -323,23 +333,18 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
 /// The verification backend, chosen by the same one decision that chooses the
 /// burner (spec §5.2): verifying a simulated burn by mounting a physical disc
 /// is meaningless, so the two arms move together.
-fn resolve_verifier(
+fn resolve_verifier<'a>(
     burner: Option<args::BurnerKind>,
     device: Option<&str>,
-    work_dir: &std::path::Path,
-) -> Result<Verifier, PipelineError> {
+    work_dir: &Path,
+    exec: &'a dyn Exec,
+    operator: &'a dyn diskrement_shell::burn::BurnOperator,
+) -> Verifier<'a> {
     match backend::resolve(burner, device, &env_lookup) {
-        backend::Backend::Simulated => Ok(Verifier::Staging(StagingVerifier::new(
-            work_dir.join("staging"),
-        ))),
-        // P8 replaces this arm with the read-back disc verifier. Falling back
-        // to the staging verifier would report a physical disc as verified
-        // without ever reading it — a divergence no test could see.
-        backend::Backend::Real(device) => Err(PipelineError::Failed(format!(
-            "the real disc verifier is not implemented yet (device {}); \
-             re-run with --burner simulated",
-            device.xorriso_address()
-        ))),
+        backend::Backend::Simulated => {
+            Verifier::Staging(StagingVerifier::new(work_dir.join("staging")))
+        }
+        backend::Backend::Real(device) => Verifier::Disc(DiscVerifier::new(device, exec, operator)),
     }
 }
 
