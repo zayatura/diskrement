@@ -296,59 +296,107 @@ mod p4 {
     }
 }
 
+/// Shared fixtures for the project-driving modules: `project` builds a
+/// scratch project, `base`/`cmd` run the binary without ever touching a real
+/// drive, and `burned_project` starts from one burned disc.
+fn cmd() -> Command {
+    let mut c = Command::cargo_bin("diskrement").expect("binary builds");
+    // Never touch a real drive from a test.
+    c.env("DISKREMENT_BURNER", "simulated");
+    c.env("DISKREMENT_HASH_PARALLELISM", "2");
+    c.env_remove("DISKREMENT_DISC_BYTES");
+    c
+}
+
+struct Project {
+    _dir: tempfile::TempDir,
+    catalog: std::path::PathBuf,
+    work: std::path::PathBuf,
+    source: std::path::PathBuf,
+}
+
+fn project() -> Project {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+    let source = root.join("src");
+    let work = root.join("work");
+    let catalog = root.join("catalog/cat.sqlite");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+    std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
+    Project {
+        _dir: dir,
+        catalog,
+        work,
+        source,
+    }
+}
+
+fn base(p: &Project) -> Command {
+    let mut c = cmd();
+    c.arg("--catalog").arg(&p.catalog);
+    c
+}
+
+fn init_scan_plan(p: &Project) {
+    base(p)
+        .args(["init", "p", "--source"])
+        .arg(&p.source)
+        .arg("--work-dir")
+        .arg(&p.work)
+        .assert()
+        .success();
+    base(p).args(["scan", "p"]).assert().success();
+    base(p).args(["plan", "p"]).assert().success();
+}
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    catalog: std::path::PathBuf,
+    work: std::path::PathBuf,
+}
+
+/// init → scan → plan → burn, leaving one burned disc with two files staged.
+/// Every assertion that starts from a burn starts here.
+fn burned_project() -> Fixture {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    let source = root.join("source");
+    std::fs::create_dir_all(source.join("nested")).unwrap();
+    std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
+    std::fs::write(source.join("nested/c.bin"), vec![b'c'; 100]).unwrap();
+    let catalog = root.join("catalog/cat.sqlite");
+    std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+    let work = root.join("work");
+
+    let run = |c: &std::path::Path| {
+        let mut x = cmd();
+        x.arg("--catalog").arg(c);
+        x
+    };
+    run(&catalog)
+        .args(["init", "p", "--source"])
+        .arg(&source)
+        .arg("--work-dir")
+        .arg(&work)
+        .assert()
+        .success();
+    run(&catalog).args(["scan", "p"]).assert().success();
+    run(&catalog).args(["plan", "p"]).assert().success();
+    run(&catalog)
+        .args(["burn", "p", "--yes"])
+        .assert()
+        .success();
+
+    Fixture {
+        _dir: dir,
+        catalog,
+        work,
+    }
+}
+
 mod p5 {
     use super::*;
-
-    fn cmd() -> Command {
-        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
-        // Never touch a real drive from a test.
-        c.env("DISKREMENT_BURNER", "simulated");
-        c.env("DISKREMENT_HASH_PARALLELISM", "2");
-        c.env_remove("DISKREMENT_DISC_BYTES");
-        c
-    }
-
-    struct Project {
-        _dir: tempfile::TempDir,
-        catalog: std::path::PathBuf,
-        work: std::path::PathBuf,
-        source: std::path::PathBuf,
-    }
-
-    fn project() -> Project {
-        let dir = tempfile::TempDir::new().unwrap();
-        let root = dir.path().to_path_buf();
-        let source = root.join("src");
-        let work = root.join("work");
-        let catalog = root.join("catalog/cat.sqlite");
-        std::fs::create_dir_all(&source).unwrap();
-        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
-        std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
-        Project {
-            _dir: dir,
-            catalog,
-            work,
-            source,
-        }
-    }
-
-    fn base(p: &Project) -> Command {
-        let mut c = cmd();
-        c.arg("--catalog").arg(&p.catalog);
-        c
-    }
-
-    fn init_scan_plan(p: &Project) {
-        base(p)
-            .args(["init", "p", "--source"])
-            .arg(&p.source)
-            .arg("--work-dir")
-            .arg(&p.work)
-            .assert()
-            .success();
-        base(p).args(["scan", "p"]).assert().success();
-        base(p).args(["plan", "p"]).assert().success();
-    }
 
     #[test]
     fn burn_writes_the_disc_and_reports_it() {
@@ -420,23 +468,6 @@ mod p5 {
         assert!(p.work.join("staged/plan.json").is_file());
     }
 
-    /// The real burner is P8's. Until then the CLI refuses rather than
-    /// silently simulating.
-    #[test]
-    fn asking_for_the_real_burner_is_refused_for_now() {
-        let p = project();
-        init_scan_plan(&p);
-
-        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
-        c.arg("--catalog")
-            .arg(&p.catalog)
-            .args(["--burner", "real", "burn", "p", "--yes"])
-            .env_remove("DISKREMENT_BURNER")
-            .assert()
-            .code(5)
-            .stderr(contains("the real burner is not implemented yet"));
-    }
-
     /// A bad `--burner` value is an argument error (exit 1), the one place
     /// spec §3.2 lets clap and zio-cli word things differently.
     #[test]
@@ -499,51 +530,6 @@ mod p6 {
         c.env_remove("DISKREMENT_DEVICE");
         c.env_remove("DISKREMENT_DISC_BYTES");
         c
-    }
-
-    struct Fixture {
-        _dir: tempfile::TempDir,
-        catalog: std::path::PathBuf,
-        work: std::path::PathBuf,
-    }
-
-    /// init → scan → plan → burn, leaving one burned disc with two files
-    /// staged. Every later assertion in this module starts here.
-    fn burned_project() -> Fixture {
-        let dir = tempfile::TempDir::new().unwrap();
-        let root = dir.path();
-        let source = root.join("source");
-        std::fs::create_dir_all(source.join("nested")).unwrap();
-        std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
-        std::fs::write(source.join("nested/c.bin"), vec![b'c'; 100]).unwrap();
-        let catalog = root.join("catalog/cat.sqlite");
-        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
-        let work = root.join("work");
-
-        let base = |c: &std::path::Path| {
-            let mut x = cmd();
-            x.arg("--catalog").arg(c);
-            x
-        };
-        base(&catalog)
-            .args(["init", "p", "--source"])
-            .arg(&source)
-            .arg("--work-dir")
-            .arg(&work)
-            .assert()
-            .success();
-        base(&catalog).args(["scan", "p"]).assert().success();
-        base(&catalog).args(["plan", "p"]).assert().success();
-        base(&catalog)
-            .args(["burn", "p", "--yes"])
-            .assert()
-            .success();
-
-        Fixture {
-            _dir: dir,
-            catalog,
-            work,
-        }
     }
 
     fn run(f: &Fixture, args: &[&str]) -> assert_cmd::assert::Assert {
@@ -682,23 +668,6 @@ mod p6 {
                 .code(2)
                 .stderr(contains("project not found: nosuch"));
         }
-    }
-
-    /// Until P8 lands the disc verifier, a real-backend verify must refuse
-    /// rather than silently check the staging tree.
-    #[test]
-    fn verify_on_the_real_backend_refuses_until_p8() {
-        let f = burned_project();
-        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
-        c.env("DISKREMENT_BURNER", "real")
-            .env("DISKREMENT_DEVICE", "/dev/sr0")
-            .arg("--catalog")
-            .arg(&f.catalog)
-            .args(["verify", "p"])
-            .assert()
-            .failure()
-            .code(5)
-            .stderr(contains("the real disc verifier is not implemented yet"));
     }
 }
 
@@ -915,5 +884,110 @@ mod p7 {
         run(&f, &["verify", "p"])
             .success()
             .stdout("Nothing to verify: no burned discs.\n");
+    }
+}
+
+/// P8: the real backend, driven as far as a machine with no drive can go.
+mod p8 {
+    use super::*;
+
+    /// Is real `xorriso` installed? The burn path preflights it, so a machine
+    /// without it can only test the tool-missing branch.
+    fn has_xorriso() -> bool {
+        std::process::Command::new("xorriso")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// `--burner real` asks for a disc. With no stdin, the answer is "no", and
+    /// an aborted burn is a successful run that wrote nothing: exit 0,
+    /// `Aborted.` on stderr, and a catalog with no discs in it.
+    #[test]
+    fn a_real_burn_asks_for_the_disc_and_an_unanswered_prompt_aborts() {
+        if !has_xorriso() {
+            eprintln!(
+                "SKIP [a_real_burn_asks_for_the_disc_and_an_unanswered_prompt_aborts]: \
+                 xorriso is not installed; the burn path preflights it. Install the \
+                 libisoburn/xorriso package and re-run."
+            );
+            return;
+        }
+        let p = project();
+        init_scan_plan(&p);
+
+        Command::cargo_bin("diskrement")
+            .expect("binary builds")
+            .arg("--catalog")
+            .arg(&p.catalog)
+            .args([
+                "--burner", "real", "--device", "/dev/sr0", "burn", "p", "--yes",
+            ])
+            .env_remove("DISKREMENT_BURNER")
+            .env_remove("DISKREMENT_DEVICE")
+            .assert()
+            .code(0)
+            .stdout(contains(
+                "Insert a blank disc for 'p' disc 1 into /dev/sr0 and confirm. [y/N]",
+            ))
+            .stderr(contains("Aborted."));
+
+        // Commit-after-success: the aborted burn committed nothing.
+        base(&p)
+            .args(["status", "p"])
+            .assert()
+            .success()
+            .stdout(contains("Last burn: never"));
+        // And the staged plan survives, so the operator can retry.
+        assert!(p.work.join("staged/plan.json").is_file());
+    }
+
+    /// Without xorriso on `PATH` the same run fails at the preflight, with the
+    /// message that names the package to install — exit 6, the media/burner
+    /// rung.
+    #[test]
+    fn a_real_burn_without_xorriso_says_what_to_install() {
+        let p = project();
+        init_scan_plan(&p);
+
+        Command::cargo_bin("diskrement")
+            .expect("binary builds")
+            .arg("--catalog")
+            .arg(&p.catalog)
+            .args(["--burner", "real", "burn", "p", "--yes"])
+            .env_remove("DISKREMENT_BURNER")
+            // An empty PATH reaches only the child: assert_cmd invokes the
+            // binary under test by absolute path.
+            .env("PATH", "/nonexistent")
+            .assert()
+            .code(6)
+            .stderr(contains("xorriso is not available"))
+            .stderr(contains("install the libisoburn/xorriso package"));
+    }
+
+    /// `verify` on the real backend asks for each disc and skips the ones the
+    /// operator does not produce. A skipped disc is reported as skipped, and
+    /// the run still exits 0 — nothing was found wrong, because nothing was
+    /// checked.
+    #[test]
+    fn a_real_verify_asks_for_each_disc_and_skips_the_ones_not_produced() {
+        let f = burned_project();
+
+        Command::cargo_bin("diskrement")
+            .expect("binary builds")
+            .env("DISKREMENT_BURNER", "real")
+            .env("DISKREMENT_DEVICE", "/dev/sr0")
+            .arg("--catalog")
+            .arg(&f.catalog)
+            .args(["verify", "p"])
+            .assert()
+            .code(0)
+            .stdout(contains(
+                "Insert disc 1 of 'p' into /dev/sr0 to verify it (or decline to skip this disc).",
+            ))
+            .stdout(contains("disc 1: skipped (not checked)"));
     }
 }
