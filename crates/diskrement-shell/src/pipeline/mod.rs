@@ -19,8 +19,8 @@ use diskrement_core::{
 use crate::burn::verifier::{DiscExpectation, Verifier};
 use crate::burn::{json, Burner, DiscIdentity, DiscImage, DiscMetadata};
 use crate::catalog::model::{
-    CatalogUpdate, DiscWrite, FileFingerprint, FileHistoryEntry, FileWrite, Project, ProjectId,
-    ProjectInit, Session, SessionState, SessionWrite,
+    CatalogUpdate, DiscWrite, FileFingerprint, FileHistoryEntry, FileWrite, LostReport, Project,
+    ProjectId, ProjectInit, Session, SessionState, SessionWrite,
 };
 use crate::catalog::Catalog;
 use crate::error::PipelineError;
@@ -538,6 +538,45 @@ impl<'a> Pipeline<'a> {
             root: self.paths.work_dir.join("snapshot"),
         });
         Ok(())
+    }
+
+    /// `disc mark-dead`: append the `MARKED_DEAD` event and report what it
+    /// cost (`PipelineLive.markDead`).
+    ///
+    /// The two pre-checks are the whole reason this method exists rather than
+    /// the CLI calling the catalog directly. `Catalog::mark_dead` refuses an
+    /// unknown or already-dead ordinal too, but as `IllegalStatusTransition`,
+    /// which travels as `Failed` and exits 5. The contract answer for both is
+    /// exit 2, so they are caught here, against the *derived* disc states —
+    /// `disc.status` never says `DEAD`.
+    ///
+    /// `disc_ordinal` is `u32` where `verify`'s is `i64`: zio-cli let a
+    /// negative `--disc` reach the domain, but `disc mark-dead`'s ordinal is
+    /// validated in the parser (`Commands.scala`), because mark-dead is
+    /// irreversible and a silently wrapped ordinal would destroy a different
+    /// disc than the one named.
+    ///
+    /// `at` comes from the caller, as `burn`'s `now` does: the pipeline reads
+    /// no clock, which is what lets the corpus replay compare the committed
+    /// timestamp exactly.
+    pub fn mark_dead(
+        &mut self,
+        name: &str,
+        disc_ordinal: u32,
+        at: DateTime<Utc>,
+    ) -> Result<LostReport, PipelineError> {
+        let p = self.project(name)?;
+        let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
+        match states.iter().find(|s| s.ordinal == disc_ordinal) {
+            None => return Err(PipelineError::UnknownDisc(i64::from(disc_ordinal))),
+            Some(s) if s.status == DiscStatus::Dead => {
+                return Err(PipelineError::DiscAlreadyDead(disc_ordinal))
+            }
+            Some(_) => {}
+        }
+        self.catalog
+            .mark_dead(p.id, disc_ordinal, &at)
+            .map_err(Self::failed)
     }
 }
 
@@ -1662,5 +1701,367 @@ mod verify_tests {
             .history("nosuch", &RelPath("a.txt".to_string()))
             .unwrap_err();
         assert!(matches!(err, PipelineError::ProjectNotFound(_)), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod mark_dead_tests {
+    use super::*;
+    use chrono::{TimeZone as _, Utc};
+    use diskrement_core::{DiscType, RelPath, ScannedFile};
+
+    use crate::burn::simulated::SimulatedBurner;
+    use crate::burn::verifier::{StagingVerifier, Verifier};
+    use crate::burn::Burner;
+    use crate::catalog::model::{ProjectInit, VersionStatus};
+    use crate::progress::NoopSink;
+
+    struct Env {
+        _dir: tempfile::TempDir,
+        catalog: Catalog,
+        work: PathBuf,
+        scan_cache: PathBuf,
+    }
+
+    /// Distinct, deterministic instants: `burn` and `mark_dead` both take
+    /// their time from the caller, so nothing here reads a clock.
+    fn at(offset: i64) -> chrono::DateTime<Utc> {
+        Utc.timestamp_opt(1_757_100_000 + offset, 0).unwrap()
+    }
+
+    /// A project with an empty catalog and nothing staged.
+    ///
+    /// `create_project` rather than `Pipeline::init`, and a hand-built
+    /// snapshot rather than `Pipeline::scan`: `init` probes the work dir for
+    /// reflink support and `scan` clones the source tree, neither of which
+    /// this phase's behaviour depends on. Every cycle below drives the real
+    /// `plan` and `burn`, which is where mark-dead's consequences show up.
+    fn env() -> Env {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let work = root.join("work");
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut catalog = Catalog::open(&root.join("catalog.sqlite")).unwrap();
+        catalog
+            .create_project(&ProjectInit {
+                name: "p".to_string(),
+                source_root: source.display().to_string(),
+                work_dir: work.display().to_string(),
+                default_disc_type: DiscType::BdR,
+                margin_percent: 2.0,
+                copies: 1,
+                created_at: at(0),
+            })
+            .unwrap();
+
+        Env {
+            _dir: dir,
+            catalog,
+            work,
+            scan_cache: root.join("scancache.sqlite"),
+        }
+    }
+
+    /// Rebuild `work/snapshot` from `files` and stage them as the scan.
+    ///
+    /// A successful `burn` releases the snapshot and clears the staged state,
+    /// so every cycle re-stages from scratch — exactly as a real `scan` would.
+    fn stage(env: &Env, files: &[(&str, &[u8])]) {
+        let snapshot = env.work.join("snapshot");
+        let _ = std::fs::remove_dir_all(&snapshot);
+        std::fs::create_dir_all(&snapshot).unwrap();
+
+        let mut scanned: Vec<ScannedFile> = Vec::new();
+        for (rel, body) in files {
+            let abs = snapshot.join(rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(&abs, body).unwrap();
+            scanned.push(ScannedFile {
+                rel_path: RelPath((*rel).to_string()),
+                content_hash: crate::fs::hasher::hash(&abs).unwrap(),
+                size_bytes: body.len() as u64,
+                mtime: at(0),
+            });
+        }
+        staged::write_scan(&env.work, &scanned).unwrap();
+    }
+
+    /// One full cycle: stage `files`, plan them, burn the planned disc.
+    fn cycle(env: &mut Env, files: &[(&str, &[u8])], burned_at: chrono::DateTime<Utc>) {
+        stage(env, files);
+        let work = env.work.clone();
+        let scan_cache = env.scan_cache.clone();
+        let sink = NoopSink;
+        let burner = Burner::Simulated(SimulatedBurner::new(&sink, 2));
+        let mut pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: work,
+                scan_cache,
+            },
+            &sink,
+        );
+        pipeline.plan("p", None, false).unwrap();
+        pipeline.burn("p", burned_at, &burner).unwrap();
+    }
+
+    fn run_mark_dead(env: &mut Env, ordinal: u32) -> Result<LostReport, PipelineError> {
+        let work = env.work.clone();
+        let scan_cache = env.scan_cache.clone();
+        let mut pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: work,
+                scan_cache,
+            },
+            &NoopSink,
+        );
+        pipeline.mark_dead("p", ordinal, at(500))
+    }
+
+    fn run_plan(env: &mut Env) -> Result<PlanReport, PipelineError> {
+        let work = env.work.clone();
+        let scan_cache = env.scan_cache.clone();
+        let pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: work,
+                scan_cache,
+            },
+            &NoopSink,
+        );
+        pipeline.plan("p", None, false)
+    }
+
+    fn run_verify(env: &mut Env, disc: Option<i64>) -> Result<Vec<VerifyReport>, PipelineError> {
+        let work = env.work.clone();
+        let scan_cache = env.scan_cache.clone();
+        let verifier = Verifier::Staging(StagingVerifier::new(work.join("staging")));
+        let mut pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: work,
+                scan_cache,
+            },
+            &NoopSink,
+        );
+        pipeline.verify("p", disc, &verifier)
+    }
+
+    /// The stored `disc.status` column for one ordinal, read straight out of
+    /// SQLite. `read_disc_states` derives `DEAD` and would happily mask an
+    /// illegal update-in-place, so the invariant tests read the row itself.
+    fn stored_status(env: &Env, ordinal: u32) -> String {
+        env.catalog
+            .raw_connection_for_tests()
+            .query_row(
+                "select status from disc where project_id = 1 and ordinal = ?1",
+                rusqlite::params![ordinal as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("the disc row exists")
+    }
+
+    #[test]
+    fn an_ordinal_no_disc_has_is_an_unknown_disc_error() {
+        let mut e = env();
+        cycle(&mut e, &[("a.txt", b"aaa")], at(10));
+        let err = run_mark_dead(&mut e, 9).unwrap_err();
+        assert!(matches!(err, PipelineError::UnknownDisc(9)), "{err:?}");
+        assert_eq!(err.to_string(), "no disc with ordinal 9");
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    /// The second mark-dead must be refused by the *pipeline's* pre-check, so
+    /// it exits 2. Reaching the catalog would raise IllegalStatusTransition
+    /// and exit 5.
+    #[test]
+    fn marking_the_same_disc_twice_is_exit_2_and_appends_no_second_event() {
+        let mut e = env();
+        cycle(&mut e, &[("a.txt", b"aaa")], at(10));
+        run_mark_dead(&mut e, 1).expect("the first mark-dead succeeds");
+
+        let err = run_mark_dead(&mut e, 1).unwrap_err();
+        assert!(matches!(err, PipelineError::DiscAlreadyDead(1)), "{err:?}");
+        assert_eq!(err.exit_code(), 2);
+
+        let events: i64 = e
+            .catalog
+            .raw_connection_for_tests()
+            .query_row(
+                "select count(*) from disc_event where kind = 'MARKED_DEAD'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1, "the refused call must append nothing");
+    }
+
+    #[test]
+    fn mark_dead_on_an_unknown_project_is_a_lookup_failure() {
+        let mut e = env();
+        cycle(&mut e, &[("a.txt", b"aaa")], at(10));
+        let work = e.work.clone();
+        let scan_cache = e.scan_cache.clone();
+        let mut pipeline = Pipeline::new(
+            &mut e.catalog,
+            PipelinePaths {
+                work_dir: work,
+                scan_cache,
+            },
+            &NoopSink,
+        );
+        let err = pipeline.mark_dead("nosuch", 1, at(500)).unwrap_err();
+        assert!(matches!(err, PipelineError::ProjectNotFound(_)), "{err:?}");
+    }
+
+    /// The invariant CLAUDE.md names: dead-ness is derived, so the row the
+    /// event points at must be byte-identical afterwards. Asserting only the
+    /// derived `DiscStatus::Dead` would pass against an update-in-place.
+    #[test]
+    fn the_disc_row_still_reads_open_after_the_event() {
+        let mut e = env();
+        cycle(&mut e, &[("a.txt", b"aaa")], at(10));
+        assert_eq!(stored_status(&e, 1), "OPEN");
+
+        run_mark_dead(&mut e, 1).expect("mark-dead succeeds");
+
+        assert_eq!(
+            stored_status(&e, 1),
+            "OPEN",
+            "disc.status must never say DEAD; the check constraint has no such member"
+        );
+        let derived = e.catalog.read_disc_states(ProjectId(1)).unwrap();
+        assert_eq!(
+            derived.iter().find(|s| s.ordinal == 1).map(|s| s.status),
+            Some(DiscStatus::Dead),
+            "and the derived read must still say DEAD"
+        );
+    }
+
+    /// The whole coaster workflow in one test (`PipelineMarkDeadSpec`'s first
+    /// case). Disc 1 takes two sessions, so it holds one superseded version
+    /// (b@1) and two current ones (a@1, b@2) — one of each casualty class.
+    #[test]
+    fn a_dead_discs_live_files_re_plan_onto_a_fresh_disc() {
+        let mut e = env();
+        cycle(&mut e, &[("a.txt", b"aaa"), ("b.txt", b"bbb")], at(10));
+        // A second session on the same open disc supersedes b.txt in place.
+        cycle(&mut e, &[("a.txt", b"aaa"), ("b.txt", b"bbbb")], at(20));
+
+        let report = run_mark_dead(&mut e, 1).expect("mark-dead succeeds");
+        assert_eq!(report.disc_ordinal, 1);
+        assert_eq!(
+            report
+                .lost
+                .iter()
+                .map(|l| (l.rel_path.as_str(), l.session_ordinal))
+                .collect::<Vec<_>>(),
+            vec![("b.txt", 1)],
+            "only the superseded version is permanently gone"
+        );
+        assert_eq!(
+            report
+                .reburn
+                .iter()
+                .map(|r| r.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"],
+            "both current versions re-queue, ordered by path"
+        );
+
+        // The disc reads DEAD and is no longer the open disc.
+        let status = {
+            let work = e.work.clone();
+            let scan_cache = e.scan_cache.clone();
+            let pipeline = Pipeline::new(
+                &mut e.catalog,
+                PipelinePaths {
+                    work_dir: work,
+                    scan_cache,
+                },
+                &NoopSink,
+            );
+            pipeline.status("p").unwrap()
+        };
+        assert_eq!(
+            status
+                .discs
+                .iter()
+                .find(|d| d.ordinal == 1)
+                .map(|d| d.status),
+            Some(DiscStatus::Dead)
+        );
+        assert_eq!(status.open_disc_ordinal, None);
+        assert_eq!(
+            status.total_current_files, 0,
+            "the view drops versions whose only copy is dead"
+        );
+
+        // The recovery cycle plans both live files onto a brand-new disc 2.
+        stage(&e, &[("a.txt", b"aaa"), ("b.txt", b"bbbb")]);
+        let plan = run_plan(&mut e).expect("plan succeeds");
+        assert!(plan.disc.is_new);
+        assert_eq!(plan.disc.ordinal, 2);
+        assert_eq!(
+            plan.disc
+                .files
+                .iter()
+                .map(|f| f.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+
+        cycle(&mut e, &[("a.txt", b"aaa"), ("b.txt", b"bbbb")], at(30));
+
+        // The sweep skips the dead disc silently and checks only disc 2.
+        let reports = run_verify(&mut e, None).expect("verify succeeds");
+        assert_eq!(
+            reports.iter().map(|r| r.disc_ordinal).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(reports
+            .iter()
+            .all(|r| !r.skipped && r.mismatches.is_empty()));
+
+        // Naming the dead disc, though, is an assertion of intent and an error.
+        let named = run_verify(&mut e, Some(1)).unwrap_err();
+        assert!(matches!(named, PipelineError::DiscIsDead(1)), "{named:?}");
+    }
+
+    /// LOST is per physical copy, not per content hash (CLAUDE.md). b@2 and
+    /// b@3 share one hash: the copy on the dead disc reads LOST and the copy
+    /// on the recovery disc reads CURRENT, and no test may collapse them.
+    #[test]
+    fn two_copies_of_one_hash_read_lost_and_current() {
+        let mut e = env();
+        cycle(&mut e, &[("b.txt", b"bbb")], at(10));
+        cycle(&mut e, &[("b.txt", b"bbbb")], at(20));
+        run_mark_dead(&mut e, 1).expect("mark-dead succeeds");
+        cycle(&mut e, &[("b.txt", b"bbbb")], at(30));
+
+        let history = e
+            .catalog
+            .file_history(ProjectId(1), &RelPath("b.txt".to_string()))
+            .expect("history reads");
+
+        assert_eq!(
+            history
+                .iter()
+                .map(|h| (h.disc_ordinal, h.session_ordinal, h.status))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 1, VersionStatus::Lost),
+                (1, 2, VersionStatus::Lost),
+                (2, 1, VersionStatus::Current),
+            ]
+        );
+        assert_eq!(
+            history[1].content_hash, history[2].content_hash,
+            "the last two versions share a hash — LOST is about the copy, not the bytes"
+        );
     }
 }

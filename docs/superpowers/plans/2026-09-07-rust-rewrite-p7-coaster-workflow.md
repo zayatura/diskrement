@@ -2479,8 +2479,86 @@ git branch -d feat/rewrite-p7
 
 ## Execution deviations
 
-_(fill in during execution — see Task 10, Step 5)_
+All nine tasks landed with every assertion, user-visible string, exit code,
+and commit message verbatim from this document. The deviations below are the
+full set; each was forced by a gate (`-D warnings`, `cargo fmt --check`) or by
+a factual inaccuracy in this plan's own instructions, and each was
+task-reviewed before the next task started.
+
+1. **rustfmt reflows (Tasks 1, 4, 5, 7, 8, and wherever this document's
+   literal code exceeds `max_width`).** Whitespace-only: rustfmt's chain/line
+   layout applied where the literal test code was not fmt-clean. Every
+   assertion and string survived verbatim. At the `\`-continuations the
+   plan's `\x20 ` escapes were load-bearing and were kept.
+2. **Task 2 → Task 3 dead-code bridge.** The workspace sets
+   `rustflags = ["-D", "warnings"]`, so Task 2's test module could not import
+   `VersionStatus` or carry unused `run_plan`/`run_verify` helpers before
+   Task 3 used them: the import was dropped and the two helpers got
+   `#[allow(dead_code)]`. Task 3 restored the import and removed both
+   attributes. Net effect after Task 3: exactly what this document specified.
+3. **Task 3, Step 2 skipped.** The optional re-run against the staged Scala
+   binary was not performed; the transcript in this document was treated as
+   the confirmed oracle. It was then independently re-proven anyway: Task 4
+   (corpus), Task 5/6 (render bytes), Task 8 (binary stdout), and Task 9 (the
+   differential harness) all compare the same numbers.
+4. **Task 5: the four render tests live in `mod p6_render_tests`, not `mod
+   tests`.** This document's instruction assumed `reset_names_the_project_it_cleared`
+   sits in `mod tests` and that a `mod tests` import edit would compile. In
+   the actual tree the anchor test is the last member of `mod p6_render_tests`
+   (P6's naming), and the document's literal import edit duplicates
+   `ContentHash` there (E0252). The implementer followed the anchor
+   ("immediately after `reset_names_the_project_it_cleared`") and extended
+   that module's existing imports. Consequence: `mod p6_render_tests` now
+   holds four P7 tests — a misnomer, left as-is to keep the diff honest; a
+   later phase may rename it.
+5. **Task 5/7: `#[allow(dead_code)]` on `render::mark_dead`**, added because
+   the function is not called until Task 7 wires it and warnings are errors;
+   removed again in Task 7's commit, mirroring P6's pattern. Task 7 also
+   swept the one stale `#[allow(dead_code)]` left on the already-wired
+   `render::scan_report` (a no-op one-liner in a file the task was already
+   authorized to touch).
+6. **Tasks 6 and 7: `--lib` does not exist for `diskrement-cli`.** The crate
+   is binary-only, so this document's `cargo test -p diskrement-cli --lib
+   render::` cannot run; the identical filter was executed without `--lib`
+   (Task 6) and as `--bin diskrement` (Task 7).
+7. **Task 9: `Step` imported inside `mod tests`, not at file level.** The
+   file-level `use … Scenario, Step;` this document specifies is an unused
+   import outside the test module and a hard error under `-D warnings`;
+   `use crate::scenario::Step;` moved into `mod tests` with a comment.
+
+**Carried forward for P8** (verifier/burner resolution):
+
+- `mark_dead_tests`' helpers construct `Burner::Simulated` and
+  `Verifier::Staging` directly; they never route through the burner/verifier
+  resolution the CLI performs. The real-backend arms of `resolve_verifier`
+  and burner resolution remain exercised only by the manual hardware
+  checklist — when P8 replaces that resolution, keep the synthetic tests
+  bypassing it (they test pipeline behavior, not resolution) and add
+  resolution-level tests of P8's own.
+- The `disc mark-dead` dispatch arm takes `NoopSink` (contract: mark-dead
+  prints no progress). P8 must not swap this for `ConsoleProgress` when it
+  touches dispatch.
+- No stale `#[allow(dead_code)]` attributes remain on wired functions after
+  Task 7's sweep; P8 should keep it that way when it re-wires anything.
 
 ## Execution verification
 
-_(fill in during execution — see Task 10, Step 5)_
+All commands run on `feat/rewrite-p7` at `a5ac5fe`, before the merge:
+
+- `cargo test --workspace`: **443 passed, 0 failed, 3 ignored**
+  (baseline 413 passed / 3 ignored, +30, no drops).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+- `fixtures/`: `git status --porcelain fixtures/` empty;
+  `sha256sum -c SHA256SUMS` (run inside `fixtures/`) verified every file.
+- Differential suite (`DISKREMENT_SCALA_BIN` = staged launcher, freshly
+  re-staged): bootstrap (all-Scala) **12 scenarios reproduced identically**;
+  all-rust **12 compared, 0 skipped**; interleaved **12 compared,
+  0 skipped**. Zero divergences; no normalization rule touched.
+- `sbt clean test`: all modules green, 0 failed — core 74 (munit) + shell 156
+  (zio) = **230 passed** (the expected figure), cli 51 further tests passed
+  (sbt's zio summary), IntegrationTest unchanged.
+- Final whole-branch review: merge-ready; four deferred minors triaged
+  (fixture test setup duplication, inert `reburn()` fields in one render
+  test, the scan_report attribute sweep, a report-wording inaccuracy) —
+  none blocking.

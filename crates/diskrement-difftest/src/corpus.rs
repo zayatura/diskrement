@@ -23,6 +23,7 @@ pub fn all() -> Vec<Scenario> {
         burn_spill_cycles(),
         burn_errors(),
         verify_history_reset(),
+        mark_dead_errors(),
         harvest_replay(),
     ]
 }
@@ -334,6 +335,79 @@ pub fn verify_history_reset() -> Scenario {
     }
 }
 
+/// The coaster's failure modes and its recovery, compared by agreement.
+///
+/// `harvest_replay` already covers the happy path in the corpus's own shape;
+/// this one exists for the error ladder, which the harvest never exercises —
+/// and for the boundary between an ordinal the parser refuses and one the
+/// domain refuses, which is the single place P7's two disc-ordinal arguments
+/// behave differently.
+pub fn mark_dead_errors() -> Scenario {
+    Scenario {
+        name: "mark-dead-errors",
+        disc_bytes: None,
+        steps: vec![
+            write("a.bin", 800),
+            write("b.bin", 800),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            // A second session on the open disc, so the disc holds one
+            // superseded version and two current ones.
+            modify("b.bin", 800),
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            // An ordinal no disc has, and an unknown project: both exit 2,
+            // and the project lookup happens first.
+            cmd(
+                "mark-dead an unknown ordinal",
+                &["disc", "mark-dead", "p", "9", "--yes"],
+            ),
+            cmd(
+                "mark-dead on an unknown project",
+                &["disc", "mark-dead", "nosuch", "1", "--yes"],
+            ),
+            cmd(
+                "mark-dead p 1 --yes",
+                &["disc", "mark-dead", "p", "1", "--yes"],
+            ),
+            // Twice: the second is refused, and appends no second event —
+            // which the end-state diff checks, not just the exit code.
+            cmd(
+                "mark-dead p 1 again",
+                &["disc", "mark-dead", "p", "1", "--yes"],
+            ),
+            // A sweep skips a dead disc silently; naming one is an error.
+            cmd("verify p", &["verify", "p"]),
+            cmd("verify p --disc 1", &["verify", "p", "--disc", "1"]),
+            // Zero, and a value that would wrap through 32 bits, both fail in
+            // the argument parser — zio-cli's `mapOrFail` and clap's
+            // `value_parser` may word it differently, which §3.2 sanctions.
+            // The exit code is the contract and is compared.
+            cmd_exit_only(
+                "mark-dead ordinal 0",
+                &["disc", "mark-dead", "p", "0", "--yes"],
+            ),
+            cmd_exit_only(
+                "mark-dead ordinal 4294967297",
+                &["disc", "mark-dead", "p", "4294967297", "--yes"],
+            ),
+            // The recovery: the live files re-plan onto a fresh disc, and the
+            // dead copies stay visible in history as LOST.
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            cmd("history p b.bin", &["history", "p", "b.bin"]),
+            cmd("status p", &["status", "p"]),
+        ],
+    }
+}
+
 /// The P0 harvest flow, replayed live: spill across two discs, supersede and
 /// delete, a dead disc, a recovery burn, then `--finalize` to seal.
 ///
@@ -393,6 +467,9 @@ pub fn harvest_replay() -> Scenario {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `Step` is only used by the guard tests, and a file-level import would
+    // be unused (hence an error) in the non-test build of this module.
+    use crate::scenario::Step;
 
     #[test]
     fn every_scenario_has_a_unique_name() {
@@ -479,5 +556,36 @@ mod tests {
         // corpus's disc-1/disc-2 split. Without the override the files would
         // fit one disc and the scenario would test nothing interesting.
         assert_eq!(harvest_replay().disc_bytes, Some(1000));
+    }
+
+    /// The scenario must actually reach both refusals it is named for: a
+    /// second mark-dead of the same disc, and a *named* dead disc at verify.
+    /// A scenario that stopped exercising them would still pass, silently.
+    #[test]
+    fn the_mark_dead_scenario_marks_one_disc_twice_and_then_names_it() {
+        let s = mark_dead_errors();
+        let marks = s
+            .steps
+            .iter()
+            .filter(|step| match step {
+                Step::Cmd { args, .. } => {
+                    args.starts_with(&["disc".to_string(), "mark-dead".to_string()])
+                        && args.get(2).is_some_and(|n| n == "p")
+                        && args.get(3).is_some_and(|o| o == "1")
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(marks, 2, "the same disc must be marked dead twice");
+        assert!(
+            s.steps.iter().any(|step| matches!(
+                step,
+                Step::Cmd { args, .. }
+                    if args == &["verify", "p", "--disc", "1"]
+                        .map(str::to_string)
+                        .to_vec()
+            )),
+            "the scenario must also name the dead disc at verify"
+        );
     }
 }
