@@ -3931,3 +3931,72 @@ git branch -d feat/rewrite-p5
 | §9 P5 scope and exit bar | all |
 | CLAUDE.md: commit-after-success, post-burn embedded snapshot, one disc per cycle, `StalePlan` advice | 8, 9 |
 | CLAUDE.md: `FICLONE` does not preserve mtime | 6 |
+
+## Execution deviations
+
+Every place the landed implementation diverges from the task texts above, and
+why. Formatting-only reflows imposed by the `cargo fmt --check` gate are not
+listed per file; they occurred in most tasks and never changed semantics.
+
+- **Task 1:** trimmed the now-stale trailing clause of an `error.rs` doc
+  comment ("`BurnError` arrives in a later phase") — Task 1 itself made it
+  false. The conditional `Display` additions for `RelPath`/`ContentHash` were
+  no-ops: both impls already existed in `crates/diskrement-core/src/model.rs`.
+- **Task 2:** the plan's expected timestamp literal
+  `2026-09-05T20:41:06.623959846Z` was arithmetically wrong for
+  `Utc.timestamp_opt(1_757_100_066, 623_959_846)`; corrected to
+  `2025-09-05T19:21:06.623959846Z` exactly as the plan's own note sanctions
+  ("fix the expected string to whatever that instant formats to"). The unused
+  parent import of `ManifestChangeKind` was dropped (denied by
+  `-Wunused:all` convention; the test module imports it directly).
+- **Task 5:** dropped the unused `DiscIdentity` import from the writer
+  implementation (the plan itself flags it) and added it inside the test
+  module instead, where the tests' `use super::*` needed it after the drop.
+- **Task 6:** dropped `map_err(std::io::Error::from)` on the
+  `reflink_copy::reflink` call — the pinned reflink-copy already returns
+  `io::Result<()>` (the plan's closing note anticipates exactly this).
+- **Task 7:** the `use std::path::PathBuf;` line moved into the file's
+  existing top-level import block rather than landing mid-file as the plan's
+  snippet shows; duplicate imports are denied.
+- **Task 8:** the only signature adaptation was the one the plan pre-flags:
+  `mark_dead(ProjectId(1), 1, &now())` — the real parameter is
+  `at: &DateTime<Utc>`. `plan_from`'s argument order matched as written.
+- **Task 9:** no `walkdir` dev-dependency addition was needed (the plan
+  anticipated it might be) — `walkdir` is already a regular dependency of
+  `diskrement-shell`, visible to integration tests. All four oracle tests
+  passed on first run; no debugging was required.
+- **Task 10/11:** `burn_report` carried an interim `#[allow(dead_code)]`
+  (matching `render.rs`'s existing convention; `-D warnings` forces it) between
+  Task 10 and Task 11's dispatch wiring, then the attribute was dropped. The
+  `Burn` dispatch arm resolves the project *before* prompting, per the plan's
+  own "order matters" note after checking `Runner.scala`'s `withProject` —
+  the sketch's literal order had the prompt first.
+- **Task 12:** the planner-order caveat did not fire (`a.bin` → disc 1,
+  `b.bin` → disc 2, as written).
+- **Task 13:** the deferral comment replaced by the embedded-catalog
+  comparison was retained in adapted form as the rationale comment the plan's
+  snippet carries. `runner.rs`'s `RUST_IMPLEMENTED` doc comment has a
+  pre-existing duplicated paragraph (not introduced here, left for its next
+  editor).
+
+Known deferred debt observed during review (recorded, deliberately not fixed
+here): read-only source files (mode 0444) fail the stager's mtime restore
+because permissions are set before the write-fd open — inherited from the
+mandated `fs::snapshot::reflink_tree` idiom, fix idiom-wide when touched;
+`--yes` lacks Scala's `-y` alias (the plan's sketch omitted it; scenarios use
+the long form); `burn_basics`'s trailing comment anticipates a `burn` step the
+scenario never issues.
+
+## Execution verification
+
+- `cargo test --workspace`: **348 passed, 0 failed, 3 ignored** (baseline
+  278/3; the three ignored are the `#[ignore]`d differential entry points).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+- Differential suite, all three modes: bootstrap (all-scala) **10/10
+  reproduced identically**; all-rust **9 compared, 0 failed**; interleaved
+  **9 compared, 0 failed**. The single skip is `harvest-replay` in the rust
+  and interleaved modes — it needs P7's `disc`/`history`/`verify`, and the
+  harness announces the skip loudly rather than passing silently.
+- `sbt clean test`: **51 passed, 0 failed, 0 errors** — the Scala oracle tree
+  is untouched and green.
