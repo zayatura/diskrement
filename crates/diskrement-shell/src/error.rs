@@ -1,5 +1,5 @@
 //! Expected, recoverable failures. One `thiserror` enum per subsystem
-//! (spec §5.5); `BurnError` arrives in a later phase.
+//! (spec §5.5).
 
 /// Persistence failures the caller is expected to handle.
 ///
@@ -66,6 +66,8 @@ pub enum PipelineError {
     NoStagedScan(String),
     #[error("no staged plan for {0} (run plan)")]
     NoStagedPlan(String),
+    #[error("source snapshot missing for {0} (run scan)")]
+    SnapshotMissing(String),
     /// `plan` alone is the whole recovery: the staged scan and the snapshot
     /// both survive, and `plan` re-reads the view and the disc states. Never
     /// advise `reset` — it deletes `workDir/staging`, the staged-disc
@@ -91,6 +93,9 @@ pub enum PipelineError {
         work_dir: std::path::PathBuf,
         detail: String,
     },
+    /// Renders its cause's message and nothing else (`PipelineError.Burn`).
+    #[error(transparent)]
+    Burn(#[from] crate::burn::BurnError),
     /// Unexpected-but-handled failure: rendered as
     /// `internal error: <detail> (this is a bug)`, exit 5.
     #[error("internal error: {0} (this is a bug)")]
@@ -103,10 +108,15 @@ impl PipelineError {
             PipelineError::ProjectNotFound(_)
             | PipelineError::NoStagedScan(_)
             | PipelineError::NoStagedPlan(_)
+            | PipelineError::SnapshotMissing(_)
             | PipelineError::StalePlan(_) => 2,
             PipelineError::NotSameFilesystem { .. }
             | PipelineError::NotCowCapable { .. }
             | PipelineError::OversizedFiles(_) => 3,
+            // An aborted burn is a successful run that wrote nothing; every
+            // other burn failure is 6 (media/burner).
+            PipelineError::Burn(crate::burn::BurnError::Aborted) => 0,
+            PipelineError::Burn(_) => 6,
             PipelineError::Failed(_) => 5,
         }
     }
@@ -216,5 +226,68 @@ mod tests {
         );
         assert!(msg.contains("re-run plan"), "{msg}");
         assert!(!msg.contains("reset"), "{msg}");
+    }
+
+    #[test]
+    fn burn_errors_are_exit_6_and_an_abort_is_exit_0() {
+        use crate::burn::BurnError;
+        use diskrement_core::{ContentHash, RelPath};
+
+        assert_eq!(
+            PipelineError::Burn(BurnError::HashMismatch {
+                rel_path: RelPath("a.bin".into()),
+                expected: ContentHash("aa".into()),
+                actual: ContentHash("bb".into()),
+            })
+            .exit_code(),
+            6
+        );
+        assert_eq!(
+            PipelineError::Burn(BurnError::SourceFileMissing(RelPath("a.bin".into()))).exit_code(),
+            6
+        );
+        // An aborted burn is a successful run that wrote nothing.
+        assert_eq!(PipelineError::Burn(BurnError::Aborted).exit_code(), 0);
+        assert_eq!(
+            PipelineError::SnapshotMissing("photos".into()).exit_code(),
+            2
+        );
+    }
+
+    #[test]
+    fn burn_error_messages_match_the_scala_render_verbatim() {
+        use crate::burn::BurnError;
+        use diskrement_core::{ContentHash, RelPath};
+
+        assert_eq!(
+            PipelineError::SnapshotMissing("photos".into()).to_string(),
+            "source snapshot missing for photos (run scan)"
+        );
+        // `PipelineError.Burn` renders its cause's message, so the wrapper adds
+        // nothing of its own.
+        assert_eq!(
+            PipelineError::Burn(BurnError::HashMismatch {
+                rel_path: RelPath("nested/a.bin".into()),
+                expected: ContentHash("1111".into()),
+                actual: ContentHash("2222".into()),
+            })
+            .to_string(),
+            "content hash mismatch for nested/a.bin: expected 1111, got 2222"
+        );
+        assert_eq!(
+            PipelineError::Burn(BurnError::SourceFileMissing(RelPath("gone.bin".into())))
+                .to_string(),
+            "source file missing from snapshot: gone.bin"
+        );
+        // Deliberately terse: `BurnIoError`'s Scala message never interpolates
+        // its cause, and the CLI prints the message alone.
+        assert_eq!(
+            PipelineError::Burn(BurnError::Io(std::io::Error::other("disk on fire"))).to_string(),
+            "burn I/O error"
+        );
+        assert_eq!(
+            PipelineError::Burn(BurnError::Aborted).to_string(),
+            "aborted by operator"
+        );
     }
 }
