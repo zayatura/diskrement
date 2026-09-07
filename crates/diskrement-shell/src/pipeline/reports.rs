@@ -68,3 +68,16 @@ pub struct BurnReport {
     pub disc: DiscBurn,
     pub remaining: RemainingEstimate,
 }
+
+/// One disc's verification result (`Pipeline.scala`'s `VerifyReport`).
+///
+/// `skipped` is not the same as "zero files checked": a sealed disc whose last
+/// session placed no files is a legitimate clean zero-file check, while a disc
+/// with no staged data at all was never looked at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyReport {
+    pub disc_ordinal: u32,
+    pub files_checked: usize,
+    pub mismatches: Vec<diskrement_core::RelPath>,
+    pub skipped: bool,
+}

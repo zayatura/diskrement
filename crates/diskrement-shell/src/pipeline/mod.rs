@@ -16,9 +16,10 @@ use diskrement_core::{
     SessionManifest,
 };
 
+use crate::burn::verifier::{DiscExpectation, Verifier};
 use crate::burn::{json, Burner, DiscIdentity, DiscImage, DiscMetadata};
 use crate::catalog::model::{
-    CatalogUpdate, DiscWrite, FileFingerprint, FileWrite, Project, ProjectId, ProjectInit,
+    CatalogUpdate, DiscWrite, FileFingerprint, FileWrite, Project, ProjectId, ProjectInit, Session,
     SessionState, SessionWrite,
 };
 use crate::catalog::Catalog;
@@ -29,7 +30,7 @@ use crate::fs::scanner::{self, parallelism_from_env, ScanOutput};
 use crate::fs::snapshot::{self, SnapshotHandle};
 use crate::progress::ProgressSink;
 
-use reports::{BurnReport, DiscBurn, PlanReport, ScanReport, StatusReport};
+use reports::{BurnReport, DiscBurn, PlanReport, ScanReport, StatusReport, VerifyReport};
 
 /// The paths a pipeline needs, resolved by the CLI (`ProjectPaths` +
 /// `CachePath` in the Scala wiring). `work_dir` for `scan`/`status` comes from
@@ -391,6 +392,107 @@ impl<'a> Pipeline<'a> {
             total_current_files: view.current.len(),
             discs,
             last_burn_at,
+        })
+    }
+
+    /// `verify`: re-hash what each live disc should hold, and record a clean
+    /// disc as VERIFIED (`PipelineLive.verify`).
+    ///
+    /// An explicitly named ordinal is an assertion of intent about *that*
+    /// disc, so it is resolved before the dead-filter: silently reporting
+    /// "nothing to verify" (exit 0) for a dead or nonexistent disc would read
+    /// as reassurance. A sweep still skips dead discs quietly, which is the
+    /// right default.
+    ///
+    /// `disc_ordinal` is `i64` rather than `u32` because zio-cli let a
+    /// negative `--disc` reach the domain; the answer is a lookup failure with
+    /// the ordinal echoed back, not an argument error.
+    pub fn verify(
+        &mut self,
+        name: &str,
+        disc_ordinal: Option<i64>,
+        verifier: &Verifier,
+    ) -> Result<Vec<VerifyReport>, PipelineError> {
+        let p = self.project(name)?;
+        let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
+        let sessions = self
+            .catalog
+            .sessions_by_state(p.id, SessionState::Burned)
+            .map_err(Self::failed)?;
+
+        if let Some(o) = disc_ordinal {
+            match states.iter().find(|s| i64::from(s.ordinal) == o) {
+                None => return Err(PipelineError::UnknownDisc(o)),
+                Some(s) if s.status == DiscStatus::Dead => {
+                    return Err(PipelineError::DiscIsDead(o))
+                }
+                Some(_) => {}
+            }
+        }
+
+        let targets: Vec<u32> = states
+            .iter()
+            .filter(|s| s.status != DiscStatus::Dead)
+            .map(|s| s.ordinal)
+            .filter(|o| disc_ordinal.is_none_or(|want| want == i64::from(*o)))
+            .collect();
+
+        let mut reports = Vec::with_capacity(targets.len());
+        for ordinal in targets {
+            reports.push(self.verify_disc(&p, ordinal, &sessions, verifier)?);
+        }
+        Ok(reports)
+    }
+
+    /// One disc (`PipelineLive.verifyDisc`).
+    ///
+    /// The session marked VERIFIED is chosen from the BURNED list, so a disc
+    /// whose session is already VERIFIED contributes nothing and the write is
+    /// skipped — which is what makes a repeat `verify` a no-op rather than an
+    /// illegal status transition. `max_by_key` rather than the Scala
+    /// `lastOption`: session ordinals are unique per disc, so the highest is
+    /// the latest regardless of row order.
+    fn verify_disc(
+        &mut self,
+        p: &Project,
+        ordinal: u32,
+        sessions: &[Session],
+        verifier: &Verifier,
+    ) -> Result<VerifyReport, PipelineError> {
+        let latest_session = self
+            .catalog
+            .placements_for_disc(p.id, ordinal)
+            .map_err(Self::failed)?;
+        let recorded = self
+            .catalog
+            .disc_recorded_contents(p.id, ordinal)
+            .map_err(Self::failed)?;
+        let expectation = DiscExpectation {
+            project_name: p.name.clone(),
+            disc_ordinal: ordinal,
+            latest_session,
+            visible: recorded.visible,
+            superseded: recorded.superseded,
+        };
+
+        let outcome = verifier.verify(&expectation).map_err(PipelineError::Burn)?;
+        if !outcome.skipped && outcome.mismatches.is_empty() {
+            if let Some(session) = sessions
+                .iter()
+                .filter(|s| s.disc_ordinal == ordinal)
+                .max_by_key(|s| s.ordinal)
+            {
+                self.catalog
+                    .mark_verified(p.id, ordinal, session.ordinal)
+                    .map_err(Self::failed)?;
+            }
+        }
+
+        Ok(VerifyReport {
+            disc_ordinal: ordinal,
+            files_checked: outcome.files_checked,
+            mismatches: outcome.mismatches,
+            skipped: outcome.skipped,
         })
     }
 }
@@ -1178,5 +1280,223 @@ mod burn_tests {
         let mut env = staged_env(&[("a.bin", b"aaaa")], false);
         std::fs::remove_dir_all(&env.source).unwrap();
         run_burn(&mut env).expect("burn works from the snapshot alone");
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::*;
+    use chrono::{TimeZone as _, Utc};
+    use diskrement_core::{DiscType, RelPath, ScannedFile};
+
+    use crate::burn::simulated::SimulatedBurner;
+    use crate::burn::verifier::{StagingVerifier, Verifier};
+    use crate::burn::Burner;
+    use crate::catalog::model::ProjectInit;
+    use crate::progress::NoopSink;
+
+    struct Env {
+        _dir: tempfile::TempDir,
+        catalog: Catalog,
+        work: PathBuf,
+        scan_cache: PathBuf,
+    }
+
+    fn now() -> chrono::DateTime<Utc> {
+        Utc.timestamp_opt(1_757_100_066, 623_959_846).unwrap()
+    }
+
+    /// A project with `files` staged and burned onto disc 1 — the state
+    /// `verify` expects to find.
+    fn burned_env(files: &[(&str, &[u8])], finalize: bool) -> Env {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let work = root.join("work");
+        let source = root.join("source");
+        let snapshot = work.join("snapshot");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+
+        let mut scanned: Vec<ScannedFile> = Vec::new();
+        for (rel, body) in files {
+            let abs = snapshot.join(rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(&abs, body).unwrap();
+            scanned.push(ScannedFile {
+                rel_path: RelPath((*rel).to_string()),
+                content_hash: crate::fs::hasher::hash(&abs).unwrap(),
+                size_bytes: body.len() as u64,
+                mtime: Utc.timestamp_opt(1_757_000_000, 0).unwrap(),
+            });
+        }
+
+        let mut catalog = Catalog::open(&root.join("catalog.sqlite")).unwrap();
+        catalog
+            .create_project(&ProjectInit {
+                name: "p".to_string(),
+                source_root: source.display().to_string(),
+                work_dir: work.display().to_string(),
+                default_disc_type: DiscType::BdR,
+                margin_percent: 2.0,
+                copies: 1,
+                created_at: now(),
+            })
+            .unwrap();
+
+        staged::write_scan(&work, &scanned).unwrap();
+        let report = crate::pipeline::planning::plan_from(
+            &diskrement_core::CatalogView::empty(),
+            &scanned,
+            &[],
+            DiscType::BdR,
+            diskrement_core::Capacity::new(1_000_000),
+            finalize,
+        );
+        staged::write_plan(&work, &report).unwrap();
+
+        let mut env = Env {
+            _dir: dir,
+            catalog,
+            work: work.clone(),
+            scan_cache: root.join("scancache.sqlite"),
+        };
+        {
+            let sink = NoopSink;
+            let burner = Burner::Simulated(SimulatedBurner::new(&sink, 2));
+            let mut pipeline = Pipeline::new(
+                &mut env.catalog,
+                PipelinePaths {
+                    work_dir: env.work.clone(),
+                    scan_cache: env.scan_cache.clone(),
+                },
+                &sink,
+            );
+            pipeline.burn("p", now(), &burner).unwrap();
+        }
+        env
+    }
+
+    fn run_verify(env: &mut Env, disc: Option<i64>) -> Result<Vec<VerifyReport>, PipelineError> {
+        let verifier = Verifier::Staging(StagingVerifier::new(env.work.join("staging")));
+        let mut pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &NoopSink,
+        );
+        pipeline.verify("p", disc, &verifier)
+    }
+
+    fn verified_discs(env: &Env) -> Vec<u32> {
+        env.catalog
+            .sessions_by_state(ProjectId(1), SessionState::Verified)
+            .unwrap()
+            .iter()
+            .map(|s| s.disc_ordinal)
+            .collect()
+    }
+
+    #[test]
+    fn a_clean_disc_reports_no_mismatches_and_becomes_verified() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        let reports = run_verify(&mut env, None).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].disc_ordinal, 1);
+        assert_eq!(reports[0].files_checked, 1);
+        assert!(reports[0].mismatches.is_empty());
+        assert!(!reports[0].skipped);
+        assert_eq!(verified_discs(&env), vec![1]);
+    }
+
+    /// A second sweep finds no BURNED session for the disc and must be a
+    /// no-op, not an illegal `BURNED -> VERIFIED` transition.
+    #[test]
+    fn verifying_an_already_verified_disc_again_is_a_clean_no_op() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        run_verify(&mut env, None).unwrap();
+        let reports = run_verify(&mut env, None).unwrap();
+        assert!(reports[0].mismatches.is_empty());
+        assert_eq!(verified_discs(&env), vec![1]);
+    }
+
+    #[test]
+    fn a_corrupted_staged_file_is_reported_as_a_mismatch_and_blocks_verified() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        std::fs::write(env.work.join("staging/disc-1/data/a.txt"), b"CORRUPT").unwrap();
+        let reports = run_verify(&mut env, None).unwrap();
+        assert_eq!(reports[0].mismatches, vec![RelPath("a.txt".to_string())]);
+        assert_eq!(reports[0].files_checked, 1);
+        assert!(
+            verified_discs(&env).is_empty(),
+            "a mismatch must not verify"
+        );
+    }
+
+    /// `reset` removes the staging trees; the catalog session stays BURNED.
+    /// A skipped disc is never marked verified.
+    #[test]
+    fn a_disc_with_no_staging_dir_is_skipped_and_stays_unverified() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        std::fs::remove_dir_all(env.work.join("staging")).unwrap();
+        let reports = run_verify(&mut env, None).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].skipped);
+        assert_eq!(reports[0].files_checked, 0);
+        assert!(verified_discs(&env).is_empty());
+    }
+
+    #[test]
+    fn naming_the_live_disc_checks_only_that_disc() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        let reports = run_verify(&mut env, Some(1)).unwrap();
+        assert_eq!(
+            reports.iter().map(|r| r.disc_ordinal).collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    /// Silently answering "nothing to verify" for a disc the caller named
+    /// would read as reassurance. Both the missing and the negative ordinal
+    /// are lookup failures.
+    #[test]
+    fn naming_a_disc_that_does_not_exist_is_an_error() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        for ordinal in [99, -1] {
+            let err = run_verify(&mut env, Some(ordinal)).unwrap_err();
+            assert!(matches!(err, PipelineError::UnknownDisc(_)), "{err}");
+            assert_eq!(err.exit_code(), 2);
+            assert_eq!(err.to_string(), format!("no disc with ordinal {ordinal}"));
+        }
+    }
+
+    #[test]
+    fn verify_on_an_unknown_project_is_project_not_found() {
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        let verifier = Verifier::Staging(StagingVerifier::new(env.work.join("staging")));
+        let mut pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &NoopSink,
+        );
+        let err = pipeline.verify("nosuch", None, &verifier).unwrap_err();
+        assert!(matches!(err, PipelineError::ProjectNotFound(_)), "{err}");
+    }
+
+    /// A seal session places no files, so its disc verifies clean with zero
+    /// files checked — the `disc 4: 0 files OK` line in run-manifest step 21.
+    #[test]
+    fn a_sealed_disc_with_no_files_verifies_clean_with_zero_checked() {
+        let mut env = burned_env(&[], true);
+        let reports = run_verify(&mut env, None).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].files_checked, 0);
+        assert!(!reports[0].skipped);
+        assert!(reports[0].mismatches.is_empty());
+        assert_eq!(verified_discs(&env), vec![1]);
     }
 }
