@@ -14,7 +14,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use crate::content::content;
-use crate::scenario::{Expect, Mode, Scenario, Step, Which};
+use crate::scenario::{Backend, Expect, Mode, Scenario, Step, Which};
 
 /// The project name every scenario uses. Short, and it keeps the sidecar
 /// filename (`cat.p.scancache.sqlite`) identical to the corpus's.
@@ -113,6 +113,17 @@ fn rust_gap<'a>(uses: &BTreeSet<&'a str>, implemented: &[&str]) -> Option<Vec<&'
         .filter(|c| !implemented.contains(c))
         .collect();
     (!missing.is_empty()).then_some(missing)
+}
+
+/// Is `tool` on this machine's PATH?
+fn tool_present(tool: &str) -> bool {
+    std::process::Command::new(tool)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// `<catalog-stem>.<project>.scancache.sqlite`, beside the catalog
@@ -267,6 +278,16 @@ pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcom
         }
     }
 
+    for tool in scenario.required_tools() {
+        if !tool_present(tool) {
+            return Err(Skip(format!(
+                "scenario '{}' needs {tool}, which is not installed here. \
+                 Install it and re-run; until then this scenario is not compared.",
+                scenario.name
+            )));
+        }
+    }
+
     let scratch = scratch()?;
     let mut steps = Vec::new();
     let mut command_index = 0usize;
@@ -298,6 +319,7 @@ pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcom
                 label,
                 args,
                 expect,
+                backend,
             } => {
                 let which = mode.which(command_index);
                 command_index += 1;
@@ -328,9 +350,19 @@ pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcom
                     .env("HOME", &scratch.home)
                     .env("XDG_DATA_HOME", scratch.home.join(".local/share"))
                     .env("STATE_DIRECTORY", scratch.home.join("state"))
-                    .env("DISKREMENT_BURNER", "simulated")
-                    .env_remove("DISKREMENT_DEVICE")
                     .env_remove("DISKREMENT_HASH_PARALLELISM");
+                match backend {
+                    Backend::Simulated => {
+                        cmd.env("DISKREMENT_BURNER", "simulated")
+                            .env_remove("DISKREMENT_DEVICE");
+                    }
+                    Backend::Real { device } => {
+                        cmd.env("DISKREMENT_BURNER", "real").env(
+                            "DISKREMENT_DEVICE",
+                            device.replace("{source}", &source).replace("{work}", &work),
+                        );
+                    }
+                }
                 match scenario.disc_bytes {
                     Some(n) => {
                         cmd.env("DISKREMENT_DISC_BYTES", n.to_string());

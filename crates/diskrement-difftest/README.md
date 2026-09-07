@@ -37,6 +37,12 @@ ignored and run normally.
   code or output line — both binaries run the step and the assertion is that
   they agree, which is why an error-path scenario is safe to add before the
   error is ported.
+- **A step that needs the real backend?** Use `scenario::cmd_real`, pointing it
+  at a path that does not exist. The real burner and verifier both ask the
+  operator before opening the device, and a runner-spawned child has no stdin,
+  so the prompt is the whole comparison and no hardware is touched. A scenario
+  with such a step requires `xorriso` and skips — with the reason printed —
+  where it is not installed.
 - **New normalization rule?** It is a hole punched in the oracle. Give it a named
   method, a doc comment saying what varies and why erasing it is safe, and a unit
   test. Never widen an existing rule to swallow an unrelated case.

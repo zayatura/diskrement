@@ -83,6 +83,26 @@ pub enum Expect {
     ExitOnly,
 }
 
+/// Which burn backend one command step runs under.
+///
+/// Scenario-level would have been simpler, but the interesting case is
+/// precisely a project burned with the simulated backend and then *verified*
+/// with the real one — which is what a user does when they flip the
+/// environment variable, and what spec §3.2 makes a contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// `DISKREMENT_BURNER=simulated`, `DISKREMENT_DEVICE` unset. The default
+    /// for every step, so a scenario can never drive hardware by accident.
+    Simulated,
+    /// `DISKREMENT_BURNER=real`, `DISKREMENT_DEVICE=<device>`. `{work}` and
+    /// `{source}` are substituted in `device` as they are in arguments.
+    ///
+    /// Only ever pointed at a path that does not exist: the real backend asks
+    /// the operator before it opens the device, and a runner-spawned child has
+    /// no stdin, so the device is never touched.
+    Real { device: &'static str },
+}
+
 #[derive(Clone, Debug)]
 pub enum Step {
     /// Write `rel_path` with `content(rel_path, version, size)`.
@@ -98,6 +118,7 @@ pub enum Step {
         label: &'static str,
         args: Vec<String>,
         expect: Expect,
+        backend: Backend,
     },
 }
 
@@ -129,6 +150,7 @@ pub fn cmd(label: &'static str, args: &[&str]) -> Step {
         label,
         args: args.iter().map(|a| a.to_string()).collect(),
         expect: Expect::Full,
+        backend: Backend::Simulated,
     }
 }
 
@@ -137,6 +159,17 @@ pub fn cmd_exit_only(label: &'static str, args: &[&str]) -> Step {
         label,
         args: args.iter().map(|a| a.to_string()).collect(),
         expect: Expect::ExitOnly,
+        backend: Backend::Simulated,
+    }
+}
+
+/// A step run against the real burner/verifier on `device`.
+pub fn cmd_real(label: &'static str, device: &'static str, args: &[&str]) -> Step {
+    Step::Cmd {
+        label,
+        args: args.iter().map(|a| a.to_string()).collect(),
+        expect: Expect::Full,
+        backend: Backend::Real { device },
     }
 }
 
@@ -170,6 +203,28 @@ impl Scenario {
             .filter(|(_, s)| matches!(s, Step::Cmd { .. }))
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// External tools this scenario needs. A real-backend step preflights
+    /// `xorriso`, so a machine without it must skip rather than compare two
+    /// different "cannot launch" messages — the OS error text is rendered by
+    /// the JVM in one binary and by Rust's `io::Error` in the other, and
+    /// that difference is uninteresting.
+    pub fn required_tools(&self) -> Vec<&'static str> {
+        let real = self.steps.iter().any(|s| {
+            matches!(
+                s,
+                Step::Cmd {
+                    backend: Backend::Real { .. },
+                    ..
+                }
+            )
+        });
+        if real {
+            vec!["xorriso"]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -223,5 +278,21 @@ mod tests {
         assert!(!Mode::Scala.needs_rust());
         assert!(Mode::Rust.needs_rust());
         assert!(Mode::Interleaved.needs_rust());
+    }
+
+    #[test]
+    fn only_a_real_backend_step_requires_a_tool() {
+        assert!(sample().required_tools().is_empty());
+        let with_real = Scenario {
+            name: "r",
+            disc_bytes: None,
+            steps: vec![cmd_real("burn", "/nope", &["burn", "p", "--yes"])],
+        };
+        assert_eq!(with_real.required_tools(), vec!["xorriso"]);
+        // A real step is still a `burn` for the RUST_IMPLEMENTED gate.
+        assert_eq!(
+            with_real.commands().into_iter().collect::<Vec<_>>(),
+            vec!["burn"]
+        );
     }
 }

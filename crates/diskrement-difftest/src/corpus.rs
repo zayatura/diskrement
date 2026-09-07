@@ -8,7 +8,7 @@
 //! Later phases append scenarios here as they unlock commands and learn error
 //! triggers from the Scala source.
 
-use crate::scenario::{cmd, cmd_exit_only, delete, modify, write, Scenario};
+use crate::scenario::{cmd, cmd_exit_only, cmd_real, delete, modify, write, Scenario};
 
 /// Every scenario, in the order the suites run them.
 pub fn all() -> Vec<Scenario> {
@@ -25,6 +25,7 @@ pub fn all() -> Vec<Scenario> {
         verify_history_reset(),
         mark_dead_errors(),
         harvest_replay(),
+        real_backend(),
     ]
 }
 
@@ -460,6 +461,52 @@ pub fn harvest_replay() -> Scenario {
             cmd("status p", &["status", "p"]),
             cmd("verify p", &["verify", "p"]),
             cmd("history p b.bin", &["history", "p", "b.bin"]),
+        ],
+    }
+}
+
+/// The real backend, as far as a machine with no drive can be driven.
+///
+/// A runner-spawned child has no stdin, so every operator prompt answers
+/// itself: the burn stops before opening the device and the verify skips the
+/// disc. What that pins across both binaries is the *wording* of the two
+/// prompts, the `skipped (not checked)` line, the exit codes (an aborted burn
+/// is 0, a skipped verify is 0), and — through the end-state diff — that the
+/// aborted burn committed nothing while the simulated one that follows
+/// committed everything.
+///
+/// The device is a path inside the scratch tree that is never created. The
+/// real backend prompts before it opens anything, so nothing touches it; and
+/// keeping it under the scratch root means the normalizer redacts it out of
+/// the compared prompt.
+pub fn real_backend() -> Scenario {
+    Scenario {
+        name: "real-backend",
+        disc_bytes: None,
+        steps: vec![
+            write("a.bin", 400),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd_real(
+                "burn with the real backend and no disc",
+                "{work}/no-such-drive",
+                &["burn", "p", "--yes"],
+            ),
+            // Commit-after-success: the aborted burn left the catalog alone.
+            cmd("status after the aborted burn", &["status", "p"]),
+            cmd("burn p", &["burn", "p", "--yes"]),
+            cmd_real(
+                "verify with the real backend",
+                "{work}/no-such-drive",
+                &["verify", "p"],
+            ),
+            // The skipped disc was not marked verified, so the simulated
+            // verify still has work to do.
+            cmd("verify p", &["verify", "p"]),
         ],
     }
 }
