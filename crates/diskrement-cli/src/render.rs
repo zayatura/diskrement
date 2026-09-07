@@ -2,7 +2,7 @@
 //! is `PipelineError`'s `Display` and goes to stderr with its exit code.
 
 use diskrement_core::RelPath;
-use diskrement_shell::catalog::model::{FileHistoryEntry, Project, ProjectId};
+use diskrement_shell::catalog::model::{FileHistoryEntry, LostReport, Project, ProjectId};
 use diskrement_shell::catalog::time;
 use diskrement_shell::pipeline::reports::{
     BurnReport, PlanReport, ScanReport, StatusReport, VerifyReport,
@@ -205,6 +205,52 @@ pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
             e.status
         ));
     }
+    lines.join("\n")
+}
+
+/// `Render.markDead`. A header, then two blocks: what is gone forever, and
+/// what will be written again.
+///
+/// Each block is either a count and its list, or a single "nothing" line —
+/// the two are never both empty *and* silent, because an operator who just
+/// destroyed a disc deserves to be told explicitly that it cost nothing. The
+/// two-space indent and the double-space column gaps are contract
+/// (`run-manifest.txt` step 12).
+#[allow(dead_code)] // wired into main.rs with the `disc mark-dead` command
+pub fn mark_dead(r: &LostReport) -> String {
+    let mut lines = vec![format!("Disc {} marked DEAD.", r.disc_ordinal)];
+
+    if r.lost.is_empty() {
+        lines.push("No versions permanently lost.".to_string());
+    } else {
+        lines.push(format!("Permanently lost ({}):", r.lost.len()));
+        lines.extend(r.lost.iter().map(|e| {
+            format!(
+                "  {}  {}  {}  (was session {})",
+                e.rel_path.as_str(),
+                gb(e.size_bytes),
+                e.content_hash,
+                e.session_ordinal
+            )
+        }));
+    }
+
+    if r.reburn.is_empty() {
+        lines.push("No live files to re-burn.".to_string());
+    } else {
+        lines.push(format!(
+            "Re-burn on next scan/plan/burn ({}):",
+            r.reburn.len()
+        ));
+        // Only the path: the hash and size are already in the catalog, and
+        // the operator's next action is `scan`, not an inspection.
+        lines.extend(
+            r.reburn
+                .iter()
+                .map(|e| format!("  {}", e.rel_path.as_str())),
+        );
+    }
+
     lines.join("\n")
 }
 
@@ -587,7 +633,9 @@ mod burn_render_tests {
 mod p6_render_tests {
     use super::*;
     use diskrement_core::{ContentHash, RelPath};
-    use diskrement_shell::catalog::model::{FileHistoryEntry, VersionStatus};
+    use diskrement_shell::catalog::model::{
+        FileHistoryEntry, LostReport, LostVersionEntry, ReburnEntry, VersionStatus,
+    };
     use diskrement_shell::pipeline::reports::VerifyReport;
 
     fn report(ordinal: u32, checked: usize, mismatches: &[&str], skipped: bool) -> VerifyReport {
@@ -762,6 +810,98 @@ mod p6_render_tests {
     fn reset_names_the_project_it_cleared() {
         assert_eq!(reset_done("p"), "Reset p.");
         assert_eq!(reset_done("photos"), "Reset photos.");
+    }
+
+    fn lost(rel: &str, size: u64, hash: &str, session: u32) -> LostVersionEntry {
+        LostVersionEntry {
+            rel_path: RelPath(rel.to_string()),
+            content_hash: ContentHash(hash.to_string()),
+            size_bytes: size,
+            session_ordinal: session,
+        }
+    }
+
+    fn reburn(rel: &str, size: u64, hash: &str) -> ReburnEntry {
+        ReburnEntry {
+            rel_path: RelPath(rel.to_string()),
+            content_hash: ContentHash(hash.to_string()),
+            size_bytes: size,
+        }
+    }
+
+    /// `run-manifest.txt` step 12, byte for byte. Disc 3 held one current
+    /// version and nothing superseded, so the lost half is the "nothing" line.
+    #[test]
+    fn the_mark_dead_render_matches_the_oracle_for_step_12() {
+        let a2 = "e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77";
+        assert_eq!(
+            mark_dead(&LostReport {
+                disc_ordinal: 3,
+                lost: vec![],
+                reburn: vec![reburn("a.bin", 800, a2)],
+            }),
+            "Disc 3 marked DEAD.\n\
+             No versions permanently lost.\n\
+             Re-burn on next scan/plan/burn (1):\n\
+             \x20 a.bin"
+        );
+    }
+
+    /// Both halves populated. Captured from the staged Scala launcher against
+    /// a two-session disc: b's first version is superseded and permanently
+    /// gone, while both current versions re-queue.
+    #[test]
+    fn both_casualty_classes_render_with_their_counts() {
+        let b1 = "b9749f157163b4bbb7faec0a55cfb88c69968a25eac4cfe13e45d6286874709a";
+        let b2 = "49a7906775663af7970f00f946d1d540822233477e75f5b2912ca497780a01bc";
+        let a1 = "0868513521f77faae1cf5200d9ff9603007fa04e0caef9f81183b44d46cbba86";
+        assert_eq!(
+            mark_dead(&LostReport {
+                disc_ordinal: 1,
+                lost: vec![lost("b.bin", 800, b1, 1)],
+                reburn: vec![reburn("a.bin", 800, a1), reburn("b.bin", 800, b2)],
+            }),
+            format!(
+                "Disc 1 marked DEAD.\n\
+                 Permanently lost (1):\n\
+                 \x20 b.bin  0.0 GB  {b1}  (was session 1)\n\
+                 Re-burn on next scan/plan/burn (2):\n\
+                 \x20 a.bin\n\
+                 \x20 b.bin"
+            )
+        );
+    }
+
+    /// `RenderSpec`'s "markDead with no casualties": a disc whose every
+    /// version had a live copy elsewhere costs nothing at all.
+    #[test]
+    fn a_disc_that_cost_nothing_says_so_twice() {
+        assert_eq!(
+            mark_dead(&LostReport {
+                disc_ordinal: 2,
+                lost: vec![],
+                reburn: vec![],
+            }),
+            "Disc 2 marked DEAD.\n\
+             No versions permanently lost.\n\
+             No live files to re-burn."
+        );
+    }
+
+    /// The GB column is the same one-decimal format every other renderer uses.
+    #[test]
+    fn the_lost_line_uses_the_shared_gb_format() {
+        assert_eq!(
+            mark_dead(&LostReport {
+                disc_ordinal: 9,
+                lost: vec![lost("big/movie.mkv", 12_300_000_000, "a1b2c3", 4)],
+                reburn: vec![],
+            }),
+            "Disc 9 marked DEAD.\n\
+             Permanently lost (1):\n\
+             \x20 big/movie.mkv  12.3 GB  a1b2c3  (was session 4)\n\
+             No live files to re-burn."
+        );
     }
 }
 
