@@ -3,7 +3,7 @@
 
 use diskrement_shell::catalog::model::{Project, ProjectId};
 use diskrement_shell::catalog::time;
-use diskrement_shell::pipeline::reports::{PlanReport, ScanReport, StatusReport};
+use diskrement_shell::pipeline::reports::{BurnReport, PlanReport, ScanReport, StatusReport};
 
 pub fn init_done(name: &str, id: ProjectId) -> String {
     format!("Created project {name} (id {}).", id.0)
@@ -75,12 +75,32 @@ pub fn plan_report(p: &PlanReport) -> String {
 }
 
 /// `f"${bytes / 1.0e9}%.1f GB"` (`Render.gb`).
-#[allow(dead_code)]
 pub fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1.0e9)
 }
 
-#[allow(dead_code)]
+/// `Render.burn`. One disc per cycle, so there is exactly one block.
+pub fn burn_report(r: &BurnReport) -> String {
+    let d = &r.disc;
+    let status = if d.finalized {
+        "Status: FINALIZED — set this disc aside, it is sealed."
+    } else {
+        "Status: left OPEN — may receive more sessions later."
+    };
+    let next = if r.remaining.more_discs == 0 {
+        "No more changes — the set is up to date.".to_string()
+    } else {
+        format!(
+            "~{} more discs of changes remain. Run: scan → plan → burn",
+            r.remaining.more_discs
+        )
+    };
+    format!(
+        "✔ Wrote disc {}  —  label: \"{}\"\n{status}\n{next}",
+        d.ordinal, d.label
+    )
+}
+
 pub fn status_report(p: &Project, r: &StatusReport) -> String {
     // Two spaces after the project name; margin is %.1f plus a literal %.
     let mut out = format!(
@@ -425,5 +445,62 @@ mod tests {
             vec![scanned("huge.bin", 5_000)],
         );
         assert!(plan_report(&report).starts_with("Plan: disc 1 (new disc, BD_R) — 0 files"));
+    }
+}
+
+#[cfg(test)]
+mod burn_render_tests {
+    use super::*;
+    use diskrement_shell::pipeline::reports::{BurnReport, DiscBurn, RemainingEstimate};
+
+    fn report(finalized: bool, more_discs: usize) -> BurnReport {
+        BurnReport {
+            disc: DiscBurn {
+                ordinal: 1,
+                label: "p disc 1".to_string(),
+                finalized,
+                staging_dir: "/w/staging/disc-1".into(),
+                image_bytes: 4096,
+            },
+            remaining: RemainingEstimate {
+                more_discs,
+                more_files: 1,
+                more_bytes: 800,
+            },
+        }
+    }
+
+    /// `fixtures/run-manifest.txt` step 04, byte for byte.
+    #[test]
+    fn a_finalized_disc_with_more_to_come_matches_the_render_oracle() {
+        assert_eq!(
+            burn_report(&report(true, 1)),
+            "✔ Wrote disc 1  —  label: \"p disc 1\"\n\
+             Status: FINALIZED — set this disc aside, it is sealed.\n\
+             ~1 more discs of changes remain. Run: scan → plan → burn"
+        );
+    }
+
+    /// `fixtures/run-manifest.txt` step 19: the set is complete.
+    #[test]
+    fn an_open_disc_with_nothing_left_matches_the_render_oracle() {
+        assert_eq!(
+            burn_report(&report(false, 0)),
+            "✔ Wrote disc 1  —  label: \"p disc 1\"\n\
+             Status: left OPEN — may receive more sessions later.\n\
+             No more changes — the set is up to date."
+        );
+    }
+
+    /// The first line's spacing is easy to lose in a reformat and the oracle
+    /// is byte-exact, so pin it on its own.
+    #[test]
+    fn the_wrote_line_uses_two_spaces_around_the_dash() {
+        let line = burn_report(&report(false, 0))
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(line, "✔ Wrote disc 1  —  label: \"p disc 1\"");
     }
 }

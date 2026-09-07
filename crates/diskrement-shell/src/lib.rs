@@ -2,6 +2,7 @@
 //! catalog, file scanning, CoW snapshots, staging, and the burners
 //! (spec §5.3, §5.5).
 
+pub mod burn;
 pub mod catalog;
 pub mod error;
 pub mod fs;

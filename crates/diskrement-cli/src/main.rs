@@ -3,8 +3,10 @@
 //! data and performs no path resolution (CLAUDE.md invariant).
 
 mod args;
+mod backend;
 mod paths;
 mod progress;
+mod prompt;
 mod render;
 
 use std::io::Write;
@@ -13,6 +15,7 @@ use std::process::ExitCode;
 
 use args::Command;
 use clap::Parser as _;
+use diskrement_shell::burn::{simulated::SimulatedBurner, Burner};
 use diskrement_shell::catalog::model::{Project, ProjectInit};
 use diskrement_shell::catalog::Catalog;
 use diskrement_shell::error::PipelineError;
@@ -66,6 +69,7 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
         Command::Scan { name, .. } => name,
         Command::Plan { name, .. } => name,
         Command::Status { name, .. } => name,
+        Command::Burn { name, .. } => name,
     };
     let resolved = paths::resolve(
         cli.catalog.as_deref(),
@@ -169,6 +173,56 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
             );
             let report = pipeline.status(&name)?;
             say(&render::status_report(&p, &report));
+            Ok(())
+        }
+        Command::Burn { name, yes } => {
+            // The project lookup comes first (`Runner.withProject` resolves the
+            // project before `Prompt.confirm`), so an unknown project fails with
+            // exit 2 without asking anything.
+            let sink = progress::ConsoleProgress::new();
+            let mut catalog = open_catalog(&resolved.catalog)?;
+            let p = find_or_fail(&catalog, &name)?;
+
+            // Burn the plan exactly as staged: it carries the disc type chosen
+            // at `plan` time, and re-planning here would silently discard a
+            // `plan --disc-type ...` choice. `render::burn_report` then reports
+            // what was actually written.
+            let burner = match backend::resolve(cli.burner, cli.device.as_deref(), &env_lookup) {
+                backend::Backend::Simulated => {
+                    let par = diskrement_shell::fs::scanner::parallelism_from_env();
+                    for w in &par.warnings {
+                        eprintln!("{w}");
+                    }
+                    Burner::Simulated(SimulatedBurner::new(&sink, par.value))
+                }
+                // P8 replaces this arm with the xorriso burner. Refusing here
+                // rather than falling back to the simulated backend is the
+                // point: a silently simulated burn is a divergence nothing in
+                // the differential harness would catch.
+                backend::Backend::Real(device) => {
+                    return Err(PipelineError::Failed(format!(
+                        "the real burner is not implemented yet (device {}); \
+                         re-run with --burner simulated",
+                        device.xorriso_address()
+                    )))
+                }
+            };
+
+            if !prompt::confirm(&format!("Burn the staged plan for {name}?"), yes) {
+                say("Aborted.");
+                return Ok(());
+            }
+
+            let mut pipeline = Pipeline::new(
+                &mut catalog,
+                PipelinePaths {
+                    work_dir: PathBuf::from(&p.work_dir),
+                    scan_cache: paths::scan_cache_path(&resolved.catalog, &name),
+                },
+                &sink,
+            );
+            let report = pipeline.burn(&name, chrono::Utc::now(), &burner)?;
+            say(&render::burn_report(&report));
             Ok(())
         }
     }

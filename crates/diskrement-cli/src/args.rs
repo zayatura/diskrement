@@ -7,6 +7,15 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use diskrement_core::DiscType;
 
+/// The burn backend, as a flag. zio-cli's `Options.enumeration` rejected an
+/// unknown value as an argument error and clap's `ValueEnum` does the same.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum BurnerKind {
+    Real,
+    Simulated,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "diskrement",
@@ -21,7 +30,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub device: Option<String>,
     #[arg(long, global = true)]
-    pub burner: Option<String>,
+    pub burner: Option<BurnerKind>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -62,6 +71,12 @@ pub enum Command {
     },
     /// Show discs, totals, and last burn.
     Status { name: String },
+    /// Burn the staged plan (with confirmation).
+    Burn {
+        name: String,
+        #[arg(long, short = 'y', default_value_t = false)]
+        yes: bool,
+    },
 }
 
 #[cfg(test)]
@@ -240,5 +255,26 @@ mod tests {
     #[test]
     fn plan_requires_a_project_name() {
         assert!(Cli::try_parse_from(["diskrement", "plan"]).is_err());
+    }
+
+    #[test]
+    fn burn_yes_accepts_the_y_alias_exactly_as_the_long_form() {
+        for argv in [
+            vec!["diskrement", "burn", "p", "--yes"],
+            vec!["diskrement", "burn", "p", "-y"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Command::Burn { name, yes } = cli.command else {
+                panic!("not burn")
+            };
+            assert_eq!(name, "p");
+            assert!(yes);
+        }
+        assert!(!matches!(
+            Cli::try_parse_from(["diskrement", "burn", "p"])
+                .unwrap()
+                .command,
+            Command::Burn { yes: true, .. }
+        ));
     }
 }

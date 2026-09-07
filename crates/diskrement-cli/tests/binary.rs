@@ -295,3 +295,196 @@ mod p4 {
             .stderr(contains("project not found: nosuch"));
     }
 }
+
+mod p5 {
+    use super::*;
+
+    fn cmd() -> Command {
+        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
+        // Never touch a real drive from a test.
+        c.env("DISKREMENT_BURNER", "simulated");
+        c.env("DISKREMENT_HASH_PARALLELISM", "2");
+        c
+    }
+
+    struct Project {
+        _dir: tempfile::TempDir,
+        catalog: std::path::PathBuf,
+        work: std::path::PathBuf,
+        source: std::path::PathBuf,
+    }
+
+    fn project() -> Project {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let source = root.join("src");
+        let work = root.join("work");
+        let catalog = root.join("catalog/cat.sqlite");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
+        Project {
+            _dir: dir,
+            catalog,
+            work,
+            source,
+        }
+    }
+
+    fn base(p: &Project) -> Command {
+        let mut c = cmd();
+        c.arg("--catalog").arg(&p.catalog);
+        c
+    }
+
+    fn init_scan_plan(p: &Project) {
+        base(p)
+            .args(["init", "p", "--source"])
+            .arg(&p.source)
+            .arg("--work-dir")
+            .arg(&p.work)
+            .assert()
+            .success();
+        base(p).args(["scan", "p"]).assert().success();
+        base(p).args(["plan", "p"]).assert().success();
+    }
+
+    #[test]
+    fn burn_writes_the_disc_and_reports_it() {
+        let p = project();
+        init_scan_plan(&p);
+
+        base(&p)
+            .args(["burn", "p", "--yes"])
+            .assert()
+            .success()
+            .stdout(contains("✔ Wrote disc 1  —  label: \"p disc 1\""))
+            .stdout(contains(
+                "Status: left OPEN — may receive more sessions later.",
+            ))
+            .stdout(contains("No more changes — the set is up to date."));
+
+        assert!(p.work.join("staging/disc-1/data/a.bin").is_file());
+        assert!(p
+            .work
+            .join("staging/disc-1/.diskrement/manifest.json")
+            .is_file());
+        assert!(p
+            .work
+            .join("staging/disc-1/.diskrement/catalog.sqlite")
+            .is_file());
+    }
+
+    /// A second burn with nothing staged is the state error, exit 2.
+    #[test]
+    fn burning_twice_fails_with_the_staged_state_error() {
+        let p = project();
+        init_scan_plan(&p);
+        base(&p).args(["burn", "p", "--yes"]).assert().success();
+
+        base(&p)
+            .args(["burn", "p", "--yes"])
+            .assert()
+            .code(2)
+            .stderr(contains("no staged scan for p (run scan)"));
+    }
+
+    #[test]
+    fn burning_an_unknown_project_exits_two() {
+        let p = project();
+        init_scan_plan(&p);
+        base(&p)
+            .args(["burn", "nosuch", "--yes"])
+            .assert()
+            .code(2)
+            .stderr(contains("project not found: nosuch"));
+    }
+
+    /// Without `--yes` and with no terminal, the read hits EOF and the burn is
+    /// refused: exit 0, nothing written.
+    #[test]
+    fn declining_the_prompt_is_a_successful_no_op() {
+        let p = project();
+        init_scan_plan(&p);
+
+        base(&p)
+            .args(["burn", "p"])
+            .write_stdin("n\n")
+            .assert()
+            .success()
+            .stdout(contains("Aborted."));
+
+        assert!(!p.work.join("staging").exists(), "nothing was staged");
+        // The plan survives, so the operator can retry.
+        assert!(p.work.join("staged/plan.json").is_file());
+    }
+
+    /// The real burner is P8's. Until then the CLI refuses rather than
+    /// silently simulating.
+    #[test]
+    fn asking_for_the_real_burner_is_refused_for_now() {
+        let p = project();
+        init_scan_plan(&p);
+
+        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
+        c.arg("--catalog")
+            .arg(&p.catalog)
+            .args(["--burner", "real", "burn", "p", "--yes"])
+            .env_remove("DISKREMENT_BURNER")
+            .assert()
+            .code(5)
+            .stderr(contains("the real burner is not implemented yet"));
+    }
+
+    /// A bad `--burner` value is an argument error (exit 1), the one place
+    /// spec §3.2 lets clap and zio-cli word things differently.
+    #[test]
+    fn a_bogus_burner_flag_is_an_argument_error() {
+        let p = project();
+        base(&p)
+            .args(["--burner", "pretend", "burn", "p", "--yes"])
+            .assert()
+            .code(1);
+    }
+
+    /// The full cycle the corpus records: spill across two discs, one disc per
+    /// burn, with the remaining-discs line changing between them.
+    #[test]
+    fn two_cycles_spill_across_two_discs() {
+        let p = project();
+        std::fs::write(p.source.join("b.bin"), vec![b'b'; 800]).unwrap();
+        let with_shrink = |p: &Project| {
+            let mut c = base(p);
+            c.env("DISKREMENT_DISC_BYTES", "1000");
+            c
+        };
+
+        with_shrink(&p)
+            .args(["init", "p", "--source"])
+            .arg(&p.source)
+            .arg("--work-dir")
+            .arg(&p.work)
+            .assert()
+            .success();
+        with_shrink(&p).args(["scan", "p"]).assert().success();
+        with_shrink(&p).args(["plan", "p"]).assert().success();
+        with_shrink(&p)
+            .args(["burn", "p", "--yes"])
+            .assert()
+            .success()
+            .stdout(contains("✔ Wrote disc 1"))
+            .stdout(contains("more discs of changes remain"));
+
+        with_shrink(&p).args(["scan", "p"]).assert().success();
+        with_shrink(&p).args(["plan", "p"]).assert().success();
+        with_shrink(&p)
+            .args(["burn", "p", "--yes"])
+            .assert()
+            .success()
+            .stdout(contains("✔ Wrote disc 2"))
+            .stdout(contains("No more changes — the set is up to date."));
+
+        assert!(p.work.join("staging/disc-1/data/a.bin").is_file());
+        assert!(p.work.join("staging/disc-2/data/b.bin").is_file());
+    }
+}

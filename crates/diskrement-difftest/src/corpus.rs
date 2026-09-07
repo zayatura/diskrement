@@ -19,6 +19,9 @@ pub fn all() -> Vec<Scenario> {
         plan_spill_and_seal(),
         plan_oversize(),
         plan_errors(),
+        burn_basics(),
+        burn_spill_cycles(),
+        burn_errors(),
         harvest_replay(),
     ]
 }
@@ -162,6 +165,97 @@ pub fn plan_errors() -> Scenario {
     }
 }
 
+/// One full cycle: scan, plan, burn, and the status that reports it. The
+/// simplest proof that a Rust burn and a Scala burn leave the same catalog,
+/// the same staged disc tree and the same embedded snapshot.
+pub fn burn_basics() -> Scenario {
+    Scenario {
+        name: "burn-basics",
+        disc_bytes: None,
+        steps: vec![
+            write("a.bin", 800),
+            write("nested/b.bin", 120),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            cmd("status p", &["status", "p"]),
+            // Nothing changed, so this second cycle has nothing to plan: the
+            // "Nothing to burn" answer must agree on both sides.
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+        ],
+    }
+}
+
+/// The spill, burned: one disc per cycle, a second session's ordinal, a
+/// superseded file and a tombstone. This is the shape that produced the
+/// corpus's disc-1 through disc-3, minus the coaster (P7's `disc mark-dead`).
+pub fn burn_spill_cycles() -> Scenario {
+    Scenario {
+        name: "burn-spill-cycles",
+        disc_bytes: Some(1000),
+        steps: vec![
+            write("a.bin", 800),
+            write("b.bin", 800),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            // cycle 1: a.bin fills disc 1, which is sealed; b.bin spills.
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            // cycle 1b: the remainder lands on disc 2, left OPEN.
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            // cycle 2: supersede a, delete b — the modify+delete manifest.
+            modify("a.bin", 800),
+            delete("b.bin"),
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            cmd("status p", &["status", "p"]),
+            // Seal the open disc with a file-less session.
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p --finalize", &["plan", "p", "--finalize"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            cmd("status p", &["status", "p"]),
+        ],
+    }
+}
+
+/// `burn`'s refusals, compared by agreement. Each is a state or environment
+/// error, so both the message and the exit code are contract.
+pub fn burn_errors() -> Scenario {
+    Scenario {
+        name: "burn-errors",
+        disc_bytes: Some(500),
+        steps: vec![
+            write("big.bin", 800),
+            write("small.bin", 100),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            // Nothing staged yet.
+            cmd("burn before scan", &["burn", "p", "--yes"]),
+            cmd("scan p", &["scan", "p"]),
+            // Scanned but not planned.
+            cmd("burn before plan", &["burn", "p", "--yes"]),
+            // `plan` records the oversized file and succeeds; `burn` is the
+            // half that refuses it (exit 3).
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn with an oversized file", &["burn", "p", "--yes"]),
+            cmd("burn on an unknown project", &["burn", "nosuch", "--yes"]),
+        ],
+    }
+}
+
 /// The P0 harvest flow, replayed live: spill across two discs, supersede and
 /// delete, a dead disc, a recovery burn, then `--finalize` to seal.
 ///
@@ -265,6 +359,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_burn_scenarios_use_only_commands_p5_lands() {
+        for s in [burn_basics(), burn_spill_cycles(), burn_errors()] {
+            for c in s.commands() {
+                assert!(
+                    ["init", "scan", "status", "plan", "burn"].contains(&c),
+                    "scenario '{}' uses '{c}', which P5 does not land",
+                    s.name
+                );
+            }
+        }
+    }
+
+    /// The oversize scenario must actually reach the refusal: a 800-byte file
+    /// against a 500-byte disc, with a 100-byte file that still plans.
+    #[test]
+    fn the_burn_error_scenario_stages_a_plan_that_burn_must_refuse() {
+        assert_eq!(burn_errors().disc_bytes, Some(500));
     }
 
     #[test]
