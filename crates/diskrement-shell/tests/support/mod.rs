@@ -69,4 +69,11 @@ pub fn fixture_copy(rel: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, dest)
 }
 
+/// Read a fixture file as text. Never writes, so no `immutable=1` dance is
+/// needed — unlike the SQLite fixtures.
+pub fn fixture_text(rel: &str) -> String {
+    let path = fixtures_dir().join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
 pub use diskrement_shell::testutil::{assert_dumps_match, dump_catalog, CATALOG_TABLES};
