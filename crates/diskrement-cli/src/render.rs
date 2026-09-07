@@ -919,7 +919,9 @@ mod snapshots {
     use diskrement_core::{
         ContentHash, DiscState, DiscStatus, DiscType, PlannedDisc, RelPath, ScannedFile,
     };
-    use diskrement_shell::catalog::model::{FileHistoryEntry, VersionStatus};
+    use diskrement_shell::catalog::model::{
+        FileHistoryEntry, LostReport, LostVersionEntry, ReburnEntry, VersionStatus,
+    };
     use diskrement_shell::pipeline::reports::{
         BurnReport, DiscBurn, PlanReport, RemainingEstimate, ScanReport, StatusReport, VerifyReport,
     };
@@ -1344,6 +1346,73 @@ mod snapshots {
             gallery(&[
                 ("a one-word project", reset_done("p")),
                 ("a longer name", reset_done("photos")),
+            ]),
+        );
+    }
+
+    fn lost_entry(rel: &str, size: u64, hash: &str, session: u32) -> LostVersionEntry {
+        LostVersionEntry {
+            rel_path: RelPath(rel.to_string()),
+            content_hash: ContentHash(hash.to_string()),
+            size_bytes: size,
+            session_ordinal: session,
+        }
+    }
+
+    fn reburn_entry(rel: &str, size: u64, hash: &str) -> ReburnEntry {
+        ReburnEntry {
+            rel_path: RelPath(rel.to_string()),
+            content_hash: ContentHash(hash.to_string()),
+            size_bytes: size,
+        }
+    }
+
+    #[test]
+    fn mark_dead_gallery() {
+        let a1 = "0868513521f77faae1cf5200d9ff9603007fa04e0caef9f81183b44d46cbba86";
+        let a2 = "e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77";
+        let b1 = "b9749f157163b4bbb7faec0a55cfb88c69968a25eac4cfe13e45d6286874709a";
+        check(
+            "mark_dead",
+            gallery(&[
+                (
+                    "nothing lost, nothing to re-burn",
+                    mark_dead(&LostReport {
+                        disc_ordinal: 2,
+                        lost: vec![],
+                        reburn: vec![],
+                    }),
+                ),
+                (
+                    "one live file re-queued (run-manifest step 12)",
+                    mark_dead(&LostReport {
+                        disc_ordinal: 3,
+                        lost: vec![],
+                        reburn: vec![reburn_entry("a.bin", 800, a2)],
+                    }),
+                ),
+                (
+                    "a superseded version gone forever",
+                    mark_dead(&LostReport {
+                        disc_ordinal: 1,
+                        lost: vec![lost_entry("b.bin", 800, b1, 1)],
+                        reburn: vec![],
+                    }),
+                ),
+                (
+                    "both halves, with the GB column",
+                    mark_dead(&LostReport {
+                        disc_ordinal: 4,
+                        lost: vec![
+                            lost_entry("b.bin", 800, b1, 1),
+                            lost_entry("big/movie.mkv", 12_300_000_000, "a1b2c3", 2),
+                        ],
+                        reburn: vec![
+                            reburn_entry("a.bin", 800, a1),
+                            reburn_entry("nested/c.bin", 100, "c0ffee"),
+                        ],
+                    }),
+                ),
             ]),
         );
     }
