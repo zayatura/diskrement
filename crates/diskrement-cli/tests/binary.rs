@@ -701,3 +701,219 @@ mod p6 {
             .stderr(contains("the real disc verifier is not implemented yet"));
     }
 }
+
+/// P7: `disc mark-dead`, the lost report, and the recovery cycle.
+mod p7 {
+    use super::*;
+
+    /// The content hashes of `b.bin`'s two versions, which the lost report and
+    /// `history` print verbatim. Written out, not computed at test time: a
+    /// helper that hashed the same bytes the fixture wrote would agree with
+    /// itself no matter what the binary printed.
+    const B1: &str = "b9749f157163b4bbb7faec0a55cfb88c69968a25eac4cfe13e45d6286874709a";
+    const B2: &str = "49a7906775663af7970f00f946d1d540822233477e75f5b2912ca497780a01bc";
+
+    fn cmd() -> Command {
+        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
+        c.env("DISKREMENT_BURNER", "simulated");
+        c.env_remove("DISKREMENT_DEVICE");
+        c.env_remove("DISKREMENT_DISC_BYTES");
+        c
+    }
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        catalog: std::path::PathBuf,
+        source: std::path::PathBuf,
+    }
+
+    fn run(f: &Fixture, args: &[&str]) -> assert_cmd::assert::Assert {
+        let mut c = cmd();
+        c.arg("--catalog").arg(&f.catalog);
+        c.args(args).assert()
+    }
+
+    /// Two burned sessions on one open disc: `a.bin` current from session 1,
+    /// `b.bin` superseded in session 2. Disc 1 therefore holds one of each
+    /// casualty class, which is what makes both halves of the report non-empty.
+    fn two_session_disc() -> Fixture {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
+        std::fs::write(source.join("b.bin"), vec![b'b'; 800]).unwrap();
+        let catalog = root.join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let work = root.join("work");
+
+        let f = Fixture {
+            _dir: dir,
+            catalog,
+            source,
+        };
+        let mut c = cmd();
+        c.arg("--catalog")
+            .arg(&f.catalog)
+            .args(["init", "p", "--source"])
+            .arg(&f.source)
+            .arg("--work-dir")
+            .arg(&work)
+            .assert()
+            .success();
+        run(&f, &["scan", "p"]).success();
+        run(&f, &["plan", "p"]).success();
+        run(&f, &["burn", "p", "--yes"]).success();
+
+        std::fs::write(f.source.join("b.bin"), vec![b'B'; 800]).unwrap();
+        run(&f, &["scan", "p"]).success();
+        run(&f, &["plan", "p"]).success();
+        run(&f, &["burn", "p", "--yes"]).success();
+        f
+    }
+
+    #[test]
+    fn mark_dead_prints_both_casualty_blocks_and_exits_0() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"])
+            .success()
+            .stdout(format!(
+                "Disc 1 marked DEAD.\n\
+                 Permanently lost (1):\n\
+                 \x20 b.bin  0.0 GB  {B1}  (was session 1)\n\
+                 Re-burn on next scan/plan/burn (2):\n\
+                 \x20 a.bin\n\
+                 \x20 b.bin\n"
+            ));
+    }
+
+    /// The disc becomes DEAD in `status` — the one place the CLI shows the
+    /// derived state — while the row behind it is untouched (asserted in the
+    /// shell's `fixture_mark_dead` and `mark_dead_tests`, which can see SQL).
+    #[test]
+    fn status_reports_the_disc_dead_and_drops_its_files_from_the_view() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"]).success();
+        run(&f, &["status", "p"])
+            .success()
+            .stdout(contains("  #1   DEAD").and(contains("Current files: 0")));
+    }
+
+    #[test]
+    fn marking_the_same_disc_twice_is_exit_2() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"]).success();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"])
+            .failure()
+            .code(2)
+            .stderr(contains("disc 1 is already marked dead"));
+    }
+
+    #[test]
+    fn an_ordinal_no_disc_has_is_exit_2() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "9", "--yes"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal 9"));
+    }
+
+    #[test]
+    fn mark_dead_on_an_unknown_project_is_exit_2() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "nosuch", "1", "--yes"])
+            .failure()
+            .code(2)
+            .stderr(contains("project not found: nosuch"));
+    }
+
+    /// The parse-time boundary, through the real binary: exit **1**, and the
+    /// catalog is never opened. Compare `verify --disc -1`, which is exit 2 —
+    /// the two ordinals are deliberately different, and this is the assertion
+    /// that keeps them from drifting together.
+    #[test]
+    fn a_non_positive_or_out_of_range_ordinal_is_an_argument_error() {
+        let f = two_session_disc();
+        for bad in ["0", "-1", "4294967297", "abc"] {
+            run(&f, &["disc", "mark-dead", "p", bad, "--yes"])
+                .failure()
+                .code(1);
+        }
+        run(&f, &["verify", "p", "--disc", "-1"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal -1"));
+    }
+
+    /// Refusing the prompt is a successful no-op: exit 0, nothing appended,
+    /// and the disc still reads OPEN.
+    #[test]
+    fn declining_the_prompt_leaves_the_disc_alive() {
+        let f = two_session_disc();
+        let mut c = cmd();
+        c.arg("--catalog")
+            .arg(&f.catalog)
+            .args(["disc", "mark-dead", "p", "1"])
+            .write_stdin("n\n")
+            .assert()
+            .success()
+            .stdout(
+                "Mark disc 1 of p DEAD? Superseded versions on it are lost forever; \
+                 its live files will re-plan. [y/N] Aborted.\n",
+            );
+
+        run(&f, &["status", "p"])
+            .success()
+            .stdout(contains("  #1   OPEN"));
+    }
+
+    /// The whole point of the phase: the live files come back. After the
+    /// coaster, `scan` sees both paths as *added*, `plan` opens a fresh disc
+    /// 2, and the recovery burn restores them — while `history` keeps both
+    /// dead copies visible as LOST.
+    #[test]
+    fn the_live_files_re_plan_onto_a_fresh_disc_and_history_shows_lost_per_copy() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"]).success();
+
+        run(&f, &["scan", "p"]).success().stdout(contains(
+            "Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged.",
+        ));
+        run(&f, &["plan", "p"])
+            .success()
+            .stdout(contains("Plan: disc 2 (new disc, BD_R) — 2 files"));
+        run(&f, &["burn", "p", "--yes"])
+            .success()
+            .stdout(contains("Wrote disc 2"));
+
+        // LOST is per physical copy: v2 and v3 share one content hash.
+        run(&f, &["history", "p", "b.bin"])
+            .success()
+            .stdout(format!(
+                "b.bin\n\
+             \x20 v1  disc 1 / session 1   0.0 GB  {B1}  LOST\n\
+             \x20 v2  disc 1 / session 2   0.0 GB  {B2}  LOST\n\
+             \x20 v3  disc 2 / session 1   0.0 GB  {B2}  CURRENT\n"
+            ));
+
+        // The sweep skips the dead disc silently; naming it is an error.
+        run(&f, &["verify", "p"])
+            .success()
+            .stdout("disc 2: 2 files OK ✓\n");
+        run(&f, &["verify", "p", "--disc", "1"])
+            .failure()
+            .code(2)
+            .stderr(contains("disc 1 is marked dead"));
+    }
+
+    /// Every disc dead: the sweep has nothing left to check and says so,
+    /// rather than reporting a clean run over an empty list.
+    #[test]
+    fn a_project_whose_only_disc_died_has_nothing_to_verify() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"]).success();
+        run(&f, &["verify", "p"])
+            .success()
+            .stdout("Nothing to verify: no burned discs.\n");
+    }
+}
