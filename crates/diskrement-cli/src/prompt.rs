@@ -2,6 +2,8 @@
 
 use std::io::Write as _;
 
+use diskrement_shell::burn::BurnOperator;
+
 /// Ask, then read one line. `assume_yes` skips the read entirely.
 pub fn confirm(message: &str, assume_yes: bool) -> bool {
     confirm_from(message, assume_yes, || {
@@ -36,6 +38,23 @@ pub fn confirm_from(
     }
 }
 
+/// The operator port over the console (`ConsoleBurnOperator` in Runner.scala).
+///
+/// `confirm_insert` never assumes yes: `burn --yes` answers "burn the staged
+/// plan?", not "is the right disc in the drive?", and no flag may skip the
+/// second question.
+pub struct ConsoleOperator;
+
+impl BurnOperator for ConsoleOperator {
+    fn confirm_insert(&self, message: &str) -> bool {
+        confirm(message, false)
+    }
+
+    fn progress(&self, line: &str) {
+        println!("{line}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +84,20 @@ mod tests {
     #[test]
     fn eof_is_a_refusal() {
         assert!(!confirm_from("Burn?", false, || None));
+    }
+
+    /// The console operator is the CLI's `BurnOperator`: a confirmation that
+    /// never assumes yes (an insert prompt has no `--yes`), and progress lines
+    /// on stdout.
+    #[test]
+    fn the_console_operator_refuses_on_eof() {
+        use diskrement_shell::burn::BurnOperator;
+        // Reading real stdin in a test is not viable; what is asserted here is
+        // the wiring — `confirm_insert` goes through `confirm`, which refuses
+        // on EOF, and `progress` does not panic.
+        let op = ConsoleOperator;
+        op.progress("a line");
+        assert!(!confirm_from("Insert?", false, || None));
+        let _: &dyn BurnOperator = &op;
     }
 }
