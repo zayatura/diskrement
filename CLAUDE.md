@@ -75,6 +75,26 @@ These apply to the `crates/` tree only; the Scala gotchas above still govern
   file must copy the mtime afterwards (`File::set_modified`), or the
   scanner's size+mtime fast path never hits and the fingerprint cache is
   useless. `fs::snapshot::reflink_tree` does this — keep it that way.
+- **`std::process` has no `redirectErrorStream`.** `burn::cmd::system` reads
+  stdout on the calling thread (live `UPDATE` progress) and stderr on a second
+  thread into a shared buffer, replaying the buffered stderr lines through
+  `on_line` after the drain — this ports Scala's `redirectErrorStream(true)` +
+  `onLine`, where merged lines all reach the callback. Buffer order
+  approximates the interleaving, which is enough for `tail` and
+  `classify_failure`.
+- **xorriso extracts over an existing file** (validated 2026-09-07, 1.5.8.pl02),
+  but every extraction in this tree still targets a fresh path inside a
+  `TempDir`, so nothing depends on that.
+- **`-toc -tell_media_space` prints `Media status` twice**, once per
+  sub-command. The parser takes the first match; do not "fix" it into an
+  exactly-once assertion.
+- **`stdio:` image files are not real media.** `-close on` has no observable
+  effect on them and free space is a fake huge number, so sealing and capacity
+  refusals are assertable only on real media (`docs/smoke-test-real-media.md`).
+- **The real backend prompts before it opens the device.** That is what lets
+  `tests/binary.rs` and the differential harness exercise it with no drive: a
+  child with no stdin declines, and the burn aborts (exit 0) before anything is
+  touched.
 
 ## The differential harness (P3+)
 

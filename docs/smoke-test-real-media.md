@@ -1,5 +1,14 @@
 # Real-media smoke test (Plan 4a)
 
+**Since the Rust rewrite's P8** this checklist applies to both implementations.
+Run it with the Rust binary (`cargo run -p diskrement-cli -- <args>`, or the
+built `target/debug/diskrement`); the Scala launcher (`sbt cli/stage`, then
+`cli/target/universal/stage/bin/diskrement`) remains available until P10 for
+comparing behavior on any item that surprises you. Item 5 (Tier-2 verification)
+and item 2 (udisks mount) are the two the automated image-backed suite cannot
+reach at all — `tests/xorriso_image.rs` covers osirrox extraction, but never a
+mount.
+
 Run on the dev machine (Pioneer BD-RW BDR-UD04, /dev/sr0) with one expendable
 BD-R (or BD-RE for repeatable drills) before declaring cycle 2 done.
 Prereq: `sudo usermod -aG optical $USER` + re-login (else expect the
