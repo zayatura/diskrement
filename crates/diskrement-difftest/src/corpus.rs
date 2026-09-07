@@ -22,6 +22,7 @@ pub fn all() -> Vec<Scenario> {
         burn_basics(),
         burn_spill_cycles(),
         burn_errors(),
+        verify_history_reset(),
         harvest_replay(),
     ]
 }
@@ -62,6 +63,15 @@ pub fn error_paths() -> Scenario {
             cmd_exit_only("scan with no project", &["scan"]),
             // An unknown subcommand, likewise an argument-parser failure.
             cmd_exit_only("bogus subcommand", &["frobnicate", "p"]),
+            // A non-numeric `--disc` fails inside the argument parser, the one
+            // place spec §3.2 lets clap and zio-cli word things differently.
+            cmd_exit_only(
+                "verify with a non-numeric disc",
+                &["verify", "p", "--disc", "abc"],
+            ),
+            // `history` needs both arguments; missing one is likewise an
+            // argument-parser failure.
+            cmd_exit_only("history with no path", &["history", "p"]),
             // A domain lookup failure, not an argument failure: this one is
             // fully compared, because the exit-code ladder and the message are
             // both contract (CLAUDE.md: 2 = state/lookup).
@@ -252,6 +262,74 @@ pub fn burn_errors() -> Scenario {
             cmd("plan p", &["plan", "p"]),
             cmd("burn with an oversized file", &["burn", "p", "--yes"]),
             cmd("burn on an unknown project", &["burn", "nosuch", "--yes"]),
+        ],
+    }
+}
+
+/// `verify`, `history` and `reset`, and the state each leaves behind.
+///
+/// The interesting assertions are not the renders alone — they are the catalog
+/// rows underneath. A `verify` advances a session `BURNED -> VERIFIED`, and the
+/// state diff compares session states, so a port that marked the wrong session
+/// (or marked one it should have skipped) fails here even though both binaries
+/// printed the same line.
+pub fn verify_history_reset() -> Scenario {
+    Scenario {
+        name: "verify-history-reset",
+        disc_bytes: Some(1000),
+        steps: vec![
+            write("a.bin", 800),
+            write("b.bin", 800),
+            cmd(
+                "init p",
+                &["init", "p", "--source", "{source}", "--work-dir", "{work}"],
+            ),
+            // Nothing burned: the sweep has nothing to check, and the path has
+            // no history. Both are exit-0 sentences, not errors.
+            cmd("verify before any burn", &["verify", "p"]),
+            cmd("history before any burn", &["history", "p", "a.bin"]),
+            // cycle 1: a.bin fills disc 1, which is sealed; b.bin spills.
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            cmd("verify p", &["verify", "p"]),
+            // The second sweep finds the session already VERIFIED. It must be
+            // a clean no-op on both sides, not an illegal transition.
+            cmd("verify p again", &["verify", "p"]),
+            cmd("verify p --disc 1", &["verify", "p", "--disc", "1"]),
+            // A named ordinal that does not exist is an error, not a silent
+            // exit 0 — including the negative one zio-cli let through.
+            cmd("verify p --disc 99", &["verify", "p", "--disc", "99"]),
+            cmd("verify p --disc -1", &["verify", "p", "--disc", "-1"]),
+            cmd("history p a.bin", &["history", "p", "a.bin"]),
+            cmd("history p nope.bin", &["history", "p", "nope.bin"]),
+            // cycle 1b: b.bin lands on disc 2, so history spans two discs and
+            // the sweep has two discs to report.
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            cmd("verify p", &["verify", "p"]),
+            cmd("history p b.bin", &["history", "p", "b.bin"]),
+            // cycle 2: supersede a, delete b — history then shows SUPERSEDED
+            // and DELETED alongside CURRENT.
+            modify("a.bin", 800),
+            delete("b.bin"),
+            cmd("scan p", &["scan", "p"]),
+            cmd("plan p", &["plan", "p"]),
+            cmd("burn p --yes", &["burn", "p", "--yes"]),
+            cmd("history p a.bin", &["history", "p", "a.bin"]),
+            cmd("history p b.bin", &["history", "p", "b.bin"]),
+            cmd("verify p", &["verify", "p"]),
+            cmd("status p", &["status", "p"]),
+            // reset drops the staged state *and* the staging trees, so every
+            // disc then skips and `plan` needs a fresh scan.
+            cmd("scan p", &["scan", "p"]),
+            cmd("reset p", &["reset", "p"]),
+            cmd("verify after reset", &["verify", "p"]),
+            cmd("plan after reset", &["plan", "p"]),
+            cmd("reset p again", &["reset", "p"]),
+            cmd("reset on an unknown project", &["reset", "nosuch"]),
+            cmd("status p", &["status", "p"]),
         ],
     }
 }
