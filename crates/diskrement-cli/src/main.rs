@@ -74,6 +74,9 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
         Command::Reset { name, .. } => name,
         Command::Verify { name, .. } => name,
         Command::History { name, .. } => name,
+        Command::Disc {
+            command: args::DiscCommand::MarkDead { name, .. },
+        } => name,
     };
     let resolved = paths::resolve(
         cli.catalog.as_deref(),
@@ -280,6 +283,38 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             let rel = diskrement_core::RelPath(rel_path);
             let entries = pipeline.history(&name, &rel)?;
             say(&render::history(&rel, &entries));
+            Ok(0)
+        }
+        Command::Disc {
+            command: args::DiscCommand::MarkDead { name, ordinal, yes },
+        } => {
+            // The project lookup comes first (`Runner.withProject` resolves
+            // the project before `Prompt.confirm`), so an unknown project
+            // fails with exit 2 without asking anything.
+            let mut catalog = open_catalog(&resolved.catalog)?;
+            let p = find_or_fail(&catalog, &name)?;
+
+            if !prompt::confirm(
+                &format!(
+                    "Mark disc {ordinal} of {name} DEAD? Superseded versions on it are \
+                     lost forever; its live files will re-plan."
+                ),
+                yes,
+            ) {
+                say("Aborted.");
+                return Ok(0);
+            }
+
+            let mut pipeline = Pipeline::new(
+                &mut catalog,
+                PipelinePaths {
+                    work_dir: PathBuf::from(&p.work_dir),
+                    scan_cache: paths::scan_cache_path(&resolved.catalog, &name),
+                },
+                &NoopSink,
+            );
+            let report = pipeline.mark_dead(&name, ordinal, chrono::Utc::now())?;
+            say(&render::mark_dead(&report));
             Ok(0)
         }
     }

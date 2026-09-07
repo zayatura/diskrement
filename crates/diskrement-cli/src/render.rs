@@ -13,7 +13,6 @@ pub fn init_done(name: &str, id: ProjectId) -> String {
 }
 
 /// `Scanned: …`, plus the `Hashed N of M files` line for a fresh scan only.
-#[allow(dead_code)]
 pub fn scan_report(r: &ScanReport) -> String {
     let summary = format!(
         "Scanned: {} added, {} modified, {} deleted, {} unchanged.",
@@ -216,7 +215,6 @@ pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
 /// destroyed a disc deserves to be told explicitly that it cost nothing. The
 /// two-space indent and the double-space column gaps are contract
 /// (`run-manifest.txt` step 12).
-#[allow(dead_code)] // wired into main.rs with the `disc mark-dead` command
 pub fn mark_dead(r: &LostReport) -> String {
     let mut lines = vec![format!("Disc {} marked DEAD.", r.disc_ordinal)];
 

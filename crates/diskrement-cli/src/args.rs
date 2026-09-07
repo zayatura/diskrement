@@ -93,6 +93,52 @@ pub enum Command {
     },
     /// Show the full version history of one file.
     History { name: String, rel_path: String },
+    /// Operations on individual burned discs.
+    Disc {
+        #[command(subcommand)]
+        command: DiscCommand,
+    },
+}
+
+/// `Commands.scala`'s `disc` group. One subcommand today; the group exists
+/// because the Scala surface has it, and §3.2 freezes the surface.
+#[derive(Subcommand, Debug)]
+pub enum DiscCommand {
+    /// Mark a disc dead (destroyed/unreadable); its live files re-plan.
+    ///
+    /// `allow_negative_numbers` so that `-1` reaches `disc_ordinal` and is
+    /// refused with the same sentence the Scala parser used, rather than
+    /// clap's "unexpected argument". Both exit 1; matching the wording costs
+    /// one attribute.
+    #[command(allow_negative_numbers = true)]
+    MarkDead {
+        name: String,
+        /// The ordinal of the disc to mark dead.
+        #[arg(value_parser = disc_ordinal)]
+        ordinal: u32,
+        #[arg(long, short = 'y', default_value_t = false)]
+        yes: bool,
+    },
+}
+
+/// The `disc mark-dead` ordinal, validated at parse time.
+///
+/// The mirror of `Commands.scala`'s `mapOrFail`: positive, and inside `Int`.
+/// Validating here rather than in the domain is deliberate and is the one
+/// place this binary's two disc-ordinal arguments differ — `verify --disc`
+/// hands a negative ordinal to the domain (exit 2), because that is what
+/// zio-cli did and the exit ladder is contract. Mark-dead is irreversible, so
+/// its bad ordinals are refused before anything opens the catalog.
+fn disc_ordinal(raw: &str) -> Result<u32, String> {
+    match raw.parse::<i128>() {
+        Ok(n) if n > 0 && n <= i128::from(i32::MAX) => Ok(n as u32),
+        // One message for every rejection, including a non-numeric argument:
+        // Scala words that case differently ("abc is not a integer."), which
+        // §3.2 sanctions, and a single sentence is the clearer one.
+        _ => Err(format!(
+            "disc ordinal must be a positive whole number, got {raw}"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -351,5 +397,78 @@ mod tests {
                 .command,
             Command::Burn { yes: true, .. }
         ));
+    }
+
+    #[test]
+    fn disc_mark_dead_parses_the_name_the_ordinal_and_the_yes_flag() {
+        let plain =
+            Cli::try_parse_from(["diskrement", "disc", "mark-dead", "photos", "1"]).unwrap();
+        let Command::Disc {
+            command: DiscCommand::MarkDead { name, ordinal, yes },
+        } = plain.command
+        else {
+            panic!("not disc mark-dead")
+        };
+        assert_eq!(name, "photos");
+        assert_eq!(ordinal, 1);
+        assert!(!yes);
+
+        for argv in [
+            vec!["diskrement", "disc", "mark-dead", "photos", "2", "--yes"],
+            vec!["diskrement", "disc", "mark-dead", "photos", "2", "-y"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Command::Disc {
+                command: DiscCommand::MarkDead { ordinal, yes, .. },
+            } = cli.command
+            else {
+                panic!("not disc mark-dead")
+            };
+            assert_eq!(ordinal, 2);
+            assert!(yes);
+        }
+    }
+
+    /// `Commands.scala` validates the ordinal in the parser rather than
+    /// letting `BigInt#toInt` truncate: mark-dead is irreversible, and
+    /// `4294967297` wrapping to `1` would destroy a different disc than the
+    /// one named. The Rust port mirrors the boundary exactly — 1..=i32::MAX.
+    #[test]
+    fn disc_mark_dead_rejects_a_non_positive_or_out_of_range_ordinal() {
+        for bad in [
+            "0",
+            "-1",
+            "4294967296",
+            "4294967297",
+            "9223372036854775808",
+            "abc",
+        ] {
+            assert!(
+                Cli::try_parse_from(["diskrement", "disc", "mark-dead", "p", bad]).is_err(),
+                "{bad} should be rejected by the parser"
+            );
+        }
+    }
+
+    #[test]
+    fn disc_mark_dead_accepts_the_whole_int_range_the_scala_parser_did() {
+        let cli =
+            Cli::try_parse_from(["diskrement", "disc", "mark-dead", "p", "2147483647"]).unwrap();
+        let Command::Disc {
+            command: DiscCommand::MarkDead { ordinal, .. },
+        } = cli.command
+        else {
+            panic!("not disc mark-dead")
+        };
+        assert_eq!(ordinal, 2_147_483_647);
+    }
+
+    /// A bare `disc` is a group, not a command: it must not run anything.
+    #[test]
+    fn disc_requires_a_subcommand_and_mark_dead_requires_both_arguments() {
+        assert!(Cli::try_parse_from(["diskrement", "disc"]).is_err());
+        assert!(Cli::try_parse_from(["diskrement", "disc", "mark-dead"]).is_err());
+        assert!(Cli::try_parse_from(["diskrement", "disc", "mark-dead", "p"]).is_err());
+        assert!(Cli::try_parse_from(["diskrement", "disc", "bury", "p", "1"]).is_err());
     }
 }
