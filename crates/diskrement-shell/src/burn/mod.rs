@@ -6,6 +6,7 @@
 //! backends, ever, and the split is the real-vs-simulated one the Scala build
 //! expressed as two `ZLayer`s. P5 lands the simulated arm; P8 adds `Real`.
 
+pub mod cmd;
 pub mod json;
 pub mod simulated;
 pub mod snapshot_writer;
@@ -100,6 +101,8 @@ pub enum BurnError {
     /// so interpolating the cause here would be a user-visible divergence.
     #[error("burn I/O error")]
     Io(#[source] std::io::Error),
+    #[error("xorriso is not available: {0} (install the libisoburn/xorriso package)")]
+    ToolMissing(String),
     #[error("aborted by operator")]
     Aborted,
 }
