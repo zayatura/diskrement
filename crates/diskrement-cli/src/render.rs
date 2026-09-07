@@ -142,7 +142,6 @@ pub fn status_report(p: &Project, r: &StatusReport) -> String {
 
 /// `Render.verify`. One block per disc, in sweep order; an empty sweep is a
 /// sentence rather than a blank line.
-#[allow(dead_code)]
 pub fn verify_report(reports: &[VerifyReport]) -> String {
     if reports.is_empty() {
         return "Nothing to verify: no burned discs.".to_string();
@@ -178,7 +177,6 @@ pub fn verify_report(reports: &[VerifyReport]) -> String {
 /// Result-driven exit (`Render.verifyExit`): a verify that finds corruption is
 /// a **successful run with a bad outcome**, so it exits 4 rather than taking
 /// the error ladder. A skipped disc found nothing and is not corruption.
-#[allow(dead_code)]
 pub fn verify_exit(reports: &[VerifyReport]) -> u8 {
     if reports.iter().any(|r| !r.mismatches.is_empty()) {
         4
@@ -191,7 +189,6 @@ pub fn verify_exit(reports: &[VerifyReport]) -> u8 {
 ///
 /// The column spacing is contract: two spaces after `v<n>`, **three** after the
 /// session, two around the hash.
-#[allow(dead_code)]
 pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
     if entries.is_empty() {
         return format!("No history for {}.", rel_path.as_str());
@@ -214,7 +211,6 @@ pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
 /// The `reset` confirmation. It lives in `Runner.scala`'s dispatch rather than
 /// in `Render.scala`; it is a renderer here so the snapshot gallery can cover
 /// every line the CLI prints.
-#[allow(dead_code)]
 pub fn reset_done(name: &str) -> String {
     format!("Reset {name}.")
 }

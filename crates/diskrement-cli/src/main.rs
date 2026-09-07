@@ -15,6 +15,7 @@ use std::process::ExitCode;
 
 use args::Command;
 use clap::Parser as _;
+use diskrement_shell::burn::verifier::{StagingVerifier, Verifier};
 use diskrement_shell::burn::{simulated::SimulatedBurner, Burner};
 use diskrement_shell::catalog::model::{Project, ProjectInit};
 use diskrement_shell::catalog::Catalog;
@@ -29,7 +30,7 @@ fn main() -> ExitCode {
     // clap's message may drift (spec §3.2).
     match args::Cli::try_parse() {
         Ok(cli) => match dispatch(cli) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(code) => ExitCode::from(code),
             Err(err) => {
                 eprintln!("{err}");
                 ExitCode::from(err.exit_code() as u8)
@@ -62,7 +63,7 @@ fn say(text: &str) {
     let _ = writeln!(out, "{text}");
 }
 
-fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
+fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
     // The project name the default catalog/data-dir resolution needs.
     let project_name = match &cli.command {
         Command::Init { name, .. } => name,
@@ -70,6 +71,9 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
         Command::Plan { name, .. } => name,
         Command::Status { name, .. } => name,
         Command::Burn { name, .. } => name,
+        Command::Reset { name, .. } => name,
+        Command::Verify { name, .. } => name,
+        Command::History { name, .. } => name,
     };
     let resolved = paths::resolve(
         cli.catalog.as_deref(),
@@ -114,7 +118,7 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
             };
             let id = pipeline.init(&pi)?;
             say(&render::init_done(&name, id));
-            Ok(())
+            Ok(0)
         }
         Command::Scan {
             name,
@@ -137,7 +141,7 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
             );
             let report = pipeline.scan(&name, verify, force)?;
             say(&render::scan_report(&report));
-            Ok(())
+            Ok(0)
         }
         Command::Plan {
             name,
@@ -158,7 +162,7 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
             );
             let report = pipeline.plan(&name, disc_type, finalize)?;
             say(&render::plan_report(&report));
-            Ok(())
+            Ok(0)
         }
         Command::Status { name } => {
             let mut catalog = open_catalog(&resolved.catalog)?;
@@ -173,7 +177,7 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
             );
             let report = pipeline.status(&name)?;
             say(&render::status_report(&p, &report));
-            Ok(())
+            Ok(0)
         }
         Command::Burn { name, yes } => {
             // The project lookup comes first (`Runner.withProject` resolves the
@@ -210,7 +214,7 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
 
             if !prompt::confirm(&format!("Burn the staged plan for {name}?"), yes) {
                 say("Aborted.");
-                return Ok(());
+                return Ok(0);
             }
 
             let mut pipeline = Pipeline::new(
@@ -223,8 +227,84 @@ fn dispatch(cli: args::Cli) -> Result<(), PipelineError> {
             );
             let report = pipeline.burn(&name, chrono::Utc::now(), &burner)?;
             say(&render::burn_report(&report));
-            Ok(())
+            Ok(0)
         }
+        Command::Reset { name } => {
+            let mut catalog = open_catalog(&resolved.catalog)?;
+            let p = find_or_fail(&catalog, &name)?;
+            let pipeline = Pipeline::new(
+                &mut catalog,
+                PipelinePaths {
+                    work_dir: PathBuf::from(&p.work_dir),
+                    scan_cache: paths::scan_cache_path(&resolved.catalog, &name),
+                },
+                &NoopSink,
+            );
+            pipeline.reset(&name)?;
+            say(&render::reset_done(&name));
+            Ok(0)
+        }
+        Command::Verify { name, disc } => {
+            let mut catalog = open_catalog(&resolved.catalog)?;
+            let p = find_or_fail(&catalog, &name)?;
+            let verifier = resolve_verifier(
+                cli.burner,
+                cli.device.as_deref(),
+                std::path::Path::new(&p.work_dir),
+            )?;
+            let mut pipeline = Pipeline::new(
+                &mut catalog,
+                PipelinePaths {
+                    work_dir: PathBuf::from(&p.work_dir),
+                    scan_cache: paths::scan_cache_path(&resolved.catalog, &name),
+                },
+                &NoopSink,
+            );
+            let reports = pipeline.verify(&name, disc, &verifier)?;
+            say(&render::verify_report(&reports));
+            // Result-driven: corruption found is a successful run with a bad
+            // outcome, so it does not travel the error ladder.
+            Ok(render::verify_exit(&reports))
+        }
+        Command::History { name, rel_path } => {
+            let mut catalog = open_catalog(&resolved.catalog)?;
+            let p = find_or_fail(&catalog, &name)?;
+            let pipeline = Pipeline::new(
+                &mut catalog,
+                PipelinePaths {
+                    work_dir: PathBuf::from(&p.work_dir),
+                    scan_cache: paths::scan_cache_path(&resolved.catalog, &name),
+                },
+                &NoopSink,
+            );
+            let rel = diskrement_core::RelPath(rel_path);
+            let entries = pipeline.history(&name, &rel)?;
+            say(&render::history(&rel, &entries));
+            Ok(0)
+        }
+    }
+}
+
+/// The verification backend, chosen by the same one decision that chooses the
+/// burner (spec §5.2): verifying a simulated burn by mounting a physical disc
+/// is meaningless, so the two arms move together.
+fn resolve_verifier(
+    burner: Option<args::BurnerKind>,
+    device: Option<&str>,
+    work_dir: &std::path::Path,
+) -> Result<Verifier, PipelineError> {
+    match backend::resolve(burner, device, &env_lookup) {
+        backend::Backend::Simulated => Ok(Verifier::Staging(StagingVerifier::new(
+            work_dir.join("staging"),
+        ))),
+        // P8 replaces this arm with the read-back disc verifier. Falling back
+        // to the staging verifier would report a physical disc as verified
+        // without ever reading it — a divergence no test could see.
+        backend::Backend::Real(device) => Err(PipelineError::Failed(format!(
+            "the real disc verifier is not implemented yet (device {}); \
+             re-run with --burner simulated",
+            device.xorriso_address()
+        ))),
     }
 }
 
