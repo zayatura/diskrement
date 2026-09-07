@@ -1,6 +1,8 @@
 //! Pipeline reports: plain data the CLI renders (`Pipeline.scala`'s result
 //! types). The pipeline returns these and performs no path resolution.
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 
 use diskrement_core::DiscState;
@@ -48,4 +50,21 @@ pub struct PlanReport {
     pub tombstones: Vec<RelPath>,
     pub remaining: RemainingEstimate,
     pub oversized: Vec<ScannedFile>,
+}
+
+/// What one disc's burn produced (`Pipeline.scala`'s `DiscBurn`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscBurn {
+    pub ordinal: u32,
+    pub label: String,
+    pub finalized: bool,
+    pub staging_dir: PathBuf,
+    pub image_bytes: u64,
+}
+
+/// The result of one burn cycle: exactly one disc, plus what still remains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurnReport {
+    pub disc: DiscBurn,
+    pub remaining: RemainingEstimate,
 }
