@@ -10,6 +10,7 @@ pub mod json;
 pub mod simulated;
 pub mod snapshot_writer;
 pub mod stager;
+pub mod verifier;
 
 use std::path::PathBuf;
 
