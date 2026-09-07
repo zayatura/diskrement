@@ -2,3 +2,4 @@
 //! burner that sequences them (`burner`).
 
 pub mod args;
+pub mod parse;
