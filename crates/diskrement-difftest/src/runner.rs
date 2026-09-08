@@ -408,8 +408,6 @@ impl<'a> Session<'a> {
     ) -> Result<StepOutcome, Skip> {
         let bin = match which {
             Which::Scala => &self.bins.scala,
-            // Checked by `preflight`: a Rust mode returns Skip before reaching
-            // here when the binary is absent.
             Which::Rust => self
                 .bins
                 .rust
