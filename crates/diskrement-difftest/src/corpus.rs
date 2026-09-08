@@ -33,7 +33,7 @@ pub fn all() -> Vec<Scenario> {
 /// P3 lands `init`, `scan` and `status`.
 pub fn init_scan_status() -> Scenario {
     Scenario {
-        name: "init-scan-status",
+        name: "init-scan-status".into(),
         disc_bytes: None,
         steps: vec![
             write("a.bin", 800),
@@ -56,7 +56,7 @@ pub fn init_scan_status() -> Scenario {
 /// Failure modes, compared by agreement rather than by expectation.
 pub fn error_paths() -> Scenario {
     Scenario {
-        name: "error-paths",
+        name: "error-paths".into(),
         disc_bytes: None,
         steps: vec![
             // Missing the required project argument: this fails inside the
@@ -87,7 +87,7 @@ pub fn error_paths() -> Scenario {
 /// does not consume the staged scan.
 pub fn plan_basics() -> Scenario {
     Scenario {
-        name: "plan-basics",
+        name: "plan-basics".into(),
         disc_bytes: None,
         steps: vec![
             write("a.bin", 800),
@@ -116,7 +116,7 @@ pub fn plan_basics() -> Scenario {
 /// `work/01-after-plan1` recorded.
 pub fn plan_spill_and_seal() -> Scenario {
     Scenario {
-        name: "plan-spill-and-seal",
+        name: "plan-spill-and-seal".into(),
         disc_bytes: Some(1000),
         steps: vec![
             write("a.bin", 800),
@@ -136,7 +136,7 @@ pub fn plan_spill_and_seal() -> Scenario {
 /// refuses it, which is P5's half of the two-stage check.
 pub fn plan_oversize() -> Scenario {
     Scenario {
-        name: "plan-oversize",
+        name: "plan-oversize".into(),
         disc_bytes: Some(500),
         steps: vec![
             write("big.bin", 800),
@@ -155,7 +155,7 @@ pub fn plan_oversize() -> Scenario {
 /// and the exit code are both contract and both fully compared.
 pub fn plan_errors() -> Scenario {
     Scenario {
-        name: "plan-errors",
+        name: "plan-errors".into(),
         disc_bytes: None,
         steps: vec![
             write("a.bin", 100),
@@ -182,7 +182,7 @@ pub fn plan_errors() -> Scenario {
 /// the same staged disc tree and the same embedded snapshot.
 pub fn burn_basics() -> Scenario {
     Scenario {
-        name: "burn-basics",
+        name: "burn-basics".into(),
         disc_bytes: None,
         steps: vec![
             write("a.bin", 800),
@@ -208,7 +208,7 @@ pub fn burn_basics() -> Scenario {
 /// corpus's disc-1 through disc-3, minus the coaster (P7's `disc mark-dead`).
 pub fn burn_spill_cycles() -> Scenario {
     Scenario {
-        name: "burn-spill-cycles",
+        name: "burn-spill-cycles".into(),
         disc_bytes: Some(1000),
         steps: vec![
             write("a.bin", 800),
@@ -245,7 +245,7 @@ pub fn burn_spill_cycles() -> Scenario {
 /// error, so both the message and the exit code are contract.
 pub fn burn_errors() -> Scenario {
     Scenario {
-        name: "burn-errors",
+        name: "burn-errors".into(),
         disc_bytes: Some(500),
         steps: vec![
             write("big.bin", 800),
@@ -277,7 +277,7 @@ pub fn burn_errors() -> Scenario {
 /// printed the same line.
 pub fn verify_history_reset() -> Scenario {
     Scenario {
-        name: "verify-history-reset",
+        name: "verify-history-reset".into(),
         disc_bytes: Some(1000),
         steps: vec![
             write("a.bin", 800),
@@ -345,7 +345,7 @@ pub fn verify_history_reset() -> Scenario {
 /// behave differently.
 pub fn mark_dead_errors() -> Scenario {
     Scenario {
-        name: "mark-dead-errors",
+        name: "mark-dead-errors".into(),
         disc_bytes: None,
         steps: vec![
             write("a.bin", 800),
@@ -418,7 +418,7 @@ pub fn mark_dead_errors() -> Scenario {
 /// explain away as "different scenarios".
 pub fn harvest_replay() -> Scenario {
     Scenario {
-        name: "harvest-replay",
+        name: "harvest-replay".into(),
         disc_bytes: Some(1000),
         steps: vec![
             write("a.bin", 800),
@@ -481,7 +481,7 @@ pub fn harvest_replay() -> Scenario {
 /// the compared prompt.
 pub fn real_backend() -> Scenario {
     Scenario {
-        name: "real-backend",
+        name: "real-backend".into(),
         disc_bytes: None,
         steps: vec![
             write("a.bin", 400),
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn every_scenario_has_a_unique_name() {
-        let mut names: Vec<&str> = all().iter().map(|s| s.name).collect();
+        let mut names: Vec<String> = all().into_iter().map(|s| s.name).collect();
         let count = names.len();
         names.sort_unstable();
         names.dedup();

@@ -214,7 +214,7 @@ seed file.
 
 | file | responsibility | task |
 |---|---|---|
-| `crates/diskrement-difftest/src/scenario.rs` | **modify** — `Scenario::name` and `Step::Cmd::label` become `String`; add the `rewrite` constructor | 1 |
+| `crates/diskrement-difftest/src/scenario.rs` | **modify** — `Scenario::name` and `Step::Cmd::label` become `String`; add the `write_version` constructor | 1 |
 | `crates/diskrement-difftest/src/state_diff.rs` | **modify** — split `Snapshot` into step and state halves; expose `state_snapshot`, `step_snapshot`, `state_differences`, `step_differences` | 2 |
 | `crates/diskrement-difftest/src/runner.rs` | **modify** — extract `Session` and `preflight`; `run` becomes a fold | 3 |
 | `crates/diskrement-difftest/src/sequence.rs` | **create** — `Model` (the transition table), `Op`, `Sweep`, the interpretation and the source rendering. No I/O, no proptest. | 4, 5 |
@@ -250,6 +250,8 @@ Add to the `tests` module at the bottom of
     fn a_scenario_can_carry_computed_names_and_labels() {
         // Generated scenarios name themselves and label each step from the
         // argv they built, so neither can be `&'static str` without leaking.
+        // The `format!`s are the assertion: with literals this test compiles
+        // against `&'static str` too and proves nothing. Do not simplify them.
         let n = 3;
         let s = Scenario {
             name: format!("sweep-{n}"),
@@ -264,16 +266,21 @@ Add to the `tests` module at the bottom of
     }
 
     #[test]
-    fn rewrite_carries_an_arbitrary_version() {
+    fn write_version_carries_an_arbitrary_version() {
         // `write` is version 0 and `modify` is version 1; a generated sequence
         // can rewrite the same path a third time, and the source it prints has
         // to have a constructor to name.
-        match rewrite("a.bin", 4, 800) {
+        match write_version("a.bin", 4, 800) {
             Step::Write { rel_path, version, size } => {
                 assert_eq!((rel_path, version, size), ("a.bin", 4, 800));
             }
             other => panic!("expected a write step, got {other:?}"),
         }
+        // The delegation is what this task introduces and what a typo could
+        // silently break: `content()` is keyed on "{rel_path}@{version}", so
+        // swapping these two changes the bytes every corpus scenario writes.
+        assert!(matches!(write("a.bin", 800), Step::Write { version: 0, .. }));
+        assert!(matches!(modify("a.bin", 800), Step::Write { version: 1, .. }));
     }
 ```
 
@@ -281,7 +288,7 @@ Add to the `tests` module at the bottom of
 
 Run: `cargo test -p diskrement-difftest --lib scenario:: 2>&1 | tail -20`
 Expected: FAIL to compile — "expected `&str`, found `String`" on the `name`
-field, and "cannot find function `rewrite` in this scope".
+field, and "cannot find function `write_version` in this scope".
 
 - [ ] **Step 3: Make the two fields owned and add the constructor**
 
@@ -312,13 +319,15 @@ pub struct Scenario {
 }
 ```
 
-Widen the four command constructors and add `rewrite`:
+Widen the four command constructors and add `write_version`:
 
 ```rust
-/// Rewrite a file at `version`. `write` and `modify` are versions 0 and 1;
-/// a generated sequence that touches one path a third time needs the general
-/// form, and its printed source needs a constructor to name.
-pub fn rewrite(rel_path: &'static str, version: u32, size: usize) -> Step {
+/// Write a file at an arbitrary content version. `write` and `modify` are
+/// versions 0 and 1; a generated sequence that touches one path a third time
+/// needs the general form, and the source proptest prints for a shrunk
+/// counterexample is `corpus.rs` syntax, so a third-version write needs a
+/// constructor to name.
+pub fn write_version(rel_path: &'static str, version: u32, size: usize) -> Step {
     Step::Write {
         rel_path,
         version,
@@ -354,19 +363,19 @@ pub fn cmd_real(label: impl Into<String>, device: &'static str, args: &[&str]) -
 }
 ```
 
-Rewrite `write` and `modify` in terms of `rewrite` so the three stay one
+Define `write` and `modify` in terms of `write_version` so the three stay one
 definition:
 
 ```rust
 /// Write a file at version 0 (the "added" content).
 pub fn write(rel_path: &'static str, size: usize) -> Step {
-    rewrite(rel_path, 0, size)
+    write_version(rel_path, 0, size)
 }
 
 /// Rewrite a file at version 1 (the "modified" content), matching the harvest
 /// script's `tree_modify`.
 pub fn modify(rel_path: &'static str, size: usize) -> Step {
-    rewrite(rel_path, 1, size)
+    write_version(rel_path, 1, size)
 }
 ```
 
@@ -453,25 +462,32 @@ Add to the `tests` module at the bottom of
     #[test]
     fn state_differences_compare_without_a_finished_run() {
         // The sweep diffs between commands, where there is no RunOutcome yet —
-        // only a live scratch tree. So the state half has to stand alone.
-        let mut out = Vec::new();
+        // only a live scratch tree, so the state half has to stand alone. It
+        // also has to *append*: the sweep pushes step diffs and then state
+        // diffs into one vector, so an implementation that replaced the
+        // accumulator would break it while every other test still passed.
+        let mut out = vec!["pre-existing".to_string()];
         state_differences(
             &state(&["disc: id=1 status=\"OPEN\""]),
             &state(&["disc: id=1 status=\"FINALIZED\""]),
             &mut out,
         );
-        assert_eq!(out.len(), 1);
-        assert!(out[0].contains("OPEN") && out[0].contains("FINALIZED"), "{}", out[0]);
+        assert_eq!(out.len(), 2, "must append, not replace: {out:?}");
+        assert!(
+            out[1].contains("catalog") && out[1].contains("OPEN") && out[1].contains("FINALIZED"),
+            "{}",
+            out[1]
+        );
     }
 
     #[test]
     fn step_differences_compare_one_step_alone() {
         let a = StepSnapshot { label: "scan p".into(), exit: 0, stdout: Some("Scanned: 1 added".into()) };
         let b = StepSnapshot { label: "scan p".into(), exit: 0, stdout: Some("Scanned: 2 added".into()) };
-        let mut out = Vec::new();
+        let mut out = vec!["pre-existing".to_string()];
         step_differences(0, &a, &b, &mut out);
-        assert_eq!(out.len(), 1);
-        assert!(out[0].contains("1 added") && out[0].contains("2 added"), "{}", out[0]);
+        assert_eq!(out.len(), 2, "must append, not replace: {out:?}");
+        assert!(out[1].contains("1 added") && out[1].contains("2 added"), "{}", out[1]);
     }
 ```
 
@@ -491,7 +507,7 @@ definition with the pair, keeping every doc comment on the field it documents:
 ///
 /// Split out of `Snapshot` because the sweep captures it *between* commands,
 /// where no `RunOutcome` exists yet.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct StateSnapshot {
     pub catalog: Vec<String>,
     pub scancache: Vec<String>,
@@ -546,7 +562,10 @@ pub fn step_snapshot(step: &StepOutcome, norm: &mut Normalizer) -> StepSnapshot 
 /// `immutable=1`, which reads the main database file and ignores any `-wal`;
 /// that is complete only once the writing process has exited and SQLite has
 /// checkpointed. Between two command invocations, which is where the sweep
-/// calls it, that always holds.
+/// calls it, that always holds. SQLite drops the `-wal` when the last
+/// connection closes, so a cleanly exited child leaves a complete main file; a
+/// killed one does not. Violating this is silent — you read a stale database
+/// and report a difference that is not there, or miss one that is.
 ///
 /// Takes the run's own `Normalizer` so that instant ordinals stay consistent
 /// across every value the run produces.
@@ -582,9 +601,14 @@ Add `use crate::runner::{RunOutcome, Scratch};` to the imports.
 - [ ] **Step 5: Split the comparison**
 
 ```rust
-/// Every way one step's outcome disagrees. `index` names the step in the
-/// message, so the caller decides whether that is a position in a scenario or
-/// a position in a generated sequence.
+/// Every way one step's outcome disagrees. `index` only names the step in the
+/// message, and the two callers number on different bases: `differences`
+/// passes a position in `RunOutcome.steps`, which holds command outcomes only,
+/// while the sweep passes a position in the generated `Scenario.steps`, which
+/// also counts `write`/`delete` — so the number lines up with the line the
+/// counterexample prints. Neither is wrong for its own report, so the number is
+/// the caller's to choose; just never compare a `step N` from one against a
+/// `step N` from the other.
 pub fn step_differences(
     index: usize,
     a: &StepSnapshot,
@@ -695,17 +719,49 @@ Add to the `tests` module at the bottom of
             scala: PathBuf::from("/nonexistent/scala"),
             rust: None,
         };
-        let Ok(mut session) = Session::open(&bins, None) else {
-            // No CoW temp dir here; the differential suite reports that
-            // loudly, and this unit test simply has nothing to check.
-            return;
+        let mut session = match Session::open(&bins, Mode::Scala, None) {
+            Ok(s) => s,
+            // No CoW temp dir here; say so rather than passing silently —
+            // `Skip`'s own doc is "always printed, never swallowed".
+            Err(Skip(reason)) => return eprintln!("SKIP: {reason}"),
         };
         assert_eq!(session.command_index(), 0);
-        session
-            .apply(&write("a.bin", 8), Which::Scala)
-            .expect("a tree mutation needs no binary");
+        assert!(
+            session
+                .apply(&write("a.bin", 8))
+                .expect("a tree mutation needs no binary")
+                .is_none(),
+            "a tree mutation produces no step outcome"
+        );
         assert_eq!(session.command_index(), 0);
         assert!(session.scratch().source.join("a.bin").is_file());
+    }
+
+    #[test]
+    fn the_interleaved_mode_runs_the_first_command_through_rust() {
+        // Spec §3.1's direction: step 0 must be Rust so that step 1 has Scala
+        // reading what Rust wrote — the direction the frozen corpus cannot
+        // test. `/bin/true` stands in for both binaries; only `which` is
+        // asserted, so nothing here depends on either implementation.
+        let bins = Binaries {
+            scala: PathBuf::from("/bin/true"),
+            rust: Some(PathBuf::from("/bin/true")),
+        };
+        let scenario = Scenario {
+            name: "ordering".into(),
+            disc_bytes: None,
+            steps: vec![
+                crate::scenario::cmd("status p", &["status", "p"]),
+                crate::scenario::cmd("status p", &["status", "p"]),
+            ],
+        };
+        match run(&bins, &scenario, Mode::Interleaved) {
+            Ok(out) => {
+                assert_eq!(out.steps[0].which, Which::Rust);
+                assert_eq!(out.steps[1].which, Which::Scala);
+            }
+            Err(Skip(reason)) => eprintln!("SKIP: {reason}"),
+        }
     }
 ```
 
@@ -773,6 +829,7 @@ pub fn preflight(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<(),
 /// that looks like a porting bug.
 pub struct Session<'a> {
     bins: &'a Binaries,
+    mode: Mode,
     disc_bytes: Option<u64>,
     scratch: Scratch,
     write_index: u32,
@@ -781,9 +838,13 @@ pub struct Session<'a> {
 
 impl<'a> Session<'a> {
     /// Create the scratch tree. `Skip` when this machine cannot host one.
-    pub fn open(bins: &'a Binaries, disc_bytes: Option<u64>) -> Result<Self, Skip> {
+    ///
+    /// A `mode` that needs the Rust binary requires `preflight` to have passed
+    /// first: `invoke` panics rather than checking again per step.
+    pub fn open(bins: &'a Binaries, mode: Mode, disc_bytes: Option<u64>) -> Result<Self, Skip> {
         Ok(Session {
             bins,
+            mode,
             disc_bytes,
             scratch: scratch()?,
             write_index: 0,
@@ -791,8 +852,16 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// Borrow the scratch tree mid-run, for a snapshot taken between commands.
+    /// Use `into_scratch` at the end, when the tree must outlive the session.
     pub fn scratch(&self) -> &Scratch {
         &self.scratch
+    }
+
+    /// The mode every command step runs under, so a caller can label a report
+    /// without keeping a second copy.
+    pub fn mode(&self) -> Mode {
+        self.mode
     }
 
     /// How many command steps have been applied. `Mode::which` takes this.
@@ -806,7 +875,11 @@ impl<'a> Session<'a> {
     }
 
     /// Apply one step. `Ok(None)` for a tree mutation, which runs no binary.
-    pub fn apply(&mut self, step: &Step, which: Which) -> Result<Option<StepOutcome>, Skip> {
+    ///
+    /// Advances the command index for command steps only, so a file write
+    /// between two commands never shifts the alternation. The binary is chosen
+    /// from this session's mode and the count of commands *before* this one.
+    pub fn apply(&mut self, step: &Step) -> Result<Option<StepOutcome>, Skip> {
         match step {
             Step::Write { rel_path, version, size } => {
                 let path = self.scratch.source.join(rel_path);
@@ -827,6 +900,12 @@ impl<'a> Session<'a> {
                 Ok(None)
             }
             Step::Cmd { label, args, expect, backend } => {
+                // Read before the increment: the binary for a command is
+                // chosen by the count of commands *before* it, so deriving
+                // `which` afterwards would still alternate but start the
+                // interleave with Scala — and stop exercising the Rust→Scala
+                // direction, the one the frozen corpus cannot reach.
+                let which = self.mode.which(self.command_index);
                 self.command_index += 1;
                 Ok(Some(self.invoke(label, args, *expect, backend, which)?))
             }
@@ -863,13 +942,10 @@ binary selection reads `self.bins`.
 /// run, so the caller can report it as a skip with its reason.
 pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcome, Skip> {
     preflight(bins, scenario, mode)?;
-    let mut session = Session::open(bins, scenario.disc_bytes)?;
+    let mut session = Session::open(bins, mode, scenario.disc_bytes)?;
     let mut steps = Vec::new();
     for step in &scenario.steps {
-        // Read the index *before* applying: `apply` advances it, and the
-        // binary for step N is chosen by the count of commands before it.
-        let which = mode.which(session.command_index());
-        if let Some(outcome) = session.apply(step, which)? {
+        if let Some(outcome) = session.apply(step)? {
             steps.push(outcome);
         }
     }
@@ -914,6 +990,14 @@ command instead of only at the end."
 Pure data and pure functions: no I/O, no `proptest`, no binaries. This is the
 module that decides *what* gets generated; Task 5 decides how it is rendered and
 Task 6 runs it.
+
+> **Superseded in part during execution.** The `legal_ops` / `interpret` shape
+> below did not reach the states the model exists for — measured, 0.8% of
+> sequences reached a burn. `legal_ops` split into `legal_commands` and
+> `tree_ops` on separate selector residues, index 0 became the
+> lifecycle-advancing op with the chooser biased toward it, and `3000` left
+> `SIZES`. See *Execution deviations* for the numbers and the reasoning; the
+> committed `sequence.rs` is the current source of truth.
 
 **Files:**
 - Create: `crates/diskrement-difftest/src/sequence.rs`
@@ -1035,20 +1119,34 @@ mod tests {
     }
 
     #[test]
-    fn illegal_noise_appears_without_dominating() {
-        // A fifth of the ops come from the illegal list, and unknown-project
-        // ops are about half of that list — so the measured share here is
-        // roughly a tenth. It is a distribution property, not a contract; the
-        // bound is wide enough to fail only if the selector arithmetic broke.
-        let ops = walk(23, 2000);
-        let illegal = ops
-            .iter()
-            .filter(|o| o.project().is_some_and(|p| p == UNKNOWN_PROJECT))
-            .count();
-        let ratio = illegal as f64 / ops.len() as f64;
+    fn illegal_noise_is_about_a_fifth_of_the_sequence() {
+        // Classify each op by membership in the illegal list *at the state it
+        // was emitted from*. That is independent of the selector arithmetic
+        // this is checking, and the two lists are disjoint for any given
+        // state — an op legal there is never also illegal there — so
+        // membership is a sound classifier.
+        //
+        // Deliberately not measured via the unknown-project ops: their share
+        // decays with walk length, because the illegal list grows two entries
+        // per dead disc while the unknown-project entries stay at seven. This
+        // measures the branch itself, so the expected value is the selector's
+        // one-residue-in-five regardless of how long the walk is.
+        let mut lcg = Lcg(23);
+        let mut model = Model::default();
+        let total = 2000usize;
+        let mut illegal = 0usize;
+        for _ in 0..total {
+            let op = model.interpret(lcg.next(), lcg.next(), lcg.next());
+            if model.illegal_ops().contains(&op) {
+                illegal += 1;
+            }
+            model.apply(&op);
+        }
+        let ratio = illegal as f64 / total as f64;
         assert!(
-            (0.05..0.25).contains(&ratio),
-            "unknown-project ops are {ratio:.3} of the sequence"
+            (0.12..0.30).contains(&ratio),
+            "illegal ops are {ratio:.3} of the sequence; the selector reserves \
+             one residue in five for them"
         );
     }
 }
@@ -1101,10 +1199,18 @@ use crate::runner::PROJECT;
 /// supersede a version and leave a tombstone while keeping the model small.
 pub const FILES: &[&str] = &["a.bin", "b.bin", "nested/c.bin", "deep/x/d.bin"];
 
-/// Payload sizes. `3000` exceeds the smallest generated capacity on its own, so
-/// the oversize path — `plan` lists it and succeeds, `burn` refuses with exit
-/// 3 — is reachable by generation rather than only by hand.
-pub const SIZES: &[usize] = &[120, 400, 800, 3000];
+/// Payload sizes. All smaller than the smallest generated capacity, on
+/// purpose: an oversized file is never committed, so it makes every later
+/// `burn` exit 3 until something deletes it, and a sequence that writes one
+/// early is dead for the rest of its length. The oversize path is worth
+/// testing and is covered deliberately, by `corpus::plan_oversize` and
+/// `corpus::burn_errors`, rather than by poisoning generated sequences.
+pub const SIZES: &[usize] = &[120, 400, 800];
+
+/// The longest sequence the sweep generates. Lives here so `sequence` and
+/// `tests/sweep.rs` share one source, and so the reachability test measures
+/// the distribution the sweep actually produces.
+pub const MAX_LEN: usize = 12;
 
 /// `DISKREMENT_DISC_BYTES` values, most constrained first.
 ///
@@ -1570,7 +1676,7 @@ Add to the `tests` module in `crates/diskrement-difftest/src/sequence.rs`:
         );
         assert_eq!(
             Op::Write { rel_path: "a.bin", version: 4, size: 800 }.to_source(),
-            r#"rewrite("a.bin", 4, 800),"#
+            r#"crate::scenario::write_version("a.bin", 4, 800),"#
         );
         assert_eq!(
             Op::Delete { rel_path: "a.bin" }.to_source(),
@@ -1660,13 +1766,13 @@ Extend `impl Op` in `crates/diskrement-difftest/src/sequence.rs`:
     pub fn to_step(&self) -> Step {
         match self {
             // `*rel_path`, not `rel_path`: matching `&self` binds it as
-            // `&&'static str`, and deref coercion would hand `rewrite` a
+            // `&&'static str`, and deref coercion would hand `write_version` a
             // reference borrowed from `self` rather than a `'static` one.
             Op::Write {
                 rel_path,
                 version,
                 size,
-            } => scenario::rewrite(*rel_path, *version, *size),
+            } => scenario::write_version(*rel_path, *version, *size),
             Op::Delete { rel_path } => scenario::delete(*rel_path),
             _ => {
                 let argv = self.to_argv();
@@ -1693,7 +1799,7 @@ Extend `impl Op` in `crates/diskrement-difftest/src/sequence.rs`:
                 rel_path,
                 version,
                 size,
-            } => format!("rewrite({rel_path:?}, {version}, {size}),"),
+            } => format!("crate::scenario::write_version({rel_path:?}, {version}, {size}),"),
             Op::Delete { rel_path } => format!("delete({rel_path:?}),"),
             _ => {
                 let argv = self.to_argv();
@@ -1831,7 +1937,7 @@ use std::cell::Cell;
 
 use diskrement_difftest::normalize::Normalizer;
 use diskrement_difftest::runner::{self, Binaries, Session, Skip};
-use diskrement_difftest::scenario::{Mode, Step};
+use diskrement_difftest::scenario::{Mode, Scenario, Step};
 use diskrement_difftest::sequence::{self, Sweep};
 use diskrement_difftest::state_diff::{self, StateSnapshot, StepSnapshot};
 use proptest::prelude::*;
@@ -1850,8 +1956,9 @@ const DEFAULT_CASES: u32 = 8;
 /// Bounded because each attempt is another three runs.
 const DEFAULT_MAX_SHRINK_ITERS: u32 = 64;
 
-/// Longest generated sequence.
-const MAX_LEN: usize = 12;
+/// Longest generated sequence. From `sequence`, so the reachability test in
+/// that module measures the distribution this strategy actually produces.
+use diskrement_difftest::sequence::MAX_LEN;
 
 fn config() -> Config {
     let mut cfg = Config::default();
@@ -1926,7 +2033,6 @@ Append to `crates/diskrement-difftest/tests/sweep.rs`:
 /// first-appearance order. All three are advanced at the same points, in the
 /// same order, so their numbering corresponds.
 struct World<'a> {
-    mode: Mode,
     session: Session<'a>,
     norm: Normalizer,
     /// The most recent command outcome. `None` before the first command.
@@ -1935,19 +2041,23 @@ struct World<'a> {
 
 impl<'a> World<'a> {
     fn open(bins: &'a Binaries, disc_bytes: Option<u64>, mode: Mode) -> Result<Self, Skip> {
-        let session = Session::open(bins, disc_bytes)?;
+        let session = Session::open(bins, mode, disc_bytes)?;
         let norm = Normalizer::new(&session.scratch().root);
         Ok(World {
-            mode,
             session,
             norm,
             last: None,
         })
     }
 
+    fn mode(&self) -> Mode {
+        self.session.mode()
+    }
+
     fn apply(&mut self, step: &Step) -> Result<(), Skip> {
-        let which = self.mode.which(self.session.command_index());
-        let outcome = self.session.apply(step, which)?;
+        // The session owns the mode and derives the binary itself, so the
+        // read-before-increment ordering is not this caller's to get wrong.
+        let outcome = self.session.apply(step)?;
         let snapshot = outcome.map(|o| state_diff::step_snapshot(&o, &mut self.norm));
         self.last = snapshot;
         Ok(())
@@ -2005,7 +2115,7 @@ fn compare(bins: &Binaries, sweep: &Sweep) -> Result<(), String> {
                 return Err(format!(
                     "step {i} ({}) diverges: all-scala is (a), {} is (b)\n\n{}",
                     reference_step.label,
-                    candidate.mode.label(),
+                    candidate.mode().label(),
                     diffs.join("\n\n")
                 ));
             }
@@ -2054,17 +2164,24 @@ fn generated_sequences_agree_across_all_three_modes() {
             return;
         }
     };
-    if bins.rust.is_none() {
-        eprintln!(
-            "SKIP: the Rust binary has not been built. Run \
-             `cargo build -p diskrement-cli`, or set DISKREMENT_RUST_BIN."
-        );
+    // Preflight an empty scenario rather than re-typing `runner`'s skip
+    // message here. With no command steps the port gate is vacuous, so what
+    // this actually checks is that the Rust binary exists — in `runner`'s
+    // wording. The port gate itself is pinned at compile time by
+    // `sequence`'s command-surface test, not re-checked per run.
+    let probe = Scenario {
+        name: "sweep-probe".to_string(),
+        disc_bytes: None,
+        steps: Vec::new(),
+    };
+    if let Err(Skip(reason)) = runner::preflight(&bins, &probe, Mode::Interleaved) {
+        eprintln!("SKIP: {reason}");
         return;
     }
     // Probe the scratch environment once. A TMPDIR that cannot reflink is a
     // skip, not the same failure repeated `cases` times — and after this
     // probe, a Skip from inside a case is a harness defect and panics.
-    if let Err(Skip(reason)) = Session::open(&bins, None) {
+    if let Err(Skip(reason)) = Session::open(&bins, Mode::Scala, None) {
         eprintln!("SKIP: {reason}");
         return;
     }
@@ -2486,11 +2603,224 @@ git push origin --delete feat/rewrite-p9 2>/dev/null || true
 *Append during execution. Deviations from this plan are recorded here rather
 than left in commit messages (CLAUDE.md, "In-flight work").*
 
-- (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
+- (Task 1) **`rewrite` renamed to `write_version`.** The plan named the general
+  write constructor `rewrite`, which reads wrong on the general form: `write`
+  became `rewrite(rel_path, 0, size)` — "re-write at version 0" — while version
+  0 *is* the first write, and `modify`'s existing doc already opened "Rewrite a
+  file at version 1", so two constructors' docs began with the same word for
+  different things. Renamed before four later tasks could read it. Every
+  reference in this plan was updated in the same pass, including the
+  `Op::to_source` rendering in Task 5.
+- (Task 1) **The version test was strengthened.** As written it asserted only
+  that a three-field constructor moves three fields — a tautology, since `u32`
+  and `usize` make a transposed call a compile error. What this task actually
+  risked was the new delegation: a typo giving `write` version 1 or `modify`
+  version 0 compiles cleanly and silently changes the bytes every corpus
+  scenario writes, because `content()` is keyed on `"{rel_path}@{version}"`.
+  Two `matches!` assertions now pin that. A comment was also added saying the
+  `format!`s in the sibling test *are* the assertion, so a later tidying pass
+  does not flatten them to literals and leave a test that proves nothing.
+- (Task 1) Not acted on, recorded for the end of the phase: `RunOutcome.scenario`
+  and `Snapshot.scenario` are written and never read — `differences()` does not
+  compare them and `tests/differential.rs` prints the name from the `Scenario`
+  it already holds. Pre-existing, one small allocation per JVM-spawning run. If
+  no P9 task starts reading it, delete the field at Task 10 rather than keep
+  carrying it.
+- (Task 1) Pre-refactor differential baseline, measured on `ddc911f` before any
+  change: `13 / 13 / 13`, 0 skipped, **285.87s**. After the refactor: `13 / 13 /
+  13`, 0 skipped, 281.64s.
+- (Task 2) **`PartialEq` dropped from `StateSnapshot`.** The plan derived it;
+  nothing uses it, including Task 6. Removing the derive is better than testing
+  around it: it stops a future reader reaching for `a == b` as a second,
+  untested oracle path alongside `state_differences(..).is_empty()`. `Default`
+  stays — an untouched scratch tree before `init` is a meaningful value.
+- (Task 2) **Both new tests now seed the accumulator.** As planned they
+  restated existing coverage. The contract the public `out: &mut Vec<String>`
+  signature actually imposes, and which Task 6 depends on, is *append, not
+  replace* — an implementation calling `out.clear()` would break the sweep
+  silently while every other test still passed. Seeding the vector and
+  asserting `len() == 2` pins it.
+- (Task 2) The `index` doc and the `immutable=1` warning were both rewritten:
+  the first named a distinction that does not exist (a generated sequence *is*
+  a scenario) instead of the real one (`RunOutcome.steps` holds commands only,
+  `Scenario.steps` also holds writes and deletes, so the index lines up with
+  the printed counterexample line); the second gave a rule with no symptom, and
+  now says that a killed child leaves the `-wal` behind and that violating it
+  reads a stale database silently.
+- (Task 3) **`Session` owns its `Mode`; `apply` lost its `which` parameter.**
+  The plan had the caller compute `mode.which(session.command_index())` before
+  every step. Both consumers turned out to hold a *fixed* mode and write that
+  identical line, so the parameter bought flexibility nobody used while leaving
+  the read-before-apply ordering as the caller's problem — and getting it
+  backwards starts the interleave with Scala, silently dropping the Rust→Scala
+  direction that the frozen corpus structurally cannot test. Storing the mode
+  makes the mistake unrepresentable. Task 6's `World` collapses accordingly:
+  it no longer carries a `mode` field, and `World::apply` is one line.
+- (Task 3) A `/bin/true` unit test now pins that the interleaved mode runs its
+  first command through Rust. The ordering was previously checkable only by the
+  five-minute differential suite; two spawns of `/bin/true` assert `which`
+  alone, depending on neither implementation.
+- (Task 3) The sweep's entry point preflights an empty scenario instead of
+  re-typing `runner`'s missing-binary skip message. `preflight` therefore keeps
+  one caller in the crate and one in the sweep, rather than being `pub` for a
+  consumer that hand-rolled a copy of it.
+- (Task 4) **The noise-ratio test was miscalibrated in the plan and was
+  rewritten.** As planned it measured the *unknown-project* share as a proxy
+  for the illegal-branch share, but the proxy decays with walk length: the
+  illegal list grows two entries per dead disc while the unknown-project
+  entries stay at seven. At the test's 2000 steps the measured share was 0.0525
+  against a floor of 0.05, and only about half of 200 seeds cleared it — a
+  flake waiting to happen, whose comment also overclaimed: swapping
+  `% 5 == 4` for `% 5 == 0` leaves that distribution unchanged, so it never
+  guarded the selector arithmetic at all (`shrinking_toward_zero_lands_on_the
+  _core_cycle` does). It now classifies each emitted op by membership in
+  `illegal_ops()` at the state it came from, which is the branch itself and is
+  length-independent at ≈0.20. The classifier is sound because the two lists
+  are disjoint in any given state.
+- (Task 4) **The generator did not reach the states it exists for, and the
+  plan's op mix was the cause.** Instrumented at the sweep's own `MAX_LEN`, over
+  200 000 cases: a single burn in **0.80 %** of sequences, two burns in
+  **0.001 %**, a dead disc in **0.08 %**. Writes were 46 % of all generated ops
+  and 20 % of sequences never emitted `init`. A default eight-case run would
+  have contained no burn at all ~94 % of the time — the sweep would have passed
+  indefinitely while exercising nothing the corpus does not already cover, and
+  no test in the phase would have noticed. Two causes, both fixed: tree
+  mutations shared the legal list and crowded out the command ops (they now
+  have their own selector residue), and reaching a burn needs four specific ops
+  in order from a uniform chooser (index 0 of the command list is now the
+  lifecycle-advancing op, and half the chooser range goes to it). Shrinking is
+  unaffected — chooser 0 still selects index 0 on every branch — and
+  `shrinking_toward_zero_lands_on_the_core_cycle` gets stronger, since index 0
+  is now the cycle's actual next step rather than always `Scan`.
+- (Task 4) **`3000` dropped from `SIZES`.** An oversized file is never
+  committed, so it made every later `burn` exit 3 until something deleted it:
+  roughly 47 % of model-burns at the shrink-target capacity would really have
+  been refused, the second-largest contributor to the reachability failure
+  above. The oversize path is covered deliberately by `corpus::plan_oversize`
+  and `corpus::burn_errors` instead of by poisoning generated sequences.
+- (Task 4) A reachability test now pins the fix, measured at `MAX_LEN` rather
+  than over long walks, because the long-walk figures flattered the real
+  distribution by an order of magnitude. `MAX_LEN` moved into `sequence` so the
+  test and the strategy share one source.
+- (Task 4) The reachability fix was independently re-measured three ways —
+  a splitmix64 RNG, proptest's real strategy, and the committed test's own
+  LCG — over 50 000–200 000 cases each: burn 30.2 / 30.5 / 29.8 %, dead
+  2.77 / 2.72 / 2.82 %. Writes fell from 46 % to 17.9 % of all ops, and
+  sequences that never emit `init` from 20 % to 5.5 %. The reachability test
+  also gained a write-share assertion, because the reached-state thresholds
+  alone still pass when the residue split is reverted; the write share goes
+  0.18 → 0.32 and now fails.
+- (Task 5) **A promoted counterexample did not compile.** Pasting generated
+  source into `corpus.rs` was verified empirically rather than by eye, and a
+  scenario containing a third-version write failed to build: `corpus.rs` does
+  not import `write_version`, and cannot — no hand-written scenario needs one,
+  and an unused import fails `-D warnings`. The general form is now rendered
+  fully qualified as `crate::scenario::write_version(...)`, which resolves with
+  no import at all. A first attempt at a conditional import note was worse: it
+  duplicated the version rule `to_source` already encodes, and it rendered with
+  seventeen literal spaces of indentation. The paste has since been re-verified
+  by compiling a generated scenario containing a write, a modify, a
+  third-version write, a delete, a burn and an unknown-project op — it built
+  unmodified.
+- (Task 5) `the_debug_output_is_paste_ready_corpus_source` counted lines and
+  caught neither failure. It now asserts every header line is a comment, and a
+  companion test checks — against `corpus.rs` itself, via `include_str!` — that
+  every *bare* constructor the renderer emits is in that file's import line. If
+  someone later imports `write_version`, that test fires and asks for the short
+  form back, so the note cannot go stale.
+- (Task 5) The plan's claim that `*rel_path` was load-bearing in `to_step` was
+  wrong: `Step` has no lifetime parameter, so if it compiles the stored
+  reference is `'static`. Clippy's `explicit_auto_deref` is correct and the
+  star is gone.
+- (Task 6) **The determinism guard was weaker than the thing it adjudicated.**
+  `compare` diffs state after every command; `scala_reproduces_itself` used
+  `runner::run`, which diffs only the *end* state. A nondeterminism appearing
+  mid-run and later cleared — an unnormalized value in `staged/plan.json`,
+  wiped by a subsequent `burn` — would have passed the self-check, and the
+  report would have said "this is a porting bug" and sent the reader into
+  `crates/`. Exactly the class of defect mid-run diffing exists to catch,
+  answered exactly wrong. `compare` is now generalised over its candidate
+  modes and serves both roles: the self-check is a second all-Scala world
+  stepped alongside the reference, as strong as the main comparison.
+- (Task 6) **A green sweep could prove nothing.** `PROPTEST_CASES=0` printed
+  "0 generated case(s) … agreed" and exited green. `differential.rs` has
+  asserted `ran > 0` since P3; the sweep now does too.
+- (Task 6) **The success line reported effort, not coverage.** At the
+  generator's ~30 % burn rate, eight cases contain no burn at all in ~6 % of
+  runs, and ~27 % at the floor `sequence.rs` pins — so a developer could change
+  the burn path, read "8 cases agreed", and be between 1-in-17 and 1-in-4
+  likely to be reading a true and vacuous line. The run now reports what it
+  exercised, per command, split by exit status because a `burn` refused every
+  time is not burn coverage, and warns when no burn succeeded. A warning rather
+  than an assertion: at these rates an assertion would be red by design.
+- (Task 6) A note I got wrong and the review corrected: `reference.state()`
+  sitting outside the candidate loop is a *cost* property, not an oracle
+  property. `rule_instant_ordinals` looks each instant up by text and pushes
+  only on first sight, so re-feeding a blob is idempotent — moving the call
+  would double the SQLite dumps per step but could not produce a false red.
+  The comment now says so, since marking it fragile-but-untested would have
+  the next editor afraid of the wrong thing.
+- (Task 6) Plan-staging flaw, no code impact: Step 1's file does not compile on
+  its own — its import block names items only Steps 3–4 use, and
+  `unused_imports` is an error in this workspace.
+- (Task 7) **Measured budget**, on a 12-core machine, `TMPDIR=/tmp` (btrfs):
+  the corpus differential suite **281.5s** (13/13/13, 0 skipped); the sweep at
+  the planned 8 cases **47.9s**; the whole `--ignored` suite **5m29.8s**. The
+  sweep at 8 cases was 17% of the corpus suite — well inside the "no more than
+  about half" target, so there was headroom to spend. Re-measured at 12 cases:
+  **76.4s**, or 27%, still inside it, exercising all nine commands with three
+  successful burns. `DEFAULT_CASES` is therefore **12**, not 8.
+
+  What the extra four cases buy: at the generator's measured ~30% burn rate, a
+  run that touches no burn at all is one in 17 at eight cases and one in 70 at
+  twelve. That risk is now *reported* either way — the coverage line names what
+  was exercised and a warning fires when no burn succeeded — so this is bought
+  insurance, not a fix for a silent failure. Numbers, not a guess: the plan
+  asked for a measurement and this is it. — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
-- (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
-  numbered counterexample list, or an explicit statement that the run found
-  none.
+- (Task 9) **The wide run found nothing.** Stated explicitly, per this plan's
+  own bar, so a later reader can tell "found nothing" from "was never run":
+
+  `PROPTEST_CASES=500`, release Rust binary, staged Scala launcher,
+  `TMPDIR=/tmp` (btrfs), 12 cores — **500 case(s) agreed across all three
+  modes, 500 executed, 3358s (56 minutes)**, no skips. Coverage as reported by
+  the run, issued with refusals in brackets:
+
+  ```
+  burn 271 (98 refused), disc 135 (125 refused), history 117 (66 refused),
+  init 518 (42 refused), plan 445 (85 refused), reset 209 (62 refused),
+  scan 547, status 206 (71 refused), verify 263 (110 refused)
+  ```
+
+  That is 173 successful burns and 10 successful `disc mark-dead`s across 500
+  generated sequences — the run reached the states the phase exists to test,
+  which is the claim the coverage line was added to make checkable.
+
+  Zero counterexamples means zero fixes and zero promotions to `corpus::all()`.
+  The §9 bar reads "every shrunk counterexample is either fixed or promoted";
+  with none produced, it is satisfied vacuously, and the honest way to record
+  that is to say so rather than to leave the section blank.
+
+  **A second wide pass was attempted and could not be run here.** Three tries —
+  1000 cases twice and 300 once — were killed by the host's memory guard, not
+  by any test failure. The first was self-inflicted (run alongside the corpus
+  suite); the other two ran alone and were still killed, because this machine
+  carries unrelated long-running workloads and had no free memory during the
+  attempts. Nothing in the sweep leaks: the killed runs left only nine scratch
+  trees totalling 756K, and no stray JVM survived them. So the recorded
+  evidence is one clean 500-case pass rather than the two the plan hoped for.
+  §9's bar asks for a clean wide run, which is met; the second pass at a
+  different count was this plan's own optional confirmation and remains
+  outstanding. It is worth re-running on a quieter machine before P10's parity
+  gate, and that is the honest state of it.
+
+  **Why this is credible rather than a harness that cannot fail:** the sweep was
+  independently shown to go red. Disabling `normalize.rs`'s scratch-root rule
+  makes the three worlds' temp paths differ, and the run then fails at step 0,
+  names the diverging step and both sides, prints the counterexample as
+  paste-ready source, and correctly reports the divergence as a harness defect
+  rather than a porting bug. `PROPTEST_CASES=0` fails on the "no sequence ran"
+  assertion. Both were verified during the phase, not assumed.
 
 ---
 
@@ -2498,8 +2828,33 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
 
 *Paste actual command output here at Task 10. Numbers, not adjectives.*
 
-- `cargo test --workspace`: **TO BE FILLED IN**
-- `cargo clippy --workspace --all-targets -- -D warnings`: **TO BE FILLED IN**
-- `cargo fmt --check`: **TO BE FILLED IN**
-- `cargo test -p diskrement-difftest -- --ignored --nocapture`: **TO BE FILLED IN**
-- `git diff --stat feat/rust-rewrite -- core/ shell/ cli/ build.sbt project/ fixtures/ scripts/`: **TO BE FILLED IN**
+- `cargo test --workspace`: **527 passed, 0 failed, 4 ignored.** Baseline at
+  plan start was 506/0/3; the phase added 21 tests and the fourth `#[ignore]`d
+  entry point (the sweep) beside the three corpus ones.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean, exit 0.
+- `cargo fmt --check`: clean, exit 0.
+- The corpus differential suite, run last after every change in the phase:
+
+  ```
+  all-rust: 13 scenario(s) compared, 0 skipped
+  interleaved: 13 scenario(s) compared, 0 skipped
+  bootstrap: 13 scenario(s) reproduced identically
+  test result: ok. 3 passed; 0 failed; ... finished in 328.53s
+  ```
+
+  Thirteen scenarios covering all nine commands, in all three modes, with no
+  skips — the proof that Tasks 1–3's refactor of the runner, the snapshot and
+  the scenario types was behaviour-preserving.
+- The sweep, at its committed default:
+
+  ```
+  sweep: 12 case(s) of up to 12 steps agreed across all three modes (12 executed)
+    exercised: burn 8 (5 refused), disc 4 (4 refused), history 5 (2 refused),
+    init 13 (1 refused), plan 9, reset 4 (2 refused), scan 10,
+    status 6 (2 refused), verify 3
+  ```
+
+- `git diff --stat feat/rust-rewrite -- core/ shell/ cli/ build.sbt project/ fixtures/ scripts/`:
+  **empty.** The Scala tree, the frozen corpus and the harvest script are
+  byte-identical to the integration branch, so the oracle this phase compared
+  against was never touched by it.

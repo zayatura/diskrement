@@ -111,6 +111,19 @@ the reverse direction and arbitrary scenarios. See its README to run it.
 - **Landing a command means appending it to `runner::RUST_IMPLEMENTED`** in the
   same commit. Otherwise the Rust and interleaved modes keep skipping that
   scenario, and a fully-skipped run still exits green.
+- **The randomized sweep is narrow by default.** `cargo test -p
+  diskrement-difftest --test sweep -- --ignored` runs a dozen generated
+  sequences through all three modes at once, diffing after every command;
+  `PROPTEST_CASES=500` is the deep run. Read its coverage line, not just its
+  exit status — a green run that reached no burn has proved very little, and the
+  line says which commands it actually exercised. A counterexample is fixed
+  *and* pasted into `corpus::all()` as a named scenario; there is no regressions
+  file, on purpose.
+- **The lifecycle model in `sequence.rs` steers generation and is not an
+  oracle.** Do not "fix" it into an exact copy of the pipeline — a wrong guess
+  is refused identically by both binaries and costs nothing. Its `live` file set
+  is the one exception, and its reachability test is what keeps generation
+  reaching burns at all; both are pinned, so a failure there is real.
 - **A normalization rule is a hole in the oracle.** Each one carries a doc
   comment saying what varies and why erasing it is safe. Widening a rule to make
   a failing diff pass is how this harness stops working without anyone noticing.
