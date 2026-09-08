@@ -247,7 +247,7 @@ pub struct StepOutcome {
 }
 
 pub struct RunOutcome {
-    pub scenario: &'static str,
+    pub scenario: String,
     pub mode: Mode,
     pub steps: Vec<StepOutcome>,
     pub scratch: Scratch,
@@ -375,7 +375,7 @@ pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcom
                     .output()
                     .map_err(|e| Skip(format!("spawning {}: {e}", bin.display())))?;
                 steps.push(StepOutcome {
-                    label: (*label).to_string(),
+                    label: label.clone(),
                     which,
                     argv,
                     // A signal-killed child has no code; -1 is not a valid exit
@@ -390,7 +390,7 @@ pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcom
     }
 
     Ok(RunOutcome {
-        scenario: scenario.name,
+        scenario: scenario.name.clone(),
         mode,
         steps,
         scratch,

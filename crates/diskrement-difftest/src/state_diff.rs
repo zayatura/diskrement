@@ -30,7 +30,7 @@ pub struct StepSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-    pub scenario: &'static str,
+    pub scenario: String,
     pub steps: Vec<StepSnapshot>,
     pub catalog: Vec<String>,
     pub scancache: Vec<String>,
@@ -203,7 +203,7 @@ pub fn snapshot(run: &RunOutcome, norm: &mut Normalizer) -> Snapshot {
     }
 
     Snapshot {
-        scenario: run.scenario,
+        scenario: run.scenario.clone(),
         steps,
         catalog,
         scancache,
@@ -309,7 +309,7 @@ mod tests {
 
     fn snap(lines: &[&str]) -> Snapshot {
         Snapshot {
-            scenario: "t",
+            scenario: "t".into(),
             steps: vec![StepSnapshot {
                 label: "scan p".into(),
                 exit: 0,

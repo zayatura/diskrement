@@ -114,49 +114,55 @@ pub enum Step {
     /// Delete `rel_path` from the source tree.
     Delete { rel_path: &'static str },
     /// Invoke the binary. `--catalog <path>` is prepended by the runner.
+    ///
+    /// `label` is owned because a generated step labels itself from the argv it
+    /// built; the corpus's literals coerce with `.into()`.
     Cmd {
-        label: &'static str,
+        label: String,
         args: Vec<String>,
         expect: Expect,
         backend: Backend,
     },
 }
 
-/// Write a file at version 0 (the "added" content).
-pub fn write(rel_path: &'static str, size: usize) -> Step {
+/// Rewrite a file at `version`. `write` and `modify` are versions 0 and 1;
+/// a generated sequence that touches one path a third time needs the general
+/// form, and its printed source needs a constructor to name.
+pub fn rewrite(rel_path: &'static str, version: u32, size: usize) -> Step {
     Step::Write {
         rel_path,
-        version: 0,
+        version,
         size,
     }
+}
+
+/// Write a file at version 0 (the "added" content).
+pub fn write(rel_path: &'static str, size: usize) -> Step {
+    rewrite(rel_path, 0, size)
 }
 
 /// Rewrite a file at version 1 (the "modified" content), matching the harvest
 /// script's `tree_modify`.
 pub fn modify(rel_path: &'static str, size: usize) -> Step {
-    Step::Write {
-        rel_path,
-        version: 1,
-        size,
-    }
+    rewrite(rel_path, 1, size)
 }
 
 pub fn delete(rel_path: &'static str) -> Step {
     Step::Delete { rel_path }
 }
 
-pub fn cmd(label: &'static str, args: &[&str]) -> Step {
+pub fn cmd(label: impl Into<String>, args: &[&str]) -> Step {
     Step::Cmd {
-        label,
+        label: label.into(),
         args: args.iter().map(|a| a.to_string()).collect(),
         expect: Expect::Full,
         backend: Backend::Simulated,
     }
 }
 
-pub fn cmd_exit_only(label: &'static str, args: &[&str]) -> Step {
+pub fn cmd_exit_only(label: impl Into<String>, args: &[&str]) -> Step {
     Step::Cmd {
-        label,
+        label: label.into(),
         args: args.iter().map(|a| a.to_string()).collect(),
         expect: Expect::ExitOnly,
         backend: Backend::Simulated,
@@ -164,9 +170,9 @@ pub fn cmd_exit_only(label: &'static str, args: &[&str]) -> Step {
 }
 
 /// A step run against the real burner/verifier on `device`.
-pub fn cmd_real(label: &'static str, device: &'static str, args: &[&str]) -> Step {
+pub fn cmd_real(label: impl Into<String>, device: &'static str, args: &[&str]) -> Step {
     Step::Cmd {
-        label,
+        label: label.into(),
         args: args.iter().map(|a| a.to_string()).collect(),
         expect: Expect::Full,
         backend: Backend::Real { device },
@@ -175,7 +181,8 @@ pub fn cmd_real(label: &'static str, device: &'static str, args: &[&str]) -> Ste
 
 #[derive(Clone, Debug)]
 pub struct Scenario {
-    pub name: &'static str,
+    /// Owned: a generated scenario names itself.
+    pub name: String,
     /// `DISKREMENT_DISC_BYTES` for the run. `None` leaves it unset.
     pub disc_bytes: Option<u64>,
     pub steps: Vec<Step>,
@@ -234,7 +241,7 @@ mod tests {
 
     fn sample() -> Scenario {
         Scenario {
-            name: "sample",
+            name: "sample".into(),
             disc_bytes: Some(1000),
             steps: vec![
                 write("a.bin", 800),
@@ -284,7 +291,7 @@ mod tests {
     fn only_a_real_backend_step_requires_a_tool() {
         assert!(sample().required_tools().is_empty());
         let with_real = Scenario {
-            name: "r",
+            name: "r".into(),
             disc_bytes: None,
             steps: vec![cmd_real("burn", "/nope", &["burn", "p", "--yes"])],
         };
@@ -294,5 +301,42 @@ mod tests {
             with_real.commands().into_iter().collect::<Vec<_>>(),
             vec!["burn"]
         );
+    }
+
+    #[test]
+    fn a_scenario_can_carry_computed_names_and_labels() {
+        // Generated scenarios name themselves and label each step from the
+        // argv they built, so neither can be `&'static str` without leaking.
+        let n = 3;
+        let s = Scenario {
+            name: format!("sweep-{n}"),
+            disc_bytes: None,
+            steps: vec![cmd(
+                format!("plan {} --finalize", "p"),
+                &["plan", "p", "--finalize"],
+            )],
+        };
+        assert_eq!(s.name, "sweep-3");
+        match &s.steps[0] {
+            Step::Cmd { label, .. } => assert_eq!(label, "plan p --finalize"),
+            other => panic!("expected a command step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_carries_an_arbitrary_version() {
+        // `write` is version 0 and `modify` is version 1; a generated sequence
+        // can rewrite the same path a third time, and the source it prints has
+        // to have a constructor to name.
+        match rewrite("a.bin", 4, 800) {
+            Step::Write {
+                rel_path,
+                version,
+                size,
+            } => {
+                assert_eq!((rel_path, version, size), ("a.bin", 4, 800));
+            }
+            other => panic!("expected a write step, got {other:?}"),
+        }
     }
 }
