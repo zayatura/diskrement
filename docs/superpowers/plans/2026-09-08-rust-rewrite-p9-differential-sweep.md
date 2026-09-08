@@ -1676,7 +1676,7 @@ Add to the `tests` module in `crates/diskrement-difftest/src/sequence.rs`:
         );
         assert_eq!(
             Op::Write { rel_path: "a.bin", version: 4, size: 800 }.to_source(),
-            r#"write_version("a.bin", 4, 800),"#
+            r#"crate::scenario::write_version("a.bin", 4, 800),"#
         );
         assert_eq!(
             Op::Delete { rel_path: "a.bin" }.to_source(),
@@ -1799,7 +1799,7 @@ Extend `impl Op` in `crates/diskrement-difftest/src/sequence.rs`:
                 rel_path,
                 version,
                 size,
-            } => format!("write_version({rel_path:?}, {version}, {size}),"),
+            } => format!("crate::scenario::write_version({rel_path:?}, {version}, {size}),"),
             Op::Delete { rel_path } => format!("delete({rel_path:?}),"),
             _ => {
                 let argv = self.to_argv();
@@ -2710,6 +2710,28 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
   also gained a write-share assertion, because the reached-state thresholds
   alone still pass when the residue split is reverted; the write share goes
   0.18 → 0.32 and now fails.
+- (Task 5) **A promoted counterexample did not compile.** Pasting generated
+  source into `corpus.rs` was verified empirically rather than by eye, and a
+  scenario containing a third-version write failed to build: `corpus.rs` does
+  not import `write_version`, and cannot — no hand-written scenario needs one,
+  and an unused import fails `-D warnings`. The general form is now rendered
+  fully qualified as `crate::scenario::write_version(...)`, which resolves with
+  no import at all. A first attempt at a conditional import note was worse: it
+  duplicated the version rule `to_source` already encodes, and it rendered with
+  seventeen literal spaces of indentation. The paste has since been re-verified
+  by compiling a generated scenario containing a write, a modify, a
+  third-version write, a delete, a burn and an unknown-project op — it built
+  unmodified.
+- (Task 5) `the_debug_output_is_paste_ready_corpus_source` counted lines and
+  caught neither failure. It now asserts every header line is a comment, and a
+  companion test checks — against `corpus.rs` itself, via `include_str!` — that
+  every *bare* constructor the renderer emits is in that file's import line. If
+  someone later imports `write_version`, that test fires and asks for the short
+  form back, so the note cannot go stale.
+- (Task 5) The plan's claim that `*rel_path` was load-bearing in `to_step` was
+  wrong: `Step` has no lifetime parameter, so if it compiles the stored
+  reference is `'static`. Clippy's `explicit_auto_deref` is correct and the
+  star is gone.
 - (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
 - (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
