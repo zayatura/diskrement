@@ -26,6 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::runner::PROJECT;
+use crate::scenario::{self, Scenario, Step};
 
 /// The source-file names a generated sequence may touch.
 ///
@@ -127,6 +128,182 @@ impl Op {
             | Op::Reset { project }
             | Op::MarkDead { project, .. } => Some(*project),
         }
+    }
+
+    /// The argv this op invokes, with `{source}` and `{work}` left for the
+    /// runner to substitute. Empty for a tree mutation.
+    pub fn to_argv(&self) -> Vec<String> {
+        let s = |x: &str| x.to_string();
+        match self {
+            Op::Write { .. } | Op::Delete { .. } => Vec::new(),
+            Op::Init => vec![
+                s("init"),
+                s(PROJECT),
+                s("--source"),
+                s("{source}"),
+                s("--work-dir"),
+                s("{work}"),
+            ],
+            Op::Scan { project } => vec![s("scan"), s(project)],
+            Op::Status { project } => vec![s("status"), s(project)],
+            Op::Plan {
+                project,
+                finalize,
+                disc_type,
+            } => {
+                let mut v = vec![s("plan"), s(project)];
+                if *finalize {
+                    v.push(s("--finalize"));
+                }
+                if let Some(t) = disc_type {
+                    v.push(s("--disc-type"));
+                    v.push(s(t));
+                }
+                v
+            }
+            Op::Burn { project } => vec![s("burn"), s(project), s("--yes")],
+            Op::Verify { project, disc } => {
+                let mut v = vec![s("verify"), s(project)];
+                if let Some(n) = disc {
+                    v.push(s("--disc"));
+                    v.push(n.to_string());
+                }
+                v
+            }
+            Op::History { project, path } => vec![s("history"), s(project), s(path)],
+            Op::Reset { project } => vec![s("reset"), s(project)],
+            Op::MarkDead { project, ordinal } => vec![
+                s("disc"),
+                s("mark-dead"),
+                s(project),
+                ordinal.to_string(),
+                s("--yes"),
+            ],
+        }
+    }
+
+    /// Lower to a scenario step, so the sweep runs through the same `Session`
+    /// the corpus does. Every command step is `Expect::Full` — the generator
+    /// stays out of the argument parser (§3.2), so there is nothing to exempt.
+    pub fn to_step(&self) -> Step {
+        match self {
+            // Matching `&self` binds `rel_path` as `&&'static str`, but the
+            // compiler's built-in reference coercion (not the generic
+            // `Deref` trait) resolves it straight to the concrete inner
+            // `&'static str` when it's passed where `write_version`/`delete`
+            // expect one — no explicit `*rel_path` needed, and clippy's
+            // `explicit_auto_deref` flags one if added. `*version`/`*size`
+            // still need theirs: those fields are plain `u32`/`usize`, and
+            // there is no implicit reference-to-value coercion for scalars.
+            Op::Write {
+                rel_path,
+                version,
+                size,
+            } => scenario::write_version(rel_path, *version, *size),
+            Op::Delete { rel_path } => scenario::delete(rel_path),
+            _ => {
+                let argv = self.to_argv();
+                let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+                scenario::cmd(argv.join(" "), &refs)
+            }
+        }
+    }
+
+    /// One line of `corpus.rs`, comma included.
+    pub fn to_source(&self) -> String {
+        match self {
+            Op::Write {
+                rel_path,
+                version: 0,
+                size,
+            } => format!("write({rel_path:?}, {size}),"),
+            Op::Write {
+                rel_path,
+                version: 1,
+                size,
+            } => format!("modify({rel_path:?}, {size}),"),
+            Op::Write {
+                rel_path,
+                version,
+                size,
+            } => format!("write_version({rel_path:?}, {version}, {size}),"),
+            Op::Delete { rel_path } => format!("delete({rel_path:?}),"),
+            _ => {
+                let argv = self.to_argv();
+                let args: Vec<String> = argv.iter().map(|a| format!("{a:?}")).collect();
+                format!("cmd({:?}, &[{}]),", argv.join(" "), args.join(", "))
+            }
+        }
+    }
+}
+
+/// One generated case: a disc capacity and a list of opaque choices.
+///
+/// The choices are `(selector, chooser, payload)` triples that `Model`
+/// interprets in order (spec §8.1, decision 2). Interpretation happens on
+/// demand rather than being stored, so a shrunk `Sweep` is re-interpreted
+/// against the state its shorter prefix produces — which is what makes plain
+/// `Vec`/`u8` shrinking sound here.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Sweep {
+    disc_bytes: Option<u64>,
+    choices: Vec<(u8, u8, u8)>,
+}
+
+impl Sweep {
+    pub fn new(disc_bytes: Option<u64>, choices: Vec<(u8, u8, u8)>) -> Self {
+        Sweep {
+            disc_bytes,
+            choices,
+        }
+    }
+
+    /// Interpret the choices against a model threaded through them.
+    pub fn ops(&self) -> Vec<Op> {
+        let mut model = Model::default();
+        let mut ops = Vec::with_capacity(self.choices.len());
+        for (selector, chooser, payload) in &self.choices {
+            let op = model.interpret(*selector, *chooser, *payload);
+            model.apply(&op);
+            ops.push(op);
+        }
+        ops
+    }
+
+    /// Lower to an ordinary scenario, so the sweep and the corpus share one
+    /// runner and one step vocabulary.
+    pub fn to_scenario(&self) -> Scenario {
+        Scenario {
+            name: "sweep".to_string(),
+            disc_bytes: self.disc_bytes,
+            steps: self.ops().iter().map(Op::to_step).collect(),
+        }
+    }
+
+    /// The sequence as `corpus.rs` source.
+    ///
+    /// This is the failure report: proptest prints `Debug` of the shrunk input,
+    /// so promoting a counterexample to a named scenario is a copy.
+    pub fn to_source(&self) -> String {
+        let mut out = String::new();
+        out.push_str("// generated by the P9 sweep — name it and paste it into corpus.rs\n");
+        out.push_str("Scenario {\n");
+        out.push_str("    name: \"NAME-ME\".into(),\n");
+        out.push_str(&format!("    disc_bytes: {:?},\n", self.disc_bytes));
+        out.push_str("    steps: vec![\n");
+        for op in self.ops() {
+            out.push_str(&format!("        {}\n", op.to_source()));
+        }
+        out.push_str("    ],\n}\n");
+        out
+    }
+}
+
+impl std::fmt::Debug for Sweep {
+    /// Deliberately not derived: proptest prints this on failure, and the
+    /// opaque `(u8, u8, u8)` triples would tell a reader nothing.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_source())
     }
 }
 
@@ -736,5 +913,140 @@ mod tests {
             "writes are {write_share:.3} of generated ops; tree mutations have \
              their own selector residue so they cannot crowd out the commands"
         );
+    }
+
+    /// Build a `Sweep` from a deterministic byte source.
+    fn sweep(seed: u64, steps: usize, disc_bytes: Option<u64>) -> Sweep {
+        let mut lcg = Lcg(seed);
+        let choices = (0..steps)
+            .map(|_| (lcg.next(), lcg.next(), lcg.next()))
+            .collect();
+        Sweep::new(disc_bytes, choices)
+    }
+
+    #[test]
+    fn every_generated_command_is_one_the_rust_binary_implements() {
+        // The port gate would otherwise skip generated scenarios silently, and
+        // a fully-skipped sweep exits green. Pinned here rather than
+        // rediscovered at 2am.
+        let scenario = sweep(5, 300, Some(1000)).to_scenario();
+        for command in scenario.commands() {
+            assert!(
+                crate::runner::RUST_IMPLEMENTED.contains(&command),
+                "the generator emits `{command}`, which is not in RUST_IMPLEMENTED"
+            );
+        }
+    }
+
+    #[test]
+    fn generation_reaches_the_whole_command_surface() {
+        // A sweep that only ever emits `scan` would pass forever and prove
+        // nothing. This asserts the generator actually gets there.
+        let ops: Vec<Op> = [1u64, 2, 3, 5, 8]
+            .iter()
+            .flat_map(|s| walk(*s, 1500))
+            .collect();
+        let commands: BTreeSet<String> = ops
+            .iter()
+            .filter_map(|o| o.to_argv().first().cloned())
+            .collect();
+        for expected in [
+            "burn", "disc", "history", "init", "plan", "reset", "scan", "status", "verify",
+        ] {
+            assert!(commands.contains(expected), "never generated `{expected}`");
+        }
+        assert!(
+            ops.iter()
+                .any(|o| matches!(o, Op::Plan { finalize: true, .. })),
+            "never generated a finalizing plan"
+        );
+        assert!(
+            ops.iter().any(|o| matches!(
+                o,
+                Op::Plan {
+                    disc_type: Some(_),
+                    ..
+                }
+            )),
+            "never generated an explicit disc type"
+        );
+        assert!(
+            ops.iter().any(|o| matches!(o, Op::Delete { .. })),
+            "never generated a delete"
+        );
+        assert!(
+            ops.iter()
+                .any(|o| matches!(o, Op::Write { version, .. } if *version >= 2)),
+            "never generated a third version of a file"
+        );
+    }
+
+    #[test]
+    fn the_debug_output_is_paste_ready_corpus_source() {
+        // proptest prints Debug of the shrunk input, so this *is* the failure
+        // report. It has to be the body of the scenario it gets promoted to.
+        let s = sweep(9, 6, Some(1000));
+        let text = format!("{s:?}");
+        assert!(text.contains("Scenario {"), "{text}");
+        assert!(text.contains("disc_bytes: Some(1000)"), "{text}");
+        assert!(text.contains("steps: vec!["), "{text}");
+        // One rendered line per choice. Filtered on the step indentation,
+        // because `disc_bytes: Some(1000),` also ends in `),`.
+        let rendered = text
+            .lines()
+            .filter(|l| l.starts_with("        ") && l.trim_end().ends_with("),"))
+            .count();
+        assert_eq!(rendered, 6, "{text}");
+    }
+
+    #[test]
+    fn a_write_renders_as_the_constructor_matching_its_version() {
+        assert_eq!(
+            Op::Write {
+                rel_path: "a.bin",
+                version: 0,
+                size: 800
+            }
+            .to_source(),
+            r#"write("a.bin", 800),"#
+        );
+        assert_eq!(
+            Op::Write {
+                rel_path: "a.bin",
+                version: 1,
+                size: 800
+            }
+            .to_source(),
+            r#"modify("a.bin", 800),"#
+        );
+        assert_eq!(
+            Op::Write {
+                rel_path: "a.bin",
+                version: 4,
+                size: 800
+            }
+            .to_source(),
+            r#"write_version("a.bin", 4, 800),"#
+        );
+        assert_eq!(
+            Op::Delete { rel_path: "a.bin" }.to_source(),
+            r#"delete("a.bin"),"#
+        );
+        assert_eq!(
+            Op::MarkDead {
+                project: "p",
+                ordinal: 3
+            }
+            .to_source(),
+            r#"cmd("disc mark-dead p 3 --yes", &["disc", "mark-dead", "p", "3", "--yes"]),"#
+        );
+    }
+
+    #[test]
+    fn a_sweep_lowers_to_one_step_per_choice() {
+        let s = sweep(4, 11, None);
+        let scenario = s.to_scenario();
+        assert_eq!(scenario.steps.len(), 11);
+        assert_eq!(scenario.disc_bytes, None);
     }
 }
