@@ -719,17 +719,49 @@ Add to the `tests` module at the bottom of
             scala: PathBuf::from("/nonexistent/scala"),
             rust: None,
         };
-        let Ok(mut session) = Session::open(&bins, None) else {
-            // No CoW temp dir here; the differential suite reports that
-            // loudly, and this unit test simply has nothing to check.
-            return;
+        let mut session = match Session::open(&bins, Mode::Scala, None) {
+            Ok(s) => s,
+            // No CoW temp dir here; say so rather than passing silently —
+            // `Skip`'s own doc is "always printed, never swallowed".
+            Err(Skip(reason)) => return eprintln!("SKIP: {reason}"),
         };
         assert_eq!(session.command_index(), 0);
-        session
-            .apply(&write("a.bin", 8), Which::Scala)
-            .expect("a tree mutation needs no binary");
+        assert!(
+            session
+                .apply(&write("a.bin", 8))
+                .expect("a tree mutation needs no binary")
+                .is_none(),
+            "a tree mutation produces no step outcome"
+        );
         assert_eq!(session.command_index(), 0);
         assert!(session.scratch().source.join("a.bin").is_file());
+    }
+
+    #[test]
+    fn the_interleaved_mode_runs_the_first_command_through_rust() {
+        // Spec §3.1's direction: step 0 must be Rust so that step 1 has Scala
+        // reading what Rust wrote — the direction the frozen corpus cannot
+        // test. `/bin/true` stands in for both binaries; only `which` is
+        // asserted, so nothing here depends on either implementation.
+        let bins = Binaries {
+            scala: PathBuf::from("/bin/true"),
+            rust: Some(PathBuf::from("/bin/true")),
+        };
+        let scenario = Scenario {
+            name: "ordering".into(),
+            disc_bytes: None,
+            steps: vec![
+                crate::scenario::cmd("status p", &["status", "p"]),
+                crate::scenario::cmd("status p", &["status", "p"]),
+            ],
+        };
+        match run(&bins, &scenario, Mode::Interleaved) {
+            Ok(out) => {
+                assert_eq!(out.steps[0].which, Which::Rust);
+                assert_eq!(out.steps[1].which, Which::Scala);
+            }
+            Err(Skip(reason)) => eprintln!("SKIP: {reason}"),
+        }
     }
 ```
 
@@ -797,6 +829,7 @@ pub fn preflight(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<(),
 /// that looks like a porting bug.
 pub struct Session<'a> {
     bins: &'a Binaries,
+    mode: Mode,
     disc_bytes: Option<u64>,
     scratch: Scratch,
     write_index: u32,
@@ -805,9 +838,13 @@ pub struct Session<'a> {
 
 impl<'a> Session<'a> {
     /// Create the scratch tree. `Skip` when this machine cannot host one.
-    pub fn open(bins: &'a Binaries, disc_bytes: Option<u64>) -> Result<Self, Skip> {
+    ///
+    /// A `mode` that needs the Rust binary requires `preflight` to have passed
+    /// first: `invoke` panics rather than checking again per step.
+    pub fn open(bins: &'a Binaries, mode: Mode, disc_bytes: Option<u64>) -> Result<Self, Skip> {
         Ok(Session {
             bins,
+            mode,
             disc_bytes,
             scratch: scratch()?,
             write_index: 0,
@@ -815,8 +852,16 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// Borrow the scratch tree mid-run, for a snapshot taken between commands.
+    /// Use `into_scratch` at the end, when the tree must outlive the session.
     pub fn scratch(&self) -> &Scratch {
         &self.scratch
+    }
+
+    /// The mode every command step runs under, so a caller can label a report
+    /// without keeping a second copy.
+    pub fn mode(&self) -> Mode {
+        self.mode
     }
 
     /// How many command steps have been applied. `Mode::which` takes this.
@@ -830,7 +875,11 @@ impl<'a> Session<'a> {
     }
 
     /// Apply one step. `Ok(None)` for a tree mutation, which runs no binary.
-    pub fn apply(&mut self, step: &Step, which: Which) -> Result<Option<StepOutcome>, Skip> {
+    ///
+    /// Advances the command index for command steps only, so a file write
+    /// between two commands never shifts the alternation. The binary is chosen
+    /// from this session's mode and the count of commands *before* this one.
+    pub fn apply(&mut self, step: &Step) -> Result<Option<StepOutcome>, Skip> {
         match step {
             Step::Write { rel_path, version, size } => {
                 let path = self.scratch.source.join(rel_path);
@@ -851,6 +900,12 @@ impl<'a> Session<'a> {
                 Ok(None)
             }
             Step::Cmd { label, args, expect, backend } => {
+                // Read before the increment: the binary for a command is
+                // chosen by the count of commands *before* it, so deriving
+                // `which` afterwards would still alternate but start the
+                // interleave with Scala — and stop exercising the Rust→Scala
+                // direction, the one the frozen corpus cannot reach.
+                let which = self.mode.which(self.command_index);
                 self.command_index += 1;
                 Ok(Some(self.invoke(label, args, *expect, backend, which)?))
             }
@@ -887,13 +942,10 @@ binary selection reads `self.bins`.
 /// run, so the caller can report it as a skip with its reason.
 pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcome, Skip> {
     preflight(bins, scenario, mode)?;
-    let mut session = Session::open(bins, scenario.disc_bytes)?;
+    let mut session = Session::open(bins, mode, scenario.disc_bytes)?;
     let mut steps = Vec::new();
     for step in &scenario.steps {
-        // Read the index *before* applying: `apply` advances it, and the
-        // binary for step N is chosen by the count of commands before it.
-        let which = mode.which(session.command_index());
-        if let Some(outcome) = session.apply(step, which)? {
+        if let Some(outcome) = session.apply(step)? {
             steps.push(outcome);
         }
     }
@@ -1855,7 +1907,7 @@ use std::cell::Cell;
 
 use diskrement_difftest::normalize::Normalizer;
 use diskrement_difftest::runner::{self, Binaries, Session, Skip};
-use diskrement_difftest::scenario::{Mode, Step};
+use diskrement_difftest::scenario::{Mode, Scenario, Step};
 use diskrement_difftest::sequence::{self, Sweep};
 use diskrement_difftest::state_diff::{self, StateSnapshot, StepSnapshot};
 use proptest::prelude::*;
@@ -1950,7 +2002,6 @@ Append to `crates/diskrement-difftest/tests/sweep.rs`:
 /// first-appearance order. All three are advanced at the same points, in the
 /// same order, so their numbering corresponds.
 struct World<'a> {
-    mode: Mode,
     session: Session<'a>,
     norm: Normalizer,
     /// The most recent command outcome. `None` before the first command.
@@ -1959,19 +2010,23 @@ struct World<'a> {
 
 impl<'a> World<'a> {
     fn open(bins: &'a Binaries, disc_bytes: Option<u64>, mode: Mode) -> Result<Self, Skip> {
-        let session = Session::open(bins, disc_bytes)?;
+        let session = Session::open(bins, mode, disc_bytes)?;
         let norm = Normalizer::new(&session.scratch().root);
         Ok(World {
-            mode,
             session,
             norm,
             last: None,
         })
     }
 
+    fn mode(&self) -> Mode {
+        self.session.mode()
+    }
+
     fn apply(&mut self, step: &Step) -> Result<(), Skip> {
-        let which = self.mode.which(self.session.command_index());
-        let outcome = self.session.apply(step, which)?;
+        // The session owns the mode and derives the binary itself, so the
+        // read-before-increment ordering is not this caller's to get wrong.
+        let outcome = self.session.apply(step)?;
         let snapshot = outcome.map(|o| state_diff::step_snapshot(&o, &mut self.norm));
         self.last = snapshot;
         Ok(())
@@ -2029,7 +2084,7 @@ fn compare(bins: &Binaries, sweep: &Sweep) -> Result<(), String> {
                 return Err(format!(
                     "step {i} ({}) diverges: all-scala is (a), {} is (b)\n\n{}",
                     reference_step.label,
-                    candidate.mode.label(),
+                    candidate.mode().label(),
                     diffs.join("\n\n")
                 ));
             }
@@ -2078,17 +2133,24 @@ fn generated_sequences_agree_across_all_three_modes() {
             return;
         }
     };
-    if bins.rust.is_none() {
-        eprintln!(
-            "SKIP: the Rust binary has not been built. Run \
-             `cargo build -p diskrement-cli`, or set DISKREMENT_RUST_BIN."
-        );
+    // Preflight an empty scenario rather than re-typing `runner`'s skip
+    // message here. With no command steps the port gate is vacuous, so what
+    // this actually checks is that the Rust binary exists — in `runner`'s
+    // wording. The port gate itself is pinned at compile time by
+    // `sequence`'s command-surface test, not re-checked per run.
+    let probe = Scenario {
+        name: "sweep-probe".to_string(),
+        disc_bytes: None,
+        steps: Vec::new(),
+    };
+    if let Err(Skip(reason)) = runner::preflight(&bins, &probe, Mode::Interleaved) {
+        eprintln!("SKIP: {reason}");
         return;
     }
     // Probe the scratch environment once. A TMPDIR that cannot reflink is a
     // skip, not the same failure repeated `cases` times — and after this
     // probe, a Skip from inside a case is a harness defect and panics.
-    if let Err(Skip(reason)) = Session::open(&bins, None) {
+    if let Err(Skip(reason)) = Session::open(&bins, Mode::Scala, None) {
         eprintln!("SKIP: {reason}");
         return;
     }
@@ -2554,6 +2616,23 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
   the printed counterexample line); the second gave a rule with no symptom, and
   now says that a killed child leaves the `-wal` behind and that violating it
   reads a stale database silently.
+- (Task 3) **`Session` owns its `Mode`; `apply` lost its `which` parameter.**
+  The plan had the caller compute `mode.which(session.command_index())` before
+  every step. Both consumers turned out to hold a *fixed* mode and write that
+  identical line, so the parameter bought flexibility nobody used while leaving
+  the read-before-apply ordering as the caller's problem — and getting it
+  backwards starts the interleave with Scala, silently dropping the Rust→Scala
+  direction that the frozen corpus structurally cannot test. Storing the mode
+  makes the mistake unrepresentable. Task 6's `World` collapses accordingly:
+  it no longer carries a `mode` field, and `World::apply` is one line.
+- (Task 3) A `/bin/true` unit test now pins that the interleaved mode runs its
+  first command through Rust. The ordering was previously checkable only by the
+  five-minute differential suite; two spawns of `/bin/true` assert `which`
+  alone, depending on neither implementation.
+- (Task 3) The sweep's entry point preflights an empty scenario instead of
+  re-typing `runner`'s missing-binary skip message. `preflight` therefore keeps
+  one caller in the crate and one in the sweep, rather than being `pub` for a
+  consumer that hand-rolled a copy of it.
 - (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
 - (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
