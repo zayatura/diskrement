@@ -2815,8 +2815,33 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
 
 *Paste actual command output here at Task 10. Numbers, not adjectives.*
 
-- `cargo test --workspace`: **TO BE FILLED IN**
-- `cargo clippy --workspace --all-targets -- -D warnings`: **TO BE FILLED IN**
-- `cargo fmt --check`: **TO BE FILLED IN**
-- `cargo test -p diskrement-difftest -- --ignored --nocapture`: **TO BE FILLED IN**
-- `git diff --stat feat/rust-rewrite -- core/ shell/ cli/ build.sbt project/ fixtures/ scripts/`: **TO BE FILLED IN**
+- `cargo test --workspace`: **527 passed, 0 failed, 4 ignored.** Baseline at
+  plan start was 506/0/3; the phase added 21 tests and the fourth `#[ignore]`d
+  entry point (the sweep) beside the three corpus ones.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean, exit 0.
+- `cargo fmt --check`: clean, exit 0.
+- The corpus differential suite, run last after every change in the phase:
+
+  ```
+  all-rust: 13 scenario(s) compared, 0 skipped
+  interleaved: 13 scenario(s) compared, 0 skipped
+  bootstrap: 13 scenario(s) reproduced identically
+  test result: ok. 3 passed; 0 failed; ... finished in 328.53s
+  ```
+
+  Thirteen scenarios covering all nine commands, in all three modes, with no
+  skips — the proof that Tasks 1–3's refactor of the runner, the snapshot and
+  the scenario types was behaviour-preserving.
+- The sweep, at its committed default:
+
+  ```
+  sweep: 12 case(s) of up to 12 steps agreed across all three modes (12 executed)
+    exercised: burn 8 (5 refused), disc 4 (4 refused), history 5 (2 refused),
+    init 13 (1 refused), plan 9, reset 4 (2 refused), scan 10,
+    status 6 (2 refused), verify 3
+  ```
+
+- `git diff --stat feat/rust-rewrite -- core/ shell/ cli/ build.sbt project/ fixtures/ scripts/`:
+  **empty.** The Scala tree, the frozen corpus and the harvest script are
+  byte-identical to the integration branch, so the oracle this phase compared
+  against was never touched by it.
