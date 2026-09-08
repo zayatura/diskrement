@@ -125,10 +125,12 @@ pub enum Step {
     },
 }
 
-/// Rewrite a file at `version`. `write` and `modify` are versions 0 and 1;
-/// a generated sequence that touches one path a third time needs the general
-/// form, and its printed source needs a constructor to name.
-pub fn rewrite(rel_path: &'static str, version: u32, size: usize) -> Step {
+/// Write a file at an arbitrary content version. `write` and `modify` are
+/// versions 0 and 1; a generated sequence that touches one path a third time
+/// needs the general form, and the source proptest prints for a shrunk
+/// counterexample is `corpus.rs` syntax, so a third-version write needs a
+/// constructor to name.
+pub fn write_version(rel_path: &'static str, version: u32, size: usize) -> Step {
     Step::Write {
         rel_path,
         version,
@@ -138,13 +140,13 @@ pub fn rewrite(rel_path: &'static str, version: u32, size: usize) -> Step {
 
 /// Write a file at version 0 (the "added" content).
 pub fn write(rel_path: &'static str, size: usize) -> Step {
-    rewrite(rel_path, 0, size)
+    write_version(rel_path, 0, size)
 }
 
 /// Rewrite a file at version 1 (the "modified" content), matching the harvest
 /// script's `tree_modify`.
 pub fn modify(rel_path: &'static str, size: usize) -> Step {
-    rewrite(rel_path, 1, size)
+    write_version(rel_path, 1, size)
 }
 
 pub fn delete(rel_path: &'static str) -> Step {
@@ -307,6 +309,9 @@ mod tests {
     fn a_scenario_can_carry_computed_names_and_labels() {
         // Generated scenarios name themselves and label each step from the
         // argv they built, so neither can be `&'static str` without leaking.
+        //
+        // The `format!`s are the assertion: with literals this test compiles
+        // against `&'static str` too and proves nothing. Do not simplify them.
         let n = 3;
         let s = Scenario {
             name: format!("sweep-{n}"),
@@ -324,11 +329,11 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_carries_an_arbitrary_version() {
+    fn write_version_carries_an_arbitrary_version() {
         // `write` is version 0 and `modify` is version 1; a generated sequence
         // can rewrite the same path a third time, and the source it prints has
         // to have a constructor to name.
-        match rewrite("a.bin", 4, 800) {
+        match write_version("a.bin", 4, 800) {
             Step::Write {
                 rel_path,
                 version,
@@ -338,5 +343,16 @@ mod tests {
             }
             other => panic!("expected a write step, got {other:?}"),
         }
+        // The delegation is what this commit introduced and what a typo could
+        // silently break: `content()` is keyed on "{rel_path}@{version}", so
+        // swapping these two changes the bytes every corpus scenario writes.
+        assert!(matches!(
+            write("a.bin", 800),
+            Step::Write { version: 0, .. }
+        ));
+        assert!(matches!(
+            modify("a.bin", 800),
+            Step::Write { version: 1, .. }
+        ));
     }
 }
