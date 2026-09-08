@@ -462,25 +462,32 @@ Add to the `tests` module at the bottom of
     #[test]
     fn state_differences_compare_without_a_finished_run() {
         // The sweep diffs between commands, where there is no RunOutcome yet —
-        // only a live scratch tree. So the state half has to stand alone.
-        let mut out = Vec::new();
+        // only a live scratch tree, so the state half has to stand alone. It
+        // also has to *append*: the sweep pushes step diffs and then state
+        // diffs into one vector, so an implementation that replaced the
+        // accumulator would break it while every other test still passed.
+        let mut out = vec!["pre-existing".to_string()];
         state_differences(
             &state(&["disc: id=1 status=\"OPEN\""]),
             &state(&["disc: id=1 status=\"FINALIZED\""]),
             &mut out,
         );
-        assert_eq!(out.len(), 1);
-        assert!(out[0].contains("OPEN") && out[0].contains("FINALIZED"), "{}", out[0]);
+        assert_eq!(out.len(), 2, "must append, not replace: {out:?}");
+        assert!(
+            out[1].contains("catalog") && out[1].contains("OPEN") && out[1].contains("FINALIZED"),
+            "{}",
+            out[1]
+        );
     }
 
     #[test]
     fn step_differences_compare_one_step_alone() {
         let a = StepSnapshot { label: "scan p".into(), exit: 0, stdout: Some("Scanned: 1 added".into()) };
         let b = StepSnapshot { label: "scan p".into(), exit: 0, stdout: Some("Scanned: 2 added".into()) };
-        let mut out = Vec::new();
+        let mut out = vec!["pre-existing".to_string()];
         step_differences(0, &a, &b, &mut out);
-        assert_eq!(out.len(), 1);
-        assert!(out[0].contains("1 added") && out[0].contains("2 added"), "{}", out[0]);
+        assert_eq!(out.len(), 2, "must append, not replace: {out:?}");
+        assert!(out[1].contains("1 added") && out[1].contains("2 added"), "{}", out[1]);
     }
 ```
 
@@ -500,7 +507,7 @@ definition with the pair, keeping every doc comment on the field it documents:
 ///
 /// Split out of `Snapshot` because the sweep captures it *between* commands,
 /// where no `RunOutcome` exists yet.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct StateSnapshot {
     pub catalog: Vec<String>,
     pub scancache: Vec<String>,
@@ -555,7 +562,10 @@ pub fn step_snapshot(step: &StepOutcome, norm: &mut Normalizer) -> StepSnapshot 
 /// `immutable=1`, which reads the main database file and ignores any `-wal`;
 /// that is complete only once the writing process has exited and SQLite has
 /// checkpointed. Between two command invocations, which is where the sweep
-/// calls it, that always holds.
+/// calls it, that always holds. SQLite drops the `-wal` when the last
+/// connection closes, so a cleanly exited child leaves a complete main file; a
+/// killed one does not. Violating this is silent — you read a stale database
+/// and report a difference that is not there, or miss one that is.
 ///
 /// Takes the run's own `Normalizer` so that instant ordinals stay consistent
 /// across every value the run produces.
@@ -591,9 +601,14 @@ Add `use crate::runner::{RunOutcome, Scratch};` to the imports.
 - [ ] **Step 5: Split the comparison**
 
 ```rust
-/// Every way one step's outcome disagrees. `index` names the step in the
-/// message, so the caller decides whether that is a position in a scenario or
-/// a position in a generated sequence.
+/// Every way one step's outcome disagrees. `index` only names the step in the
+/// message, and the two callers number on different bases: `differences`
+/// passes a position in `RunOutcome.steps`, which holds command outcomes only,
+/// while the sweep passes a position in the generated `Scenario.steps`, which
+/// also counts `write`/`delete` — so the number lines up with the line the
+/// counterexample prints. Neither is wrong for its own report, so the number is
+/// the caller's to choose; just never compare a `step N` from one against a
+/// `step N` from the other.
 pub fn step_differences(
     index: usize,
     a: &StepSnapshot,
@@ -2521,6 +2536,24 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
 - (Task 1) Pre-refactor differential baseline, measured on `ddc911f` before any
   change: `13 / 13 / 13`, 0 skipped, **285.87s**. After the refactor: `13 / 13 /
   13`, 0 skipped, 281.64s.
+- (Task 2) **`PartialEq` dropped from `StateSnapshot`.** The plan derived it;
+  nothing uses it, including Task 6. Removing the derive is better than testing
+  around it: it stops a future reader reaching for `a == b` as a second,
+  untested oracle path alongside `state_differences(..).is_empty()`. `Default`
+  stays — an untouched scratch tree before `init` is a meaningful value.
+- (Task 2) **Both new tests now seed the accumulator.** As planned they
+  restated existing coverage. The contract the public `out: &mut Vec<String>`
+  signature actually imposes, and which Task 6 depends on, is *append, not
+  replace* — an implementation calling `out.clear()` would break the sweep
+  silently while every other test still passed. Seeding the vector and
+  asserting `len() == 2` pins it.
+- (Task 2) The `index` doc and the `immutable=1` warning were both rewritten:
+  the first named a distinction that does not exist (a generated sequence *is*
+  a scenario) instead of the real one (`RunOutcome.steps` holds commands only,
+  `Scenario.steps` also holds writes and deletes, so the index lines up with
+  the printed counterexample line); the second gave a rule with no symptom, and
+  now says that a killed child leaves the `-wal` behind and that violating it
+  reads a stale database silently.
 - (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
 - (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
