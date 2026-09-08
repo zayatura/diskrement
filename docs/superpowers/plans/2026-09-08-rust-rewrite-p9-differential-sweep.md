@@ -214,7 +214,7 @@ seed file.
 
 | file | responsibility | task |
 |---|---|---|
-| `crates/diskrement-difftest/src/scenario.rs` | **modify** — `Scenario::name` and `Step::Cmd::label` become `String`; add the `rewrite` constructor | 1 |
+| `crates/diskrement-difftest/src/scenario.rs` | **modify** — `Scenario::name` and `Step::Cmd::label` become `String`; add the `write_version` constructor | 1 |
 | `crates/diskrement-difftest/src/state_diff.rs` | **modify** — split `Snapshot` into step and state halves; expose `state_snapshot`, `step_snapshot`, `state_differences`, `step_differences` | 2 |
 | `crates/diskrement-difftest/src/runner.rs` | **modify** — extract `Session` and `preflight`; `run` becomes a fold | 3 |
 | `crates/diskrement-difftest/src/sequence.rs` | **create** — `Model` (the transition table), `Op`, `Sweep`, the interpretation and the source rendering. No I/O, no proptest. | 4, 5 |
@@ -250,6 +250,8 @@ Add to the `tests` module at the bottom of
     fn a_scenario_can_carry_computed_names_and_labels() {
         // Generated scenarios name themselves and label each step from the
         // argv they built, so neither can be `&'static str` without leaking.
+        // The `format!`s are the assertion: with literals this test compiles
+        // against `&'static str` too and proves nothing. Do not simplify them.
         let n = 3;
         let s = Scenario {
             name: format!("sweep-{n}"),
@@ -264,16 +266,21 @@ Add to the `tests` module at the bottom of
     }
 
     #[test]
-    fn rewrite_carries_an_arbitrary_version() {
+    fn write_version_carries_an_arbitrary_version() {
         // `write` is version 0 and `modify` is version 1; a generated sequence
         // can rewrite the same path a third time, and the source it prints has
         // to have a constructor to name.
-        match rewrite("a.bin", 4, 800) {
+        match write_version("a.bin", 4, 800) {
             Step::Write { rel_path, version, size } => {
                 assert_eq!((rel_path, version, size), ("a.bin", 4, 800));
             }
             other => panic!("expected a write step, got {other:?}"),
         }
+        // The delegation is what this task introduces and what a typo could
+        // silently break: `content()` is keyed on "{rel_path}@{version}", so
+        // swapping these two changes the bytes every corpus scenario writes.
+        assert!(matches!(write("a.bin", 800), Step::Write { version: 0, .. }));
+        assert!(matches!(modify("a.bin", 800), Step::Write { version: 1, .. }));
     }
 ```
 
@@ -281,7 +288,7 @@ Add to the `tests` module at the bottom of
 
 Run: `cargo test -p diskrement-difftest --lib scenario:: 2>&1 | tail -20`
 Expected: FAIL to compile — "expected `&str`, found `String`" on the `name`
-field, and "cannot find function `rewrite` in this scope".
+field, and "cannot find function `write_version` in this scope".
 
 - [ ] **Step 3: Make the two fields owned and add the constructor**
 
@@ -312,13 +319,15 @@ pub struct Scenario {
 }
 ```
 
-Widen the four command constructors and add `rewrite`:
+Widen the four command constructors and add `write_version`:
 
 ```rust
-/// Rewrite a file at `version`. `write` and `modify` are versions 0 and 1;
-/// a generated sequence that touches one path a third time needs the general
-/// form, and its printed source needs a constructor to name.
-pub fn rewrite(rel_path: &'static str, version: u32, size: usize) -> Step {
+/// Write a file at an arbitrary content version. `write` and `modify` are
+/// versions 0 and 1; a generated sequence that touches one path a third time
+/// needs the general form, and the source proptest prints for a shrunk
+/// counterexample is `corpus.rs` syntax, so a third-version write needs a
+/// constructor to name.
+pub fn write_version(rel_path: &'static str, version: u32, size: usize) -> Step {
     Step::Write {
         rel_path,
         version,
@@ -354,19 +363,19 @@ pub fn cmd_real(label: impl Into<String>, device: &'static str, args: &[&str]) -
 }
 ```
 
-Rewrite `write` and `modify` in terms of `rewrite` so the three stay one
+Define `write` and `modify` in terms of `write_version` so the three stay one
 definition:
 
 ```rust
 /// Write a file at version 0 (the "added" content).
 pub fn write(rel_path: &'static str, size: usize) -> Step {
-    rewrite(rel_path, 0, size)
+    write_version(rel_path, 0, size)
 }
 
 /// Rewrite a file at version 1 (the "modified" content), matching the harvest
 /// script's `tree_modify`.
 pub fn modify(rel_path: &'static str, size: usize) -> Step {
-    rewrite(rel_path, 1, size)
+    write_version(rel_path, 1, size)
 }
 ```
 
@@ -1570,7 +1579,7 @@ Add to the `tests` module in `crates/diskrement-difftest/src/sequence.rs`:
         );
         assert_eq!(
             Op::Write { rel_path: "a.bin", version: 4, size: 800 }.to_source(),
-            r#"rewrite("a.bin", 4, 800),"#
+            r#"write_version("a.bin", 4, 800),"#
         );
         assert_eq!(
             Op::Delete { rel_path: "a.bin" }.to_source(),
@@ -1660,13 +1669,13 @@ Extend `impl Op` in `crates/diskrement-difftest/src/sequence.rs`:
     pub fn to_step(&self) -> Step {
         match self {
             // `*rel_path`, not `rel_path`: matching `&self` binds it as
-            // `&&'static str`, and deref coercion would hand `rewrite` a
+            // `&&'static str`, and deref coercion would hand `write_version` a
             // reference borrowed from `self` rather than a `'static` one.
             Op::Write {
                 rel_path,
                 version,
                 size,
-            } => scenario::rewrite(*rel_path, *version, *size),
+            } => scenario::write_version(*rel_path, *version, *size),
             Op::Delete { rel_path } => scenario::delete(*rel_path),
             _ => {
                 let argv = self.to_argv();
@@ -1693,7 +1702,7 @@ Extend `impl Op` in `crates/diskrement-difftest/src/sequence.rs`:
                 rel_path,
                 version,
                 size,
-            } => format!("rewrite({rel_path:?}, {version}, {size}),"),
+            } => format!("write_version({rel_path:?}, {version}, {size}),"),
             Op::Delete { rel_path } => format!("delete({rel_path:?}),"),
             _ => {
                 let argv = self.to_argv();
@@ -2486,6 +2495,32 @@ git push origin --delete feat/rewrite-p9 2>/dev/null || true
 *Append during execution. Deviations from this plan are recorded here rather
 than left in commit messages (CLAUDE.md, "In-flight work").*
 
+- (Task 1) **`rewrite` renamed to `write_version`.** The plan named the general
+  write constructor `rewrite`, which reads wrong on the general form: `write`
+  became `rewrite(rel_path, 0, size)` — "re-write at version 0" — while version
+  0 *is* the first write, and `modify`'s existing doc already opened "Rewrite a
+  file at version 1", so two constructors' docs began with the same word for
+  different things. Renamed before four later tasks could read it. Every
+  reference in this plan was updated in the same pass, including the
+  `Op::to_source` rendering in Task 5.
+- (Task 1) **The version test was strengthened.** As written it asserted only
+  that a three-field constructor moves three fields — a tautology, since `u32`
+  and `usize` make a transposed call a compile error. What this task actually
+  risked was the new delegation: a typo giving `write` version 1 or `modify`
+  version 0 compiles cleanly and silently changes the bytes every corpus
+  scenario writes, because `content()` is keyed on `"{rel_path}@{version}"`.
+  Two `matches!` assertions now pin that. A comment was also added saying the
+  `format!`s in the sibling test *are* the assertion, so a later tidying pass
+  does not flatten them to literals and leave a test that proves nothing.
+- (Task 1) Not acted on, recorded for the end of the phase: `RunOutcome.scenario`
+  and `Snapshot.scenario` are written and never read — `differences()` does not
+  compare them and `tests/differential.rs` prints the name from the `Scenario`
+  it already holds. Pre-existing, one small allocation per JVM-spawning run. If
+  no P9 task starts reading it, delete the field at Task 10 rather than keep
+  carrying it.
+- (Task 1) Pre-refactor differential baseline, measured on `ddc911f` before any
+  change: `13 / 13 / 13`, 0 skipped, **285.87s**. After the refactor: `13 / 13 /
+  13`, 0 skipped, 281.64s.
 - (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
 - (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
