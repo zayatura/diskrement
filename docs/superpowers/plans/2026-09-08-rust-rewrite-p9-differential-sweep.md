@@ -2732,6 +2732,37 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
   wrong: `Step` has no lifetime parameter, so if it compiles the stored
   reference is `'static`. Clippy's `explicit_auto_deref` is correct and the
   star is gone.
+- (Task 6) **The determinism guard was weaker than the thing it adjudicated.**
+  `compare` diffs state after every command; `scala_reproduces_itself` used
+  `runner::run`, which diffs only the *end* state. A nondeterminism appearing
+  mid-run and later cleared — an unnormalized value in `staged/plan.json`,
+  wiped by a subsequent `burn` — would have passed the self-check, and the
+  report would have said "this is a porting bug" and sent the reader into
+  `crates/`. Exactly the class of defect mid-run diffing exists to catch,
+  answered exactly wrong. `compare` is now generalised over its candidate
+  modes and serves both roles: the self-check is a second all-Scala world
+  stepped alongside the reference, as strong as the main comparison.
+- (Task 6) **A green sweep could prove nothing.** `PROPTEST_CASES=0` printed
+  "0 generated case(s) … agreed" and exited green. `differential.rs` has
+  asserted `ran > 0` since P3; the sweep now does too.
+- (Task 6) **The success line reported effort, not coverage.** At the
+  generator's ~30 % burn rate, eight cases contain no burn at all in ~6 % of
+  runs, and ~27 % at the floor `sequence.rs` pins — so a developer could change
+  the burn path, read "8 cases agreed", and be between 1-in-17 and 1-in-4
+  likely to be reading a true and vacuous line. The run now reports what it
+  exercised, per command, split by exit status because a `burn` refused every
+  time is not burn coverage, and warns when no burn succeeded. A warning rather
+  than an assertion: at these rates an assertion would be red by design.
+- (Task 6) A note I got wrong and the review corrected: `reference.state()`
+  sitting outside the candidate loop is a *cost* property, not an oracle
+  property. `rule_instant_ordinals` looks each instant up by text and pushes
+  only on first sight, so re-feeding a blob is idempotent — moving the call
+  would double the SQLite dumps per step but could not produce a false red.
+  The comment now says so, since marking it fragile-but-untested would have
+  the next editor afraid of the wrong thing.
+- (Task 6) Plan-staging flaw, no code impact: Step 1's file does not compile on
+  its own — its import block names items only Steps 3–4 use, and
+  `unused_imports` is an error in this workspace.
 - (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
 - (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
