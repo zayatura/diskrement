@@ -991,6 +991,14 @@ Pure data and pure functions: no I/O, no `proptest`, no binaries. This is the
 module that decides *what* gets generated; Task 5 decides how it is rendered and
 Task 6 runs it.
 
+> **Superseded in part during execution.** The `legal_ops` / `interpret` shape
+> below did not reach the states the model exists for — measured, 0.8% of
+> sequences reached a burn. `legal_ops` split into `legal_commands` and
+> `tree_ops` on separate selector residues, index 0 became the
+> lifecycle-advancing op with the chooser biased toward it, and `3000` left
+> `SIZES`. See *Execution deviations* for the numbers and the reasoning; the
+> committed `sequence.rs` is the current source of truth.
+
 **Files:**
 - Create: `crates/diskrement-difftest/src/sequence.rs`
 - Modify: `crates/diskrement-difftest/src/lib.rs`
@@ -1191,10 +1199,18 @@ use crate::runner::PROJECT;
 /// supersede a version and leave a tombstone while keeping the model small.
 pub const FILES: &[&str] = &["a.bin", "b.bin", "nested/c.bin", "deep/x/d.bin"];
 
-/// Payload sizes. `3000` exceeds the smallest generated capacity on its own, so
-/// the oversize path — `plan` lists it and succeeds, `burn` refuses with exit
-/// 3 — is reachable by generation rather than only by hand.
-pub const SIZES: &[usize] = &[120, 400, 800, 3000];
+/// Payload sizes. All smaller than the smallest generated capacity, on
+/// purpose: an oversized file is never committed, so it makes every later
+/// `burn` exit 3 until something deletes it, and a sequence that writes one
+/// early is dead for the rest of its length. The oversize path is worth
+/// testing and is covered deliberately, by `corpus::plan_oversize` and
+/// `corpus::burn_errors`, rather than by poisoning generated sequences.
+pub const SIZES: &[usize] = &[120, 400, 800];
+
+/// The longest sequence the sweep generates. Lives here so `sequence` and
+/// `tests/sweep.rs` share one source, and so the reachability test measures
+/// the distribution the sweep actually produces.
+pub const MAX_LEN: usize = 12;
 
 /// `DISKREMENT_DISC_BYTES` values, most constrained first.
 ///
@@ -1940,8 +1956,9 @@ const DEFAULT_CASES: u32 = 8;
 /// Bounded because each attempt is another three runs.
 const DEFAULT_MAX_SHRINK_ITERS: u32 = 64;
 
-/// Longest generated sequence.
-const MAX_LEN: usize = 12;
+/// Longest generated sequence. From `sequence`, so the reachability test in
+/// that module measures the distribution this strategy actually produces.
+use diskrement_difftest::sequence::MAX_LEN;
 
 fn config() -> Config {
     let mut cfg = Config::default();
@@ -2660,6 +2677,31 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
   `illegal_ops()` at the state it came from, which is the branch itself and is
   length-independent at ≈0.20. The classifier is sound because the two lists
   are disjoint in any given state.
+- (Task 4) **The generator did not reach the states it exists for, and the
+  plan's op mix was the cause.** Instrumented at the sweep's own `MAX_LEN`, over
+  200 000 cases: a single burn in **0.80 %** of sequences, two burns in
+  **0.001 %**, a dead disc in **0.08 %**. Writes were 46 % of all generated ops
+  and 20 % of sequences never emitted `init`. A default eight-case run would
+  have contained no burn at all ~94 % of the time — the sweep would have passed
+  indefinitely while exercising nothing the corpus does not already cover, and
+  no test in the phase would have noticed. Two causes, both fixed: tree
+  mutations shared the legal list and crowded out the command ops (they now
+  have their own selector residue), and reaching a burn needs four specific ops
+  in order from a uniform chooser (index 0 of the command list is now the
+  lifecycle-advancing op, and half the chooser range goes to it). Shrinking is
+  unaffected — chooser 0 still selects index 0 on every branch — and
+  `shrinking_toward_zero_lands_on_the_core_cycle` gets stronger, since index 0
+  is now the cycle's actual next step rather than always `Scan`.
+- (Task 4) **`3000` dropped from `SIZES`.** An oversized file is never
+  committed, so it made every later `burn` exit 3 until something deleted it:
+  roughly 47 % of model-burns at the shrink-target capacity would really have
+  been refused, the second-largest contributor to the reachability failure
+  above. The oversize path is covered deliberately by `corpus::plan_oversize`
+  and `corpus::burn_errors` instead of by poisoning generated sequences.
+- (Task 4) A reachability test now pins the fix, measured at `MAX_LEN` rather
+  than over long walks, because the long-walk figures flattered the real
+  distribution by an order of magnitude. `MAX_LEN` moved into `sequence` so the
+  test and the strategy share one source.
 - (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
 - (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
