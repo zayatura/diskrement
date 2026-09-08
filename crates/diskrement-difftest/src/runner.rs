@@ -253,11 +253,11 @@ pub struct RunOutcome {
     pub scratch: Scratch,
 }
 
-/// Run one scenario end to end.
+/// Refuse, with a reason, a run this environment cannot support.
 ///
-/// Returns `Skip` — never a panic — when the environment cannot support the
-/// run, so the caller can report it as a skip with its reason.
-pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcome, Skip> {
+/// Separate from `Session` because it is a property of the *scenario* — which
+/// commands it needs and which tools — rather than of the scratch tree.
+pub fn preflight(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<(), Skip> {
     if mode.needs_rust() {
         if let Some(missing) = rust_gap(&scenario.commands(), RUST_IMPLEMENTED) {
             return Err(Skip(format!(
@@ -287,33 +287,79 @@ pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcom
             )));
         }
     }
+    Ok(())
+}
 
-    let scratch = scratch()?;
-    let mut steps = Vec::new();
-    let mut command_index = 0usize;
-    let mut write_index: u32 = 0;
+/// One scratch tree, its environment, and the ability to apply steps to it one
+/// at a time.
+///
+/// `run` folds a whole scenario over this; the sweep holds three of them open
+/// at once and diffs between steps. The counters live here rather than in the
+/// caller because both of them — the write index that pins mtimes and the
+/// command index that drives the alternation — must advance exactly once per
+/// applicable step, and a caller that forgot one would produce a difference
+/// that looks like a porting bug.
+pub struct Session<'a> {
+    bins: &'a Binaries,
+    disc_bytes: Option<u64>,
+    scratch: Scratch,
+    write_index: u32,
+    command_index: usize,
+}
 
-    for step in &scenario.steps {
+impl<'a> Session<'a> {
+    /// Create the scratch tree. `Skip` when this machine cannot host one.
+    pub fn open(bins: &'a Binaries, disc_bytes: Option<u64>) -> Result<Self, Skip> {
+        Ok(Session {
+            bins,
+            disc_bytes,
+            scratch: scratch()?,
+            write_index: 0,
+            command_index: 0,
+        })
+    }
+
+    pub fn scratch(&self) -> &Scratch {
+        &self.scratch
+    }
+
+    /// How many command steps have been applied. `Mode::which` takes this.
+    pub fn command_index(&self) -> usize {
+        self.command_index
+    }
+
+    /// Give up the scratch tree, keeping it alive in the caller.
+    pub fn into_scratch(self) -> Scratch {
+        self.scratch
+    }
+
+    /// Apply one step. `Ok(None)` for a tree mutation, which runs no binary.
+    pub fn apply(&mut self, step: &Step, which: Which) -> Result<Option<StepOutcome>, Skip> {
         match step {
             Step::Write {
                 rel_path,
                 version,
                 size,
             } => {
-                let path = scratch.source.join(rel_path);
+                let path = self.scratch.source.join(rel_path);
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| Skip(format!("creating {}: {e}", parent.display())))?;
                 }
                 std::fs::write(&path, content(rel_path, *version, *size))
                     .map_err(|e| Skip(format!("writing {}: {e}", path.display())))?;
-                pin_mtime(&path, SOURCE_MTIME_BASE_MILLIS + u64::from(write_index))?;
-                write_index += 1;
+                pin_mtime(
+                    &path,
+                    SOURCE_MTIME_BASE_MILLIS + u64::from(self.write_index),
+                )?;
+                self.write_index += 1;
+                Ok(None)
             }
             Step::Delete { rel_path } => {
-                let path = scratch.source.join(rel_path);
+                let path = self.scratch.source.join(rel_path);
                 std::fs::remove_file(&path)
                     .map_err(|e| Skip(format!("deleting {}: {e}", path.display())))?;
+                Ok(None)
             }
             Step::Cmd {
                 label,
@@ -321,85 +367,137 @@ pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcom
                 expect,
                 backend,
             } => {
-                let which = mode.which(command_index);
-                command_index += 1;
-                let bin = match which {
-                    Which::Scala => &bins.scala,
-                    // Checked above: a Rust mode returns Skip before reaching
-                    // here when the binary is absent.
-                    Which::Rust => bins.rust.as_ref().expect("checked above"),
-                };
-                // Scenarios cannot know the scratch path, so they write the
-                // placeholders `{source}` and `{work}` and the runner fills
-                // them in. Substituting here keeps a scenario a pure,
-                // machine-independent value that two runs can share.
-                let source = scratch.source.display().to_string();
-                let work = scratch.work.display().to_string();
-                let mut argv: Vec<String> = vec![
-                    "--catalog".to_string(),
-                    scratch.catalog.display().to_string(),
-                ];
-                argv.extend(
-                    args.iter()
-                        .map(|a| a.replace("{source}", &source).replace("{work}", &work)),
-                );
-
-                let mut cmd = Command::new(bin);
-                cmd.args(&argv)
-                    .current_dir(&scratch.root)
-                    .env("HOME", &scratch.home)
-                    .env("XDG_DATA_HOME", scratch.home.join(".local/share"))
-                    .env("STATE_DIRECTORY", scratch.home.join("state"))
-                    .env_remove("DISKREMENT_HASH_PARALLELISM");
-                match backend {
-                    Backend::Simulated => {
-                        cmd.env("DISKREMENT_BURNER", "simulated")
-                            .env_remove("DISKREMENT_DEVICE");
-                    }
-                    Backend::Real { device } => {
-                        cmd.env("DISKREMENT_BURNER", "real").env(
-                            "DISKREMENT_DEVICE",
-                            device.replace("{source}", &source).replace("{work}", &work),
-                        );
-                    }
-                }
-                match scenario.disc_bytes {
-                    Some(n) => {
-                        cmd.env("DISKREMENT_DISC_BYTES", n.to_string());
-                    }
-                    None => {
-                        cmd.env_remove("DISKREMENT_DISC_BYTES");
-                    }
-                }
-                let out = cmd
-                    .output()
-                    .map_err(|e| Skip(format!("spawning {}: {e}", bin.display())))?;
-                steps.push(StepOutcome {
-                    label: label.clone(),
-                    which,
-                    argv,
-                    // A signal-killed child has no code; -1 is not a valid exit
-                    // code, so it can never collide with a real one.
-                    exit: out.status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-                    expect: *expect,
-                });
+                self.command_index += 1;
+                Ok(Some(self.invoke(label, args, *expect, backend, which)?))
             }
         }
     }
 
+    /// Spawn one binary: the placeholder substitution, the environment
+    /// isolation, the backend selection and `DISKREMENT_DISC_BYTES`.
+    fn invoke(
+        &self,
+        label: &str,
+        args: &[String],
+        expect: Expect,
+        backend: &Backend,
+        which: Which,
+    ) -> Result<StepOutcome, Skip> {
+        let bin = match which {
+            Which::Scala => &self.bins.scala,
+            // Checked by `preflight`: a Rust mode returns Skip before reaching
+            // here when the binary is absent.
+            Which::Rust => self.bins.rust.as_ref().expect("checked above"),
+        };
+        // Scenarios cannot know the scratch path, so they write the
+        // placeholders `{source}` and `{work}` and the runner fills
+        // them in. Substituting here keeps a scenario a pure,
+        // machine-independent value that two runs can share.
+        let source = self.scratch.source.display().to_string();
+        let work = self.scratch.work.display().to_string();
+        let mut argv: Vec<String> = vec![
+            "--catalog".to_string(),
+            self.scratch.catalog.display().to_string(),
+        ];
+        argv.extend(
+            args.iter()
+                .map(|a| a.replace("{source}", &source).replace("{work}", &work)),
+        );
+
+        let mut cmd = Command::new(bin);
+        cmd.args(&argv)
+            .current_dir(&self.scratch.root)
+            .env("HOME", &self.scratch.home)
+            .env("XDG_DATA_HOME", self.scratch.home.join(".local/share"))
+            .env("STATE_DIRECTORY", self.scratch.home.join("state"))
+            .env_remove("DISKREMENT_HASH_PARALLELISM");
+        match backend {
+            Backend::Simulated => {
+                cmd.env("DISKREMENT_BURNER", "simulated")
+                    .env_remove("DISKREMENT_DEVICE");
+            }
+            Backend::Real { device } => {
+                cmd.env("DISKREMENT_BURNER", "real").env(
+                    "DISKREMENT_DEVICE",
+                    device.replace("{source}", &source).replace("{work}", &work),
+                );
+            }
+        }
+        match self.disc_bytes {
+            Some(n) => {
+                cmd.env("DISKREMENT_DISC_BYTES", n.to_string());
+            }
+            None => {
+                cmd.env_remove("DISKREMENT_DISC_BYTES");
+            }
+        }
+        let out = cmd
+            .output()
+            .map_err(|e| Skip(format!("spawning {}: {e}", bin.display())))?;
+        Ok(StepOutcome {
+            label: label.to_string(),
+            which,
+            argv,
+            // A signal-killed child has no code; -1 is not a valid exit
+            // code, so it can never collide with a real one.
+            exit: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            expect,
+        })
+    }
+}
+
+/// Run one scenario end to end.
+///
+/// Returns `Skip` — never a panic — when the environment cannot support the
+/// run, so the caller can report it as a skip with its reason.
+pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcome, Skip> {
+    preflight(bins, scenario, mode)?;
+    let mut session = Session::open(bins, scenario.disc_bytes)?;
+    let mut steps = Vec::new();
+    for step in &scenario.steps {
+        // Read the index *before* applying: `apply` advances it, and the
+        // binary for step N is chosen by the count of commands before it.
+        let which = mode.which(session.command_index());
+        if let Some(outcome) = session.apply(step, which)? {
+            steps.push(outcome);
+        }
+    }
     Ok(RunOutcome {
         scenario: scenario.name.clone(),
         mode,
         steps,
-        scratch,
+        scratch: session.into_scratch(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scenario::write;
+
+    #[test]
+    fn a_session_counts_only_command_steps() {
+        // The sweep asks a session which command index comes next, so that it
+        // can choose the binary the way `run` does. Tree mutations must not
+        // advance it, or inserting a file write would shift the alternation.
+        let bins = Binaries {
+            scala: PathBuf::from("/nonexistent/scala"),
+            rust: None,
+        };
+        let Ok(mut session) = Session::open(&bins, None) else {
+            // No CoW temp dir here; the differential suite reports that
+            // loudly, and this unit test simply has nothing to check.
+            return;
+        };
+        assert_eq!(session.command_index(), 0);
+        session
+            .apply(&write("a.bin", 8), Which::Scala)
+            .expect("a tree mutation needs no binary");
+        assert_eq!(session.command_index(), 0);
+        assert!(session.scratch().source.join("a.bin").is_file());
+    }
 
     #[test]
     fn a_missing_scala_binary_skips_with_the_fix_in_the_message() {
