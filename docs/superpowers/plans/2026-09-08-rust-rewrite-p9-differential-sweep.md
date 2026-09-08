@@ -2778,9 +2778,36 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
   insurance, not a fix for a silent failure. Numbers, not a guess: the plan
   asked for a measurement and this is it. — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
-- (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
-  numbered counterexample list, or an explicit statement that the run found
-  none.
+- (Task 9) **The wide run found nothing.** Stated explicitly, per this plan's
+  own bar, so a later reader can tell "found nothing" from "was never run":
+
+  `PROPTEST_CASES=500`, release Rust binary, staged Scala launcher,
+  `TMPDIR=/tmp` (btrfs), 12 cores — **500 case(s) agreed across all three
+  modes, 500 executed, 3358s (56 minutes)**, no skips. Coverage as reported by
+  the run, issued with refusals in brackets:
+
+  ```
+  burn 271 (98 refused), disc 135 (125 refused), history 117 (66 refused),
+  init 518 (42 refused), plan 445 (85 refused), reset 209 (62 refused),
+  scan 547, status 206 (71 refused), verify 263 (110 refused)
+  ```
+
+  That is 173 successful burns and 10 successful `disc mark-dead`s across 500
+  generated sequences — the run reached the states the phase exists to test,
+  which is the claim the coverage line was added to make checkable.
+
+  Zero counterexamples means zero fixes and zero promotions to `corpus::all()`.
+  The §9 bar reads "every shrunk counterexample is either fixed or promoted";
+  with none produced, it is satisfied vacuously, and the honest way to record
+  that is to say so rather than to leave the section blank.
+
+  **Why this is credible rather than a harness that cannot fail:** the sweep was
+  independently shown to go red. Disabling `normalize.rs`'s scratch-root rule
+  makes the three worlds' temp paths differ, and the run then fails at step 0,
+  names the diverging step and both sides, prints the counterexample as
+  paste-ready source, and correctly reports the divergence as a harness defect
+  rather than a porting bug. `PROPTEST_CASES=0` fails on the "no sequence ran"
+  assertion. Both were verified during the phase, not assumed.
 
 ---
 
