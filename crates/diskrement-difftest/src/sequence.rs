@@ -35,10 +35,13 @@ use crate::runner::PROJECT;
 /// supersede a version and leave a tombstone while keeping the model small.
 pub const FILES: &[&str] = &["a.bin", "b.bin", "nested/c.bin", "deep/x/d.bin"];
 
-/// Payload sizes. `3000` exceeds the smallest generated capacity on its own, so
-/// the oversize path — `plan` lists it and succeeds, `burn` refuses with exit
-/// 3 — is reachable by generation rather than only by hand.
-pub const SIZES: &[usize] = &[120, 400, 800, 3000];
+/// Payload sizes. All smaller than the smallest generated capacity, on
+/// purpose: an oversized file is never committed, so it makes every later
+/// `burn` exit 3 until something deletes it, and a sequence that writes one
+/// early is dead for the rest of its length. The oversize path is worth
+/// testing and is covered deliberately, by `corpus::plan_oversize` and
+/// `corpus::burn_errors`, rather than by poisoning generated sequences.
+pub const SIZES: &[usize] = &[120, 400, 800];
 
 /// `DISKREMENT_DISC_BYTES` values, most constrained first.
 ///
@@ -52,6 +55,12 @@ pub const UNKNOWN_PROJECT: &str = "nosuch";
 
 /// A path no generated `write` ever creates.
 pub const UNKNOWN_PATH: &str = "nope.bin";
+
+/// The sequence length Task 6's sweep generates. Lives here, not in the
+/// sweep, so the reachability test below measures the real distribution
+/// rather than a long-walk approximation of it, and so the sweep and this
+/// module share one source instead of two numbers that can drift apart.
+pub const MAX_LEN: usize = 12;
 
 /// One generated step.
 ///
@@ -160,59 +169,102 @@ impl Model {
         self.versions.get(rel_path).map_or(0, |v| v + 1)
     }
 
-    /// Ops that should succeed, or at least be refused for a reason the model
-    /// does not know about. **Never empty**, and ordered so that index 0 is the
-    /// simplest useful op in this state — proptest shrinks the chooser byte
-    /// toward zero.
-    pub fn legal_ops(&self, payload: u8) -> Vec<Op> {
-        let mut ops = Vec::new();
+    /// The op that moves the project's lifecycle forward from here.
+    ///
+    /// Index 0 of the command list, and the chooser is biased toward it,
+    /// because a burn needs `init → scan → plan → burn` in order and a
+    /// uniform chooser essentially never produces that inside a dozen steps.
+    fn advancing_op(&self) -> Op {
         if !self.initialised {
-            ops.push(Op::Init);
+            Op::Init
+        } else if !self.staged_scan {
+            Op::Scan { project: PROJECT }
+        } else if !self.staged_plan {
+            Op::Plan {
+                project: PROJECT,
+                finalize: false,
+                disc_type: None,
+            }
+        } else if self.snapshot {
+            Op::Burn { project: PROJECT }
         } else {
-            ops.push(Op::Scan { project: PROJECT });
+            // A plan staged but no snapshot means `reset` intervened; a fresh
+            // scan is what makes `burn` possible again.
+            Op::Scan { project: PROJECT }
+        }
+    }
+
+    /// Command ops that should succeed, or at least be refused for a reason
+    /// the model does not know about — everything except the tree mutations,
+    /// which `tree_ops` generates separately so they cannot crowd this list
+    /// out. **Never empty**: index 0 is always `advancing_op`, and `interpret`
+    /// biases the chooser toward it.
+    ///
+    /// Ordered lifecycle-first — `Scan`, `Plan`, `Burn` before the
+    /// inspection ops — with `Reset` last, so that shrinking a failing case
+    /// strips noise (status, verify, history) before it strips the
+    /// structural ops a reproduced sequence still needs.
+    pub fn legal_commands(&self) -> Vec<Op> {
+        let advancing = self.advancing_op();
+        let mut ops = vec![advancing.clone()];
+        let mut rest = Vec::new();
+        if self.initialised {
+            rest.push(Op::Scan { project: PROJECT });
             if self.staged_scan {
-                ops.push(Op::Plan {
+                rest.push(Op::Plan {
                     project: PROJECT,
                     finalize: false,
                     disc_type: None,
                 });
-                ops.push(Op::Plan {
+                rest.push(Op::Plan {
                     project: PROJECT,
                     finalize: true,
                     disc_type: None,
                 });
-                ops.push(Op::Plan {
+                rest.push(Op::Plan {
                     project: PROJECT,
                     finalize: false,
                     disc_type: Some("DVD"),
                 });
             }
             if self.staged_plan && self.snapshot {
-                ops.push(Op::Burn { project: PROJECT });
+                rest.push(Op::Burn { project: PROJECT });
             }
-            ops.push(Op::Status { project: PROJECT });
-            ops.push(Op::Verify {
+            rest.push(Op::Status { project: PROJECT });
+            rest.push(Op::Verify {
                 project: PROJECT,
                 disc: None,
             });
             for ordinal in self.live_discs() {
-                ops.push(Op::Verify {
+                rest.push(Op::Verify {
                     project: PROJECT,
                     disc: Some(i64::from(ordinal)),
                 });
-                ops.push(Op::MarkDead {
+                rest.push(Op::MarkDead {
                     project: PROJECT,
                     ordinal,
                 });
             }
             for path in self.known_paths.iter().copied() {
-                ops.push(Op::History {
+                rest.push(Op::History {
                     project: PROJECT,
                     path,
                 });
             }
-            ops.push(Op::Reset { project: PROJECT });
+            rest.push(Op::Reset { project: PROJECT });
         }
+        rest.retain(|o| *o != advancing);
+        ops.extend(rest);
+        ops
+    }
+
+    /// The four `Write`s (one per `FILES` entry, each superseding its current
+    /// version) plus one `Delete` per file the model believes is live.
+    /// **Never empty**: `FILES` always contributes at least one `Write`, so
+    /// this list cannot be starved the way it used to starve `legal_commands`
+    /// — see the module doc and `interpret`.
+    pub fn tree_ops(&self, payload: u8) -> Vec<Op> {
+        let mut ops = Vec::new();
         let size = SIZES[payload as usize % SIZES.len()];
         // `.copied()` throughout: iterating `&[&str]` or `&BTreeSet<&str>`
         // yields `&&'static str`, and the op fields are `&'static str`.
@@ -229,7 +281,10 @@ impl Model {
         ops
     }
 
-    /// Ops the model expects to be refused. **Never empty.**
+    /// Ops the model expects to be refused, or answered with a not-found
+    /// sentence. **Never empty**: it opens with a seven-element literal
+    /// (below) that this function only ever pushes onto, so it cannot become
+    /// empty regardless of state.
     ///
     /// These are as valuable as the legal ones: the oracle is agreement, not
     /// success, and error wording plus the exit-code ladder are both contract
@@ -318,13 +373,27 @@ impl Model {
     /// rather than 0 deliberately: proptest shrinks bytes toward zero, and a
     /// shrunk sequence should be a *legal* one.
     pub fn interpret(&self, selector: u8, chooser: u8, payload: u8) -> Op {
-        let ops = if selector % 5 == 4 {
-            self.illegal_ops()
-        } else {
-            self.legal_ops(payload)
+        // One residue in five for deliberate illegal noise, one for tree
+        // mutations, three for commands. Tree ops used to share the legal
+        // list, where they outnumbered the command ops and starved the
+        // lifecycle: measured, 0.8% of sequences at the sweep's length
+        // reached a single burn and 0.001% reached two, so spills,
+        // supersessions and coasters were unreachable in practice.
+        let (ops, bias_to_first) = match selector % 5 {
+            4 => (self.illegal_ops(), false),
+            3 => (self.tree_ops(payload), false),
+            _ => (self.legal_commands(), true),
         };
         debug_assert!(!ops.is_empty(), "no op is available in state {self:?}");
-        ops[chooser as usize % ops.len()].clone()
+        // Half the chooser range goes to index 0 — the op that advances the
+        // lifecycle. Shrinking is unaffected: chooser 0 still selects index 0
+        // on every branch.
+        let index = if bias_to_first && chooser < 128 {
+            0
+        } else {
+            chooser as usize % ops.len()
+        };
+        ops[index].clone()
     }
 
     /// Advance the model past `op`.
@@ -334,6 +403,13 @@ impl Model {
     /// Every guess here may be wrong without consequence except the `live` set
     /// — see the module doc.
     pub fn apply(&mut self, op: &Op) {
+        // An op aimed at another project fails at the project lookup before
+        // it touches anything, so it cannot move the model. Ops with no
+        // project (`Write`, `Delete`, `Init`) fall through: `project()` is
+        // `None` for them, and `None.is_some_and(..)` is `false`.
+        if op.project().is_some_and(|p| p != PROJECT) {
+            return;
+        }
         match op {
             Op::Write {
                 rel_path, version, ..
@@ -345,16 +421,16 @@ impl Model {
                 self.live.remove(*rel_path);
             }
             Op::Init => self.initialised = true,
-            Op::Scan { project } if *project == PROJECT => {
+            Op::Scan { .. } => {
                 self.staged_scan = true;
                 self.snapshot = true;
             }
-            Op::Plan { project, .. } if *project == PROJECT && self.staged_scan => {
+            Op::Plan { .. } if self.staged_scan => {
                 // `plan` does not consume the staged scan (`mod.rs:196`), so
                 // re-planning stays legal and idempotent.
                 self.staged_plan = true;
             }
-            Op::Burn { project } if *project == PROJECT && self.staged_plan && self.snapshot => {
+            Op::Burn { .. } if self.staged_plan && self.snapshot => {
                 self.burned_discs += 1;
                 self.staged_scan = false;
                 self.staged_plan = false;
@@ -362,14 +438,12 @@ impl Model {
                 let live: Vec<&'static str> = self.live.iter().copied().collect();
                 self.known_paths.extend(live);
             }
-            Op::Reset { project } if *project == PROJECT => {
+            Op::Reset { .. } => {
                 self.staged_scan = false;
                 self.staged_plan = false;
                 self.snapshot = false;
             }
-            Op::MarkDead { project, ordinal }
-                if *project == PROJECT && *ordinal <= self.burned_discs =>
-            {
+            Op::MarkDead { ordinal, .. } if *ordinal <= self.burned_discs => {
                 self.dead.insert(*ordinal);
             }
             _ => {}
@@ -411,50 +485,109 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_model_offers_only_init_and_writes() {
+    fn a_fresh_model_offers_only_init_as_a_command() {
         let model = Model::default();
-        let legal = model.legal_ops(0);
-        assert_eq!(legal[0], Op::Init, "shrinking lands on the first entry");
-        assert!(
-            legal
-                .iter()
-                .all(|o| matches!(o, Op::Init | Op::Write { .. })),
-            "nothing else is legal before init: {legal:?}"
+        assert_eq!(
+            model.legal_commands(),
+            vec![Op::Init],
+            "nothing else is legal before init"
         );
+        let tree = model.tree_ops(0);
+        assert!(
+            tree.iter().all(|o| matches!(o, Op::Write { .. })),
+            "no deletes before anything is written: {tree:?}"
+        );
+        assert_eq!(tree.len(), FILES.len());
     }
 
     #[test]
     fn shrinking_toward_zero_lands_on_the_core_cycle() {
         // proptest shrinks each byte toward 0, so (0, 0, 0) must be the
-        // simplest useful op in every state: `init` before initialisation and
-        // `scan` after it. A shrunk counterexample is then a short, legal,
-        // early-command sequence.
+        // simplest useful op in every state along the happy path — and now
+        // that index 0 is `advancing_op` rather than always `Scan`, it must
+        // walk the *whole* cycle: init, scan, plan, burn, in order. A shrunk
+        // counterexample is then a short, legal sequence that actually
+        // reaches a burn.
         let mut model = Model::default();
-        assert_eq!(model.interpret(0, 0, 0), Op::Init);
-        model.apply(&Op::Init);
-        assert_eq!(model.interpret(0, 0, 0), Op::Scan { project: PROJECT });
-    }
-
-    #[test]
-    fn neither_op_list_is_ever_empty() {
-        // `interpret` indexes with `% len()`, so an empty list would panic.
-        let mut model = Model::default();
-        for op in walk(1, 400) {
-            assert!(
-                !model.legal_ops(0).is_empty(),
-                "legal list empty at {model:?}"
-            );
-            assert!(
-                !model.illegal_ops().is_empty(),
-                "illegal list empty at {model:?}"
-            );
+        for expected in [
+            Op::Init,
+            Op::Scan { project: PROJECT },
+            Op::Plan {
+                project: PROJECT,
+                finalize: false,
+                disc_type: None,
+            },
+            Op::Burn { project: PROJECT },
+        ] {
+            let op = model.interpret(0, 0, 0);
+            assert_eq!(op, expected);
             model.apply(&op);
         }
     }
 
     #[test]
-    fn interpretation_is_deterministic() {
-        assert_eq!(walk(7, 200), walk(7, 200));
+    fn no_op_list_is_ever_empty() {
+        // `interpret` indexes with `% len()`, so an empty list would panic.
+        // `illegal_ops` opens with a seven-element literal and only ever
+        // pushes onto it (see its doc), so that half cannot fail by
+        // construction; this pins the two halves that can, at every state
+        // the walk visits *and* at the final state, which the loop-then-apply
+        // shape below would otherwise never check.
+        let mut model = Model::default();
+        let assert_nonempty = |model: &Model| {
+            assert!(
+                !model.legal_commands().is_empty(),
+                "legal_commands empty at {model:?}"
+            );
+            assert!(!model.tree_ops(0).is_empty(), "tree_ops empty at {model:?}");
+            assert!(
+                !model.illegal_ops().is_empty(),
+                "illegal_ops empty at {model:?}"
+            );
+        };
+        for op in walk(1, 400) {
+            assert_nonempty(&model);
+            model.apply(&op);
+        }
+        assert_nonempty(&model);
+    }
+
+    #[test]
+    fn interpretation_is_a_golden_sequence() {
+        // A pure function equalling itself twice would not catch a swap from
+        // `BTreeSet` to `HashSet`: within one process a `HashSet` iterates
+        // identically run to run, and only cross-process reproducibility
+        // would break. Pinning a literal output instead catches that, and
+        // gives the file its only example of what generated output looks
+        // like.
+        assert_eq!(
+            walk(7, 8),
+            vec![
+                Op::Status {
+                    project: UNKNOWN_PROJECT
+                },
+                Op::Init,
+                Op::Scan { project: PROJECT },
+                Op::Write {
+                    rel_path: "deep/x/d.bin",
+                    version: 0,
+                    size: 800
+                },
+                Op::Verify {
+                    project: UNKNOWN_PROJECT,
+                    disc: None
+                },
+                Op::Scan { project: PROJECT },
+                Op::Reset {
+                    project: UNKNOWN_PROJECT
+                },
+                Op::Plan {
+                    project: PROJECT,
+                    finalize: false,
+                    disc_type: None
+                },
+            ]
+        );
     }
 
     #[test]
@@ -515,6 +648,69 @@ mod tests {
             (0.12..0.30).contains(&ratio),
             "illegal ops are {ratio:.3} of the sequence; the selector reserves \
              one residue in five for them"
+        );
+    }
+
+    #[test]
+    fn generation_reaches_the_states_the_model_exists_for() {
+        // The model exists to steer into burns, spills, supersessions and
+        // coasters. Nothing else in this file would notice if it stopped —
+        // the sweep would simply pass, having exercised nothing the corpus
+        // does not already cover. Measured at the length the sweep actually
+        // generates, so this is the real distribution and not a long-walk
+        // approximation of it.
+        const CASES: usize = 2000;
+        let (mut burned, mut twice, mut dead, mut superseded) = (0, 0, 0, 0);
+        for seed in 0..CASES as u64 {
+            let mut lcg = Lcg(seed);
+            let mut model = Model::default();
+            let len = 1 + (lcg.next() as usize % MAX_LEN);
+            let mut burns_seen = 0;
+            let mut superseded_here = false;
+            for _ in 0..len {
+                let op = model.interpret(lcg.next(), lcg.next(), lcg.next());
+                let before = model.burned_discs;
+                model.apply(&op);
+                if model.burned_discs > before {
+                    burns_seen += 1;
+                }
+                if burns_seen > 0 && matches!(op, Op::Write { version, .. } if version >= 1) {
+                    superseded_here = true;
+                }
+            }
+            if burns_seen >= 1 {
+                burned += 1;
+            }
+            if burns_seen >= 2 {
+                twice += 1;
+            }
+            if !model.dead.is_empty() {
+                dead += 1;
+            }
+            if superseded_here {
+                superseded += 1;
+            }
+        }
+        let share = |n: usize| n as f64 / CASES as f64;
+        assert!(
+            share(burned) > 0.15,
+            "burn reached in {:.3} of sequences",
+            share(burned)
+        );
+        assert!(
+            share(twice) > 0.01,
+            "two burns reached in {:.3}",
+            share(twice)
+        );
+        assert!(
+            share(dead) > 0.01,
+            "a dead disc reached in {:.3}",
+            share(dead)
+        );
+        assert!(
+            share(superseded) > 0.005,
+            "a post-burn supersede reached in {:.3}",
+            share(superseded)
         );
     }
 }
