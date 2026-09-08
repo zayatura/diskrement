@@ -1,4 +1,5 @@
-//! What a finished run left behind, and whether two runs left the same thing.
+//! What a run has left behind — at the end, or between two commands — and
+//! whether two runs left the same thing.
 //!
 //! Comparison rules are spec §4's, unchanged and deliberately not re-derived:
 //! catalog and scancache **logically** (row dumps, never bytes, because SQLite
@@ -32,7 +33,7 @@ pub struct StepSnapshot {
 ///
 /// Split out of `Snapshot` because the sweep captures it *between* commands,
 /// where no `RunOutcome` exists yet.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct StateSnapshot {
     pub catalog: Vec<String>,
     pub scancache: Vec<String>,
@@ -139,6 +140,11 @@ pub fn step_snapshot(step: &StepOutcome, norm: &mut Normalizer) -> StepSnapshot 
 /// that is complete only once the writing process has exited and SQLite has
 /// checkpointed. Between two command invocations, which is where the sweep
 /// calls it, that always holds.
+///
+/// SQLite drops the `-wal` when the last connection closes, so a cleanly
+/// exited child leaves a complete main file; a killed one does not. Violating
+/// this is silent — you read a stale database and report a difference that is
+/// not there, or miss one that is.
 ///
 /// Takes the run's own `Normalizer` so that instant ordinals stay consistent
 /// across every value the run produces.
@@ -275,9 +281,14 @@ fn diff_maps<T: PartialEq + std::fmt::Debug>(
     }
 }
 
-/// Every way one step's outcome disagrees. `index` names the step in the
-/// message, so the caller decides whether that is a position in a scenario or
-/// a position in a generated sequence.
+/// Every way one step's outcome disagrees. `index` only names the step in the
+/// message, and the two callers number on different bases: `differences`
+/// passes a position in `RunOutcome.steps`, which holds command outcomes only,
+/// while the sweep passes a position in the generated `Scenario.steps`, which
+/// also counts `write`/`delete` — so the number lines up with the line the
+/// counterexample prints. Neither is wrong for its own report, so the number is
+/// the caller's to choose; just never compare a `step N` from one against a
+/// `step N` from the other.
 pub fn step_differences(index: usize, a: &StepSnapshot, b: &StepSnapshot, out: &mut Vec<String>) {
     if a.exit != b.exit {
         out.push(format!(
@@ -396,18 +407,21 @@ mod tests {
     #[test]
     fn state_differences_compare_without_a_finished_run() {
         // The sweep diffs between commands, where there is no RunOutcome yet —
-        // only a live scratch tree. So the state half has to stand alone.
-        let mut out = Vec::new();
+        // only a live scratch tree, so the state half has to stand alone. It
+        // also has to *append*: the sweep pushes step diffs and then state
+        // diffs into one vector, so an implementation that replaced the
+        // accumulator would break it while every other test still passed.
+        let mut out = vec!["pre-existing".to_string()];
         state_differences(
             &state(&["disc: id=1 status=\"OPEN\""]),
             &state(&["disc: id=1 status=\"FINALIZED\""]),
             &mut out,
         );
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 2, "must append, not replace: {out:?}");
         assert!(
-            out[0].contains("OPEN") && out[0].contains("FINALIZED"),
+            out[1].contains("catalog") && out[1].contains("OPEN") && out[1].contains("FINALIZED"),
             "{}",
-            out[0]
+            out[1]
         );
     }
 
@@ -423,13 +437,14 @@ mod tests {
             exit: 0,
             stdout: Some("Scanned: 2 added".into()),
         };
-        let mut out = Vec::new();
+        // Also pins append-not-replace semantics — see the state-half test above.
+        let mut out = vec!["pre-existing".to_string()];
         step_differences(0, &a, &b, &mut out);
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 2, "must append, not replace: {out:?}");
         assert!(
-            out[0].contains("1 added") && out[0].contains("2 added"),
+            out[1].contains("1 added") && out[1].contains("2 added"),
             "{}",
-            out[0]
+            out[1]
         );
     }
 }
