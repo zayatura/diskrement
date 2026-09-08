@@ -301,6 +301,7 @@ pub fn preflight(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<(),
 /// that looks like a porting bug.
 pub struct Session<'a> {
     bins: &'a Binaries,
+    mode: Mode,
     disc_bytes: Option<u64>,
     scratch: Scratch,
     write_index: u32,
@@ -309,9 +310,13 @@ pub struct Session<'a> {
 
 impl<'a> Session<'a> {
     /// Create the scratch tree. `Skip` when this machine cannot host one.
-    pub fn open(bins: &'a Binaries, disc_bytes: Option<u64>) -> Result<Self, Skip> {
+    ///
+    /// A `mode` that needs the Rust binary requires `preflight` to have passed
+    /// first: `invoke` panics rather than skipping when that binary is absent.
+    pub fn open(bins: &'a Binaries, mode: Mode, disc_bytes: Option<u64>) -> Result<Self, Skip> {
         Ok(Session {
             bins,
+            mode,
             disc_bytes,
             scratch: scratch()?,
             write_index: 0,
@@ -319,8 +324,16 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// Borrow the scratch tree mid-run, for a snapshot taken between commands.
+    /// Use `into_scratch` at the end, when the tree must outlive the session.
     pub fn scratch(&self) -> &Scratch {
         &self.scratch
+    }
+
+    /// The mode every command step is dispatched under, so a caller reporting a
+    /// difference can label it without keeping a second copy.
+    pub fn mode(&self) -> Mode {
+        self.mode
     }
 
     /// How many command steps have been applied. `Mode::which` takes this.
@@ -334,7 +347,11 @@ impl<'a> Session<'a> {
     }
 
     /// Apply one step. `Ok(None)` for a tree mutation, which runs no binary.
-    pub fn apply(&mut self, step: &Step, which: Which) -> Result<Option<StepOutcome>, Skip> {
+    ///
+    /// Advances the command index for command steps only, so a file write
+    /// between two commands never shifts the alternation. The binary is chosen
+    /// from this session's mode and the count of commands *before* this one.
+    pub fn apply(&mut self, step: &Step) -> Result<Option<StepOutcome>, Skip> {
         match step {
             Step::Write {
                 rel_path,
@@ -367,6 +384,12 @@ impl<'a> Session<'a> {
                 expect,
                 backend,
             } => {
+                // Read before the increment: the binary for a command is
+                // chosen by the count of commands *before* it, so deriving
+                // `which` afterwards would still alternate but start the
+                // interleave with Scala — and stop exercising the Rust→Scala
+                // direction, the one the frozen corpus cannot reach.
+                let which = self.mode.which(self.command_index);
                 self.command_index += 1;
                 Ok(Some(self.invoke(label, args, *expect, backend, which)?))
             }
@@ -387,7 +410,11 @@ impl<'a> Session<'a> {
             Which::Scala => &self.bins.scala,
             // Checked by `preflight`: a Rust mode returns Skip before reaching
             // here when the binary is absent.
-            Which::Rust => self.bins.rust.as_ref().expect("checked above"),
+            Which::Rust => self
+                .bins
+                .rust
+                .as_ref()
+                .expect("preflight refuses a Rust mode without the Rust binary"),
         };
         // Scenarios cannot know the scratch path, so they write the
         // placeholders `{source}` and `{work}` and the runner fills
@@ -454,13 +481,10 @@ impl<'a> Session<'a> {
 /// run, so the caller can report it as a skip with its reason.
 pub fn run(bins: &Binaries, scenario: &Scenario, mode: Mode) -> Result<RunOutcome, Skip> {
     preflight(bins, scenario, mode)?;
-    let mut session = Session::open(bins, scenario.disc_bytes)?;
+    let mut session = Session::open(bins, mode, scenario.disc_bytes)?;
     let mut steps = Vec::new();
     for step in &scenario.steps {
-        // Read the index *before* applying: `apply` advances it, and the
-        // binary for step N is chosen by the count of commands before it.
-        let which = mode.which(session.command_index());
-        if let Some(outcome) = session.apply(step, which)? {
+        if let Some(outcome) = session.apply(step)? {
             steps.push(outcome);
         }
     }
@@ -486,17 +510,48 @@ mod tests {
             scala: PathBuf::from("/nonexistent/scala"),
             rust: None,
         };
-        let Ok(mut session) = Session::open(&bins, None) else {
-            // No CoW temp dir here; the differential suite reports that
-            // loudly, and this unit test simply has nothing to check.
-            return;
+        let mut session = match Session::open(&bins, Mode::Scala, None) {
+            Ok(s) => s,
+            // No CoW temp dir here; say so rather than passing silently.
+            Err(Skip(reason)) => return eprintln!("SKIP: {reason}"),
         };
         assert_eq!(session.command_index(), 0);
-        session
-            .apply(&write("a.bin", 8), Which::Scala)
-            .expect("a tree mutation needs no binary");
+        assert!(
+            session
+                .apply(&write("a.bin", 8))
+                .expect("a tree mutation needs no binary")
+                .is_none(),
+            "a tree mutation produces no step outcome"
+        );
         assert_eq!(session.command_index(), 0);
         assert!(session.scratch().source.join("a.bin").is_file());
+    }
+
+    #[test]
+    fn the_interleaved_mode_runs_the_first_command_through_rust() {
+        // Spec §3.1's direction: step 0 must be Rust so that step 1 has Scala
+        // reading what Rust wrote — the direction the frozen corpus cannot
+        // test. `/bin/true` stands in for both binaries; only `which` is
+        // asserted, so nothing here depends on either implementation.
+        let bins = Binaries {
+            scala: PathBuf::from("/bin/true"),
+            rust: Some(PathBuf::from("/bin/true")),
+        };
+        let scenario = Scenario {
+            name: "ordering".into(),
+            disc_bytes: None,
+            steps: vec![
+                crate::scenario::cmd("status p", &["status", "p"]),
+                crate::scenario::cmd("status p", &["status", "p"]),
+            ],
+        };
+        match run(&bins, &scenario, Mode::Interleaved) {
+            Ok(out) => {
+                assert_eq!(out.steps[0].which, Which::Rust);
+                assert_eq!(out.steps[1].which, Which::Scala);
+            }
+            Err(Skip(reason)) => eprintln!("SKIP: {reason}"),
+        }
     }
 
     #[test]
