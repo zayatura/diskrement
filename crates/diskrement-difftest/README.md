@@ -73,16 +73,16 @@ test pins that against a shadow of the filesystem.
 
 ## Extending it
 
-- **New command ported?** Append it to `runner::RUST_IMPLEMENTED` *in the same
-  commit*. Until then, every scenario using it skips with that reason printed.
+- **New command ported?** Two places, both in the same commit. Append it to
+  `runner::RUST_IMPLEMENTED`, or every scenario using it skips with that reason
+  printed; and teach `sequence::Model` about it, or the sweep will never
+  generate it. After the second, check `sequence`'s reachability test still
+  holds — it is what stops the generator drifting into sequences that never
+  reach a burn.
 - **New scenario?** Add it to `corpus::all()`. Never hard-code an expected exit
   code or output line — both binaries run the step and the assertion is that
   they agree, which is why an error-path scenario is safe to add before the
   error is ported.
-- **New command ported, or new argument?** Teach `sequence::Model` about it
-  too, or the sweep will never generate it — and check the reachability test in
-  that module still holds, since it is what stops the generator quietly drifting
-  into sequences that never reach a burn.
 - **A step that needs the real backend?** Use `scenario::cmd_real`, pointing it
   at a path that does not exist. The real burner and verifier both ask the
   operator before opening the device, and a runner-spawned child has no stdin,
