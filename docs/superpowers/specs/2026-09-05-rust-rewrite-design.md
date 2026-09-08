@@ -505,8 +505,45 @@ that sentence.
   implementation of the comparison rules instead of two that drift.
 - `sequence` (P9) — a `proptest` state machine that knows which commands are
   legal in which state (no `plan` without a staged scan, and so on), generating
-  sequences run in interleaved mode. Shrinking is what earns its cost: the
+  sequences run in all three modes. Shrinking is what earns its cost: the
   failure it reports is a minimal reproducing command sequence, not a haystack.
+
+  Four decisions taken when P9 was planned, recorded here because they shape
+  what the sweep proves rather than merely how it is built:
+
+  1. *The model steers; it is not the oracle.* Generation is legal-biased with
+     deliberate illegal noise — roughly a fifth of steps violate the model's own
+     preconditions (`plan` with no staged scan, `verify --disc 99`, a second
+     `init`). Agreement, not success, is the assertion, so an illegal step
+     compares as well as a legal one, and error-path drift is precisely what
+     hand-written scenarios miss by construction. It also means a *bug in the
+     model can never cause a false failure*: if the model calls a command legal
+     and it is not, both binaries reject it identically and the case passes.
+     That is what keeps the model cheap enough to be worth having.
+  2. *Opaque selectors, not state-dependent generation.* proptest produces a
+     length-bounded `Vec<(u8, u8)>` that the model interprets into ops. `Vec`
+     shrinking removes steps and `u8` shrinking biases selectors toward zero —
+     toward shorter, legal, earlier-command sequences — without the generator
+     needing to consult state, which plain `proptest` cannot do. A shrunk value
+     is re-interpreted rather than replayed; that is sound because proptest
+     requires only that the shrunk case still fail.
+  3. *The counterexample is paste-ready source.* The generated value's `Debug`
+     prints the interpreted ops in `corpus.rs` syntax, so promoting a
+     counterexample to a named scenario is a copy, not a transcription. This is
+     what makes §9's "either fixed or promoted" bar cheap enough to hold to.
+  4. *Comparison is step-wise.* `runner::run` splits into a `Session` — scratch
+     tree plus environment — and a per-step apply, with the whole-scenario run
+     kept as a fold over it. The sweep holds all three worlds open at once and
+     diffs state after every command, so a counterexample names the diverging
+     step instead of only the sequence that ends wrong. Each world carries its
+     own `Normalizer`, and all three must be advanced at the same points in the
+     same order, because instant ordinals are first-appearance ordered.
+
+  The sweep is narrow by default (a handful of cases, so it stays runnable
+  after any later change) and widened for the one-time deep run through
+  proptest's own `PROPTEST_CASES`. Failure persistence is off: the promotion
+  path is `corpus::all()`, not a `.proptest-regressions` file in a crate P10
+  deletes.
 
 **Relationship to the corpus.** The corpus stays the default-on regression floor
 because it needs no JVM. The harness is opt-in and needs a staged Scala launcher.
