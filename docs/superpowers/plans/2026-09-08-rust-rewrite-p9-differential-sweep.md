@@ -1111,20 +1111,34 @@ mod tests {
     }
 
     #[test]
-    fn illegal_noise_appears_without_dominating() {
-        // A fifth of the ops come from the illegal list, and unknown-project
-        // ops are about half of that list — so the measured share here is
-        // roughly a tenth. It is a distribution property, not a contract; the
-        // bound is wide enough to fail only if the selector arithmetic broke.
-        let ops = walk(23, 2000);
-        let illegal = ops
-            .iter()
-            .filter(|o| o.project().is_some_and(|p| p == UNKNOWN_PROJECT))
-            .count();
-        let ratio = illegal as f64 / ops.len() as f64;
+    fn illegal_noise_is_about_a_fifth_of_the_sequence() {
+        // Classify each op by membership in the illegal list *at the state it
+        // was emitted from*. That is independent of the selector arithmetic
+        // this is checking, and the two lists are disjoint for any given
+        // state — an op legal there is never also illegal there — so
+        // membership is a sound classifier.
+        //
+        // Deliberately not measured via the unknown-project ops: their share
+        // decays with walk length, because the illegal list grows two entries
+        // per dead disc while the unknown-project entries stay at seven. This
+        // measures the branch itself, so the expected value is the selector's
+        // one-residue-in-five regardless of how long the walk is.
+        let mut lcg = Lcg(23);
+        let mut model = Model::default();
+        let total = 2000usize;
+        let mut illegal = 0usize;
+        for _ in 0..total {
+            let op = model.interpret(lcg.next(), lcg.next(), lcg.next());
+            if model.illegal_ops().contains(&op) {
+                illegal += 1;
+            }
+            model.apply(&op);
+        }
+        let ratio = illegal as f64 / total as f64;
         assert!(
-            (0.05..0.25).contains(&ratio),
-            "unknown-project ops are {ratio:.3} of the sequence"
+            (0.12..0.30).contains(&ratio),
+            "illegal ops are {ratio:.3} of the sequence; the selector reserves \
+             one residue in five for them"
         );
     }
 }
@@ -2633,6 +2647,19 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
   re-typing `runner`'s missing-binary skip message. `preflight` therefore keeps
   one caller in the crate and one in the sweep, rather than being `pub` for a
   consumer that hand-rolled a copy of it.
+- (Task 4) **The noise-ratio test was miscalibrated in the plan and was
+  rewritten.** As planned it measured the *unknown-project* share as a proxy
+  for the illegal-branch share, but the proxy decays with walk length: the
+  illegal list grows two entries per dead disc while the unknown-project
+  entries stay at seven. At the test's 2000 steps the measured share was 0.0525
+  against a floor of 0.05, and only about half of 200 seeds cleared it — a
+  flake waiting to happen, whose comment also overclaimed: swapping
+  `% 5 == 4` for `% 5 == 0` leaves that distribution unchanged, so it never
+  guarded the selector arithmetic at all (`shrinking_toward_zero_lands_on_the
+  _core_cycle` does). It now classifies each emitted op by membership in
+  `illegal_ops()` at the state it came from, which is the branch itself and is
+  length-independent at ≈0.20. The classifier is sound because the two lists
+  are disjoint in any given state.
 - (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
 - (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
