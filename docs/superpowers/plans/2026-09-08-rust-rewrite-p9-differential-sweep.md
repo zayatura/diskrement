@@ -2702,6 +2702,14 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
   than over long walks, because the long-walk figures flattered the real
   distribution by an order of magnitude. `MAX_LEN` moved into `sequence` so the
   test and the strategy share one source.
+- (Task 4) The reachability fix was independently re-measured three ways —
+  a splitmix64 RNG, proptest's real strategy, and the committed test's own
+  LCG — over 50 000–200 000 cases each: burn 30.2 / 30.5 / 29.8 %, dead
+  2.77 / 2.72 / 2.82 %. Writes fell from 46 % to 17.9 % of all ops, and
+  sequences that never emit `init` from 20 % to 5.5 %. The reachability test
+  also gained a write-share assertion, because the reached-state thresholds
+  alone still pass when the residue split is reverted; the write share goes
+  0.18 → 0.32 and now fails.
 - (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
 - (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
