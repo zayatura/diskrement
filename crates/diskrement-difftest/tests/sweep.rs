@@ -41,7 +41,15 @@ use diskrement_difftest::sequence::MAX_LEN;
 /// generated command, so the default has to stay something you run after a
 /// change rather than something you schedule. `PROPTEST_CASES=500` is the
 /// one-time wide run (§9: "run wide once and narrow thereafter").
-const DEFAULT_CASES: u32 = 8;
+///
+/// Measured on a 12-core machine: 8 cases took 48s and 12 took 76s, against
+/// the corpus suite's 282s that runs beside it — so 12 costs 27% of what is
+/// already being spent, comfortably inside the "no more than about half"
+/// budget. The extra four cases buy down the chance of a run that touches no
+/// burn at all: at the generator's measured ~30% burn rate that is one run in
+/// 17 at eight cases and one in 70 at twelve. The coverage line reports the
+/// difference either way, so this is bought insurance rather than a fix.
+const DEFAULT_CASES: u32 = 12;
 
 /// Shrink attempts before proptest reports the smallest failure it found.
 ///

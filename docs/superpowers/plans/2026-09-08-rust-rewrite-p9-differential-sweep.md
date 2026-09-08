@@ -2763,7 +2763,20 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
 - (Task 6) Plan-staging flaw, no code impact: Step 1's file does not compile on
   its own — its import block names items only Steps 3–4 use, and
   `unused_imports` is an error in this workspace.
-- (Task 7) Measured budget: **TO BE FILLED IN** — default-run wall-clock, whole
+- (Task 7) **Measured budget**, on a 12-core machine, `TMPDIR=/tmp` (btrfs):
+  the corpus differential suite **281.5s** (13/13/13, 0 skipped); the sweep at
+  the planned 8 cases **47.9s**; the whole `--ignored` suite **5m29.8s**. The
+  sweep at 8 cases was 17% of the corpus suite — well inside the "no more than
+  about half" target, so there was headroom to spend. Re-measured at 12 cases:
+  **76.4s**, or 27%, still inside it, exercising all nine commands with three
+  successful burns. `DEFAULT_CASES` is therefore **12**, not 8.
+
+  What the extra four cases buy: at the generator's measured ~30% burn rate, a
+  run that touches no burn at all is one in 17 at eight cases and one in 70 at
+  twelve. That risk is now *reported* either way — the coverage line names what
+  was exercised and a warning fires when no burn succeeded — so this is bought
+  insurance, not a fix for a silent failure. Numbers, not a guess: the plan
+  asked for a measurement and this is it. — default-run wall-clock, whole
   `--ignored` suite wall-clock, `nproc`, chosen `DEFAULT_CASES` and why.
 - (Task 9) Wide run: **TO BE FILLED IN** — case counts, wall-clock, and the
   numbered counterexample list, or an explicit statement that the run found
