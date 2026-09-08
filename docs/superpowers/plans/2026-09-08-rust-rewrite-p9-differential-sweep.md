@@ -2801,6 +2801,19 @@ than left in commit messages (CLAUDE.md, "In-flight work").*
   with none produced, it is satisfied vacuously, and the honest way to record
   that is to say so rather than to leave the section blank.
 
+  **A second wide pass was attempted and could not be run here.** Three tries —
+  1000 cases twice and 300 once — were killed by the host's memory guard, not
+  by any test failure. The first was self-inflicted (run alongside the corpus
+  suite); the other two ran alone and were still killed, because this machine
+  carries unrelated long-running workloads and had no free memory during the
+  attempts. Nothing in the sweep leaks: the killed runs left only nine scratch
+  trees totalling 756K, and no stray JVM survived them. So the recorded
+  evidence is one clean 500-case pass rather than the two the plan hoped for.
+  §9's bar asks for a clean wide run, which is met; the second pass at a
+  different count was this plan's own optional confirmation and remains
+  outstanding. It is worth re-running on a quieter machine before P10's parity
+  gate, and that is the honest state of it.
+
   **Why this is credible rather than a harness that cannot fail:** the sweep was
   independently shown to go red. Disabling `normalize.rs`'s scratch-root rule
   makes the three worlds' temp paths differ, and the run then fails at step 0,
