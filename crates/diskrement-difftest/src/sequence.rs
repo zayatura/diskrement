@@ -188,8 +188,9 @@ impl Model {
         } else if self.snapshot {
             Op::Burn { project: PROJECT }
         } else {
-            // A plan staged but no snapshot means `reset` intervened; a fresh
-            // scan is what makes `burn` possible again.
+            // Unreachable: `staged_scan == snapshot` in every reachable state,
+            // because `scan` sets both and `burn` and `reset` clear both. Kept
+            // so the match is total rather than because the state occurs.
             Op::Scan { project: PROJECT }
         }
     }
@@ -659,8 +660,18 @@ mod tests {
         // does not already cover. Measured at the length the sweep actually
         // generates, so this is the real distribution and not a long-walk
         // approximation of it.
+        //
+        // Two honest limits. This measures the *model's* belief that a burn
+        // happened, not the binaries' — a model whose burn precondition drifts
+        // from `pipeline::mod` would satisfy this while the real sweep burned
+        // nothing, and only the differential suite would notice. And the write
+        // share is asserted alongside the reached states because the residue
+        // split's real contribution is the op mix: without it the mix nearly
+        // doubles in writes while the reached-state thresholds still scrape
+        // through.
         const CASES: usize = 2000;
         let (mut burned, mut twice, mut dead, mut superseded) = (0, 0, 0, 0);
+        let (mut writes, mut ops_total) = (0usize, 0usize);
         for seed in 0..CASES as u64 {
             let mut lcg = Lcg(seed);
             let mut model = Model::default();
@@ -669,6 +680,10 @@ mod tests {
             let mut superseded_here = false;
             for _ in 0..len {
                 let op = model.interpret(lcg.next(), lcg.next(), lcg.next());
+                ops_total += 1;
+                if matches!(op, Op::Write { .. }) {
+                    writes += 1;
+                }
                 let before = model.burned_discs;
                 model.apply(&op);
                 if model.burned_discs > before {
@@ -711,6 +726,15 @@ mod tests {
             share(superseded) > 0.005,
             "a post-burn supersede reached in {:.3}",
             share(superseded)
+        );
+        // Guards the residue split specifically: folding the tree ops back
+        // into the command list takes this from ~0.18 to ~0.32, while the
+        // thresholds above would still pass.
+        let write_share = writes as f64 / ops_total as f64;
+        assert!(
+            write_share < 0.25,
+            "writes are {write_share:.3} of generated ops; tree mutations have \
+             their own selector residue so they cannot crowd out the commands"
         );
     }
 }
