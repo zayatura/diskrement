@@ -608,6 +608,45 @@ fix or a scenario worth naming — work whose size cannot be known before it run
 and which should not be discovered while also rewriting the docs and swapping
 branches.
 
+Five decisions taken when P10 was planned, recorded here because they change
+what the phase does rather than merely how it is built:
+
+1. *The gate moves earlier than §10 puts it, and there are two.* §10 gates only
+   the branch swap, leaving the deletion authorized by the plan's own approval.
+   P10 instead splits into a parity half — the ported scenarios, the perf
+   comparison, the full sweep, the smoke run — and a cutover half, with an
+   explicit confirmation between them, and keeps §10's second confirmation
+   before `main` and `origin` are touched. Two irreversible steps, two
+   confirmations. Nothing is deleted while the evidence that authorizes the
+   deletion is still being gathered.
+2. *The perf comparison is an A/B, not a lookup.* Both binaries still exist in
+   the parity half, and `perf-baseline.txt`'s tree recipe is idempotent, so the
+   Rust run and a fresh Scala run happen back to back against one regenerated
+   tree on one host. The P0 record becomes a drift check rather than the
+   comparand — it was taken on a different day under a different page-cache
+   state, and §11's own caveat about short runs applies to it.
+3. *The wide sweep is chunked.* P9's second wide pass was killed three times by
+   this host's memory guard, never by a failure. P10 runs five sequential
+   `PROPTEST_CASES=200` invocations instead of one large one: failure
+   persistence is off, so each picks fresh seeds and the union is ≥1000 fresh
+   sequences, while a kill costs one chunk rather than the run. Each chunk's
+   coverage line is recorded, per §8.1 — the exit status alone proves nothing.
+4. *The integration scenarios port whole.* All eleven port to
+   `crates/diskrement-cli/tests/scenarios/` with their own support module, even
+   where `binary.rs`, the fixture suites or the corpus already cover the same
+   ground. §8's rule is that every existing assertion gets a counterpart; a
+   coverage map claiming equivalence would put the reviewer's trust in the map.
+   `DiscOracle` is the part with no counterpart at all today, and it reads the
+   staged disc through the production `burn::json` types so the on-disc format
+   stays honest. `BuildSmokeSpec` is the one scenario with no counterpart by
+   construction: cargo builds the binary for the test.
+5. *`scripts/harvest-fixtures.sh` goes with the tree it drives.* It cannot run
+   without the sbt launcher, so it is deleted alongside `core/`, `shell/`,
+   `cli/`, `build.sbt` and `project/`, and preserved on the `scala` branch with
+   them. `fixtures/` stays — it is the Scala-written compatibility floor the
+   shell suites read — and `fixtures/README.md` gains a pointer saying where
+   the script that produced it now lives.
+
 P0 deliberately front-loads the compatibility evidence for the risk in §11 that
 would be most expensive to discover late. P1 is deliberately the pure core: it
 has no compatibility surface at all, so it is the right place to absorb the
@@ -638,12 +677,16 @@ merge commit titled `Merge feat/<branch>: <summary>`; the phase branch is
 deleted after the merge. Never commit phase work directly to
 `feat/rust-rewrite`, and no PRs — the same etiquette that governs `main`.
 
-At P10, on the integration branch: delete `core/`, `shell/`, `cli/`,
-`build.sbt`, `project/`, and `crates/diskrement-difftest/` (with its workspace
-member line), and rewrite `README.md` and `CLAUDE.md` for the Rust build. The
-harness dies with the tree it compares against; leaving it behind would leave a
-crate whose only dependency no longer exists. Then, and only when the rewrite's completion is explicitly
-confirmed:
+At P10, on the integration branch, and only once the parity half has been
+reviewed and the cutover confirmed (§9, decision 1): delete `core/`, `shell/`,
+`cli/`, `build.sbt`, `project/`, `scripts/harvest-fixtures.sh`, and
+`crates/diskrement-difftest/` (with its workspace member line), then rewrite
+`README.md` and `CLAUDE.md` for the Rust build. The harness dies with the tree
+it compares against; leaving it behind would leave a crate whose only
+dependency no longer exists, and the same is true of the harvest script.
+`README.md` and `CLAUDE.md` are rewritten after the deletion rather than before
+it, so they describe what is actually there. Then, and only when the rewrite's
+completion is explicitly confirmed:
 
 1. Push `main`'s tip to a preservation branch `scala` on `origin`.
 2. Merge `feat/rust-rewrite` into `main` with an explicit merge commit
