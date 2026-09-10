@@ -3,9 +3,6 @@
 //! Deserialization goes through the production `burn::json` DTOs rather than
 //! ad-hoc structs, so a serde mistake in the shipping codec fails here too.
 
-// Consumed by the scenario files as they land, not by the harness self-tests.
-#![allow(dead_code)]
-
 use diskrement_shell::burn::json::{ManifestJson, PointersJson, ProjectJson};
 use std::collections::BTreeSet;
 use std::path::Path;

@@ -17,3 +17,8 @@ mod s01_happy;
 mod s02_append_open;
 mod s03_finalized_new_disc;
 mod s04_three_disc;
+mod s05_spill;
+mod s06_oversized;
+mod s07_reset;
+mod s08_idempotent;
+mod s11_exit_codes;
