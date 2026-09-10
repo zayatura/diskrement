@@ -311,7 +311,13 @@ dependencies = [
  "diskrement-shell",
  "insta",
  "predicates",
+ "reflink-copy",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
+ "walkdir",
 ]
 
 [[package]]
