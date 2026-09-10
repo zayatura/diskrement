@@ -1,13 +1,9 @@
-# Real-media smoke test (Plan 4a)
+# Real-media smoke test
 
-**Since the Rust rewrite's P8** this checklist applies to both implementations.
-Run it with the Rust binary (`cargo run -p diskrement-cli -- <args>`, or the
-built `target/debug/diskrement`); the Scala launcher (`sbt cli/stage`, then
-`cli/target/universal/stage/bin/diskrement`) remains available until P10 for
-comparing behavior on any item that surprises you. Item 5 (Tier-2 verification)
-and item 2 (udisks mount) are the two the automated image-backed suite cannot
-reach at all — `tests/xorriso_image.rs` covers osirrox extraction, but never a
-mount.
+Run this with the Rust binary: `cargo build --release -p diskrement-cli`, then
+`target/release/diskrement`. Item 5 (Tier-2 verification) and item 2 (udisks
+mount) are the two the automated image-backed suite cannot reach at all —
+`tests/xorriso_image.rs` covers osirrox extraction, but never a mount.
 
 Run on the dev machine (Pioneer BD-RW BDR-UD04, /dev/sr0) with one expendable
 BD-R (or BD-RE for repeatable drills) before declaring cycle 2 done.
@@ -31,15 +27,19 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       re-prompt, then decline: "Aborted.", exit 0, catalog unchanged.
 - [ ] 5. `verify` again: with a version superseded in-disc (the modified file),
       confirm Tier 2 ran (superseded version extracted and OK).
-- [x] 6. `plan --finalize` + `burn`: confirm the disc closes. Record the exact
+- [ ] 6. `plan --finalize` + `burn`: confirm the disc closes. Record the exact
       `Media status` line of the closed disc here: `Media status : is written , is closed`
-      (captured 2026-08-30; matches closedFixture verbatim — no parser change needed).
+      (captured 2026-08-30; matches closedFixture verbatim — no parser change needed)
+      (Scala, 2026-08-30 — re-confirm with the Rust binary).
 - [ ] 7. Attempt a top-off of the finalized disc: confirm DiscClosed refusal.
-- [x] 8. Empty tray: run `burn` with no disc; record the exact failure text:
+- [ ] 8. Empty tray: run `burn` with no disc; record the exact failure text:
       NOT a failure — xorriso exits 0 with `Media status : is not present`
-      (captured 2026-08-30). Fixed in `MediaParse.parse` (RawStatus.NotPresent →
-      MediaStatus.NoMedia); `classifyFailure` unchanged.
+      (captured 2026-08-30). Fixed in `burn::media`'s parser
+      (RawStatus::NotPresent → MediaStatus::NoMedia);
+      `burn::xorriso::parse::classify_failure` unchanged.
+      (Scala, 2026-08-30 — re-confirm with the Rust binary).
 - [ ] 9. `verify` with the disc in another machine's drive or after remount —
       optional bit-rot drill.
 
-Findings feed parser fixes; re-run `sbt shell/test` after any parser change.
+Findings feed parser fixes; re-run `cargo test -p diskrement-shell` after any
+parser change.
