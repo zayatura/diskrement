@@ -13,3 +13,7 @@ mod disc;
 mod support;
 
 mod s00_harness;
+mod s01_happy;
+mod s02_append_open;
+mod s03_finalized_new_disc;
+mod s04_three_disc;
