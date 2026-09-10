@@ -21,4 +21,6 @@ mod s05_spill;
 mod s06_oversized;
 mod s07_reset;
 mod s08_idempotent;
+mod s09_mark_dead;
+mod s10_warm_rescan;
 mod s11_exit_codes;

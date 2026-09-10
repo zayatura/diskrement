@@ -1,9 +1,5 @@
 //! Scratch trees, the CoW gate, the CLI runner and the tree writer.
 
-// Several helpers serve the scenario files as they land, not the harness
-// self-tests.
-#![allow(dead_code)]
-
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
