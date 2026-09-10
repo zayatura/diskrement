@@ -1,4 +1,4 @@
-# Scala baseline for the Rust rewrite (spec §1, compared in P9)
+# Scala baseline for the Rust rewrite (spec §1, compared in P10 — see perf-rust.txt)
 # date: 2026-09-05T20:32:10Z
 # commit: 42e7f76
 # source: /tmp/diskrement-bench-src  work: /tmp/diskrement-bench-work
@@ -11,7 +11,7 @@
 #     for i in $(seq 0 1999); do d=$(( i % 8 )); sz=$(( 512 + (i % 1024) ));
 #       mkdir -p /tmp/diskrement-bench-src/dir$d;
 #       head -c $(( sz * 1024 )) /dev/urandom > /tmp/diskrement-bench-src/dir$d/file$i.bin; done
-#   P9 must re-run against this same pair of paths; regenerate the tree first if
+#   P10 must re-run against this same pair of paths; regenerate the tree first if
 #   /tmp was cleared (content is random, sizes/structure are what the timings depend on).
 # caveat: short run (1-3 s/step, a few 0.2 s sampler polls) — wall times are the
 #   baseline; per-step I/O columns are approximate (see perf-bench.sh notes).
