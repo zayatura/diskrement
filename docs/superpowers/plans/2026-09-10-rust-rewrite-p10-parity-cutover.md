@@ -2421,6 +2421,90 @@ with `crates/diskrement-difftest/` in Task 9.
 *(Append during execution. Anything done differently from the plan, and why,
 goes here rather than in a commit message.)*
 
+### P10 Task 6 — differential corpus and chunked wide sweep record (2026-09-10)
+
+Run against the Task 5 binaries: `cli/target/universal/stage/bin/diskrement`
+(Scala, re-staged) and `target/release/diskrement` (Rust, rebuilt); xorriso
+1.5.8.pl02 present. Evidence: `/tmp/p10-corpus.txt`, `/tmp/p10-sweep-{1..5}.txt`.
+
+**Corpus (Task 6 Step 3):** 13 scenarios × 3 modes, **0 skipped** —
+`bootstrap: 13 reproduced identically`, `all-rust: 13 compared, 0 skipped`,
+`interleaved: 13 compared, 0 skipped`. `real-backend` is one of the 13 in
+`corpus::all()` and ran (the log prints totals only, not names). §9's
+differential bar is satisfied vacuously: no counterexample was found.
+
+**Narrow sweep (Step 4):** green, 12 cases (12 executed) — `burn 6 (2
+refused)` ⇒ 4 burns at exit 0; every shipped command exercised. *(Figures are
+from the live console output — Step 4's command had no `tee`, so this run is
+not captured; the wide-sweep chunks below are.)*
+
+**Wide sweep (Steps 5–6):** five chunks, `PROPTEST_CASES=200`, fresh seeds each
+(failure persistence off). Coverage figures are from each chunk's `exercised:`
+line; "burns ok" / "mark-dead ok" are commands with exit 0 in the reference
+world (the coverage's own success definition). Every chunk reached successful
+burns; all five count.
+
+| Chunk | Cases | burn issued (refused / ok) | mark-dead issued (refused / ok) | Other commands issued | Stray `/tmp/.tmp*` (live) |
+|---|---|---|---|---|---|
+| 1 | 200 | 103 (37 / 66) | 52 (46 / 6) | init 208, plan 200, scan 210, status 81, verify 110, history 54, reset 79 | 410 (0 new) |
+| 2 | 200 | 99 (34 / 65) | 48 (41 / 7) | init 204, plan 194, scan 207, status 91, verify 92, history 43, reset 73 | 410 (0 new) |
+| 3 | 200 | 120 (44 / 76) | 44 (38 / 6) | init 203, plan 186, scan 210, status 86, verify 129, history 47, reset 81 | 410 (0 new) |
+| 4 | 200 | 107 (39 / 68) | 52 (49 / 3) | init 204, plan 162, scan 204, status 75, verify 95, history 59, reset 86 | 410 (0 new) |
+| 5 | 200 | 108 (43 / 65) | 48 (40 / 8) | init 205, plan 175, scan 207, status 75, verify 107, history 38, reset 83 | 410 (0 new) |
+| **Total** | **1000** | **537 (197 / 340)** | **244 (214 / 30)** | | |
+
+**Cumulative: 1000 generated cases, burns reached in 5/5 chunks (340 successful
+burn commands, 30 successful `disc mark-dead` commands)** — the ≥1000-cases bar
+is met with margin 0, exactly as planned (5 × 200).
+
+Notes: the `/tmp/.tmp*` count was a stable 410 across all chunk boundaries —
+no chunk was killed and nothing accumulated. These are live `ls` observations
+taken between chunks (as the brief's Step 5 directs), not captured output —
+the column above is the only record of them. The 410 are pre-existing strays
+from Sep 6–8 and from that morning's Task 5 runs (dated 14:32–15:02, before
+this task started at ~15:34), left untouched. No chunk needed the
+`PROPTEST_CASES=100` fallback. **No counterexample was found** — the sweep and
+corpus agreed across all three modes throughout, so Step 7 triage never
+engaged and no commit was made for this task.
+
+### P10 Task 7 — the smoke checklist's Rust paths (2026-09-10)
+
+This plan's Task 7 Step 3 said item 8 should name "`burn::media`'s parser and
+`burn::cmd::classify_failure`". `burn::cmd::classify_failure` does not exist —
+the function lives at `crates/diskrement-shell/src/burn/xorriso/parse.rs:119`
+(`pub fn classify_failure`), called from `burn/media.rs:68`. The checklist was
+written with the real path (`burn::xorriso::parse::classify_failure`);
+`burn::media` remains named as the parser's caller, per the plan's intent.
+
+### P10 Task 8 — the real-media smoke run (2026-09-11)
+
+Performed on the Pioneer BD-RW BDR-UD04 — at `/dev/sr1` on this machine, not
+`/dev/sr0` as the checklist's hardware note said (`/dev/sr0` now hosts the
+PiKVM virtual boot drive; the checklist was corrected). One blank unformatted
+CMC BD-R, Rust binary at commit b81b342. Items 1–8 performed and passed with
+the operator at the drive; every captured string is recorded inline in
+`docs/smoke-test-real-media.md`. Highlights: the two-prompt burn (plan + insert),
+auto-eject after every burn, 2- then 3-session TOC growth, Tier-2 verify proven
+arithmetically (4 visible + 1 superseded = "5 files OK"), the finalize seal
+reproducing `Media status : is written , is closed` verbatim, and the identity
+check refusing a wrong disc, the sealed disc and the empty tray with exit 0.
+
+Two items were not performed and say so in the file: item 0 (arranging a
+process without the optical group needs root; the mapping is pinned by unit
+tests) and item 9 (optional bit-rot drill; no second machine). What stays
+unproven is narrower than the plan's worst case, because the automated suites
+plus the difftest `real_backend` scenario already covered the sealing,
+capacity-refusal and device-open paths — the run's unique evidence was the
+udisks mount (item 2, exercised), the real eject behavior (item 1, confirmed
+by the operator), and Tier-2 extraction from real media (item 5, confirmed).
+
+Deviation from this plan's Task 7: the checklist's item 7 said "confirm
+DiscClosed refusal", but `DiscClosed` was deliberately not ported to Rust
+(`burn/mod.rs`: four Scala variants nothing constructed and nothing pinned).
+The live equivalent was captured instead: the planner targets a new disc and
+the identity check refuses the sealed disc ("found a finalized (closed)
+disc"), which is item 7's intent. The checklist text was updated accordingly.
+
 ---
 
 ## Execution verification
