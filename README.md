@@ -54,23 +54,25 @@ rebuilt from a single disc alone, without the host database.
 `diskrement` follows a **functional core / imperative shell** architecture (sometimes
 called hexagonal or ports-and-adapters):
 
-- **`core/`** — pure Scala 3 with no I/O. `Diff` computes a change set between the
-  catalog's current view and a fresh scan. `Planner` assigns files to discs respecting
-  per-disc capacity limits and the multisession top-off policy. `ManifestBuilder`
-  constructs the per-disc manifest. No effect types; data in, data out.
+- **`crates/diskrement-core/`** — pure Rust with no I/O. `diff` computes a change
+  set between the last burned state and a fresh scan; `planner` packs it onto
+  discs; `manifest` builds what gets written. One dependency, `chrono` with
+  `default-features = false`, which excludes the `clock` feature — `Utc::now()`
+  does not compile here; purity is enforced by the dependency graph, not by
+  discipline.
 
-- **`shell/`** — ZIO 2 effects wiring adapters to the core. The SQLite catalog
-  (`CatalogStore`) is append-only by design, enforced at the schema level. A
-  copy-on-write source snapshot (`SourceSnapshot`) is taken once per run to eliminate
-  TOCTOU races. The `Pipeline` service sequences all nine operations (`init`, `scan`,
-  `plan`, `burn`, `reset`, `status`, `verify`, `history`, `mark-dead`) and returns
-  structured data that a CLI can render.
+- **`crates/diskrement-shell/`** — every effect: the SQLite catalog, the
+  scanner and hasher, the CoW snapshot, staging, and the burners.
+
+- **`crates/diskrement-cli/`** — the `diskrement` binary: argument parsing,
+  path resolution, rendering and the exit-code contract.
 
 The write-once nature of optical media is treated as a first principle, not an
 afterthought. The append-only catalog, the commit-after-success burn, the
 self-describing discs — all of these follow directly from "you can never undo a burn."
 
-**Tech stack:** Scala 3.3, ZIO 2.1, zio-jdbc 0.1, SQLite (xerial), zio-json 0.7.
+**Tech stack:** Rust (stable, edition 2021), `clap` 4, `rusqlite` (bundled
+SQLite), `serde`/`serde_json`, `sha2`, `rayon`, `walkdir`, `reflink-copy`.
 
 ---
 
@@ -199,13 +201,17 @@ since the benchmark's staging step relies on the same reflink support `burn` doe
 
 ## Building
 
-**Requirements:** JDK 17+, [sbt](https://www.scala-sbt.org/) 1.x, Linux (the CoW
-snapshot support probes for `btrfs`/`xfs`/`bcachefs` reflinking).
+**Requirements:** a stable Rust toolchain (pinned by `rust-toolchain.toml`),
+Linux, and a CoW filesystem (btrfs, XFS with reflink, or bcachefs) for the
+work area. `rusqlite`'s bundled SQLite is compiled from source, so a C
+compiler is needed for the first build.
 
 ```
 git clone https://github.com/zayatura/diskrement
 cd diskrement
-sbt test
+cargo build --release          # -> target/release/diskrement
+cargo test --workspace         # all tests
+cargo run -p diskrement-cli -- scan photos
 ```
 
 The test suite includes integration tests that auto-skip on filesystems without
@@ -214,33 +220,20 @@ copy-on-write support.
 ### Producing an executable
 
 ```bash
-sbt cli/stage
+cargo build --release
 ```
 
-This places a self-contained `diskrement` launch script and all its JARs under
-`cli/target/universal/stage/`. You can run it directly:
+This produces `target/release/diskrement`, a single self-contained binary —
+no launcher script, and no JVM on the target machine. You can run it directly:
 
 ```bash
-cli/target/universal/stage/bin/diskrement --help
+target/release/diskrement --help
 ```
 
 Or put it on your `PATH` permanently with a symlink:
 
 ```bash
-ln -s "$PWD/cli/target/universal/stage/bin/diskrement" ~/.local/bin/diskrement
-```
-
-To produce a distributable zip archive instead:
-
-```bash
-sbt cli/universal:packageBin
-# output: cli/target/universal/diskrement-0.1.0-SNAPSHOT.zip
-```
-
-During development you can also run without staging:
-
-```bash
-sbt "cli/run scan photos"
+ln -s "$PWD/target/release/diskrement" ~/.local/bin/diskrement
 ```
 
 ---
