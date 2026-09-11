@@ -329,19 +329,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "diskrement-difftest"
-version = "0.1.0"
-dependencies = [
- "diskrement-shell",
- "proptest",
- "reflink-copy",
- "rusqlite",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
 name = "diskrement-shell"
 version = "0.1.0"
 dependencies = [

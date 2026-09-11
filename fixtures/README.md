@@ -1,6 +1,10 @@
 # Golden fixture corpus (Rust rewrite)
 
-Harvested from the **Scala** implementation by `scripts/harvest-fixtures.sh`.
+Harvested from the **Scala** implementation by `scripts/harvest-fixtures.sh`,
+which lived in this repository until P10 and now exists only on the `scala`
+branch, together with the sbt tree it drives. This corpus cannot be
+regenerated from `main`; treat it as frozen evidence, and `git checkout scala`
+if you ever need to re-derive it.
 Scenario: two 800-byte files spill across discs 1-2 (one disc per burn cycle) ->
 modify + delete cycle lands a@2 on disc 3 -> disc 3 marked dead -> recovery burn
 onto disc 4 -> `plan --finalize` seals disc 4. Run with
@@ -17,7 +21,8 @@ onto disc 4 -> `plan --finalize` seals disc 4. Run with
 | `source/` | source tree as it stood at the end of the run (`b.bin` was deleted in cycle 2; its bytes live on in `discs/disc-2/data/`) | **yes** |
 | `run-manifest.txt` | every command, exit code, and stdout — the **render oracle**. Scratch paths and the `Last burn` timestamp are redacted to `<scratch>`/`<timestamp>`; everything below the `#` header is byte-stable | **yes** |
 | `stderr.log` | stderr — reference only, **not** an oracle (progress lines and scratch paths vary) | no |
-| `perf-baseline.txt` | `perf-bench.sh` output for the Scala build; P9 compares against it | no (timings) |
+| `perf-baseline.txt` | `perf-bench.sh` output for the Scala build; the P0 Scala baseline; `perf-rust.txt` is the P10 A/B against it | no (timings) |
+| `perf-rust.txt` | the P10 same-host A/B: Rust and Scala on one tree | no (timings) |
 | `SHA256SUMS` | integrity pins for what is committed | — |
 
 ### Disc-tree notes

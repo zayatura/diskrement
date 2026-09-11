@@ -199,10 +199,11 @@ impl Cli {
 /// same-size files never collide and a run reproduces anywhere.
 ///
 /// `sha256("<rel_path>@<version>")` as lowercase hex, repeated and truncated
-/// to `size` — the recipe in `scripts/harvest-fixtures.sh:74`, which is also
-/// what the difftest scenarios and the P0 corpus use. `Tree.scala` used a
-/// Java `Random` seeded from `String.hashCode`, which Rust cannot reproduce
-/// and nothing needs it to: the property that matters is determinism plus
+/// to `size` — the recipe of `scripts/harvest-fixtures.sh`, which lived in
+/// this repository until P10 and now exists only on the `scala` branch, and
+/// which the P0 corpus was harvested with. `Tree.scala` used a Java `Random`
+/// seeded from `String.hashCode`, which Rust cannot reproduce and nothing
+/// needs it to: the property that matters is determinism plus
 /// version-distinctness.
 fn content(rel_path: &str, version: u32, size: usize) -> Vec<u8> {
     let digest = Sha256::digest(format!("{rel_path}@{version}").as_bytes());
