@@ -1,10 +1,13 @@
 # Golden fixture corpus (Rust rewrite)
 
 Harvested from the **Scala** implementation by `scripts/harvest-fixtures.sh`,
-which lived in this repository until P10 and now exists only on the `scala`
-branch, together with the sbt tree it drives. This corpus cannot be
-regenerated from `main`; treat it as frozen evidence, and `git checkout scala`
-if you ever need to re-derive it.
+which lived in this repository until P10 and survives only in its git history
+— the `scala` branch preserves the sbt tree it drove, but not the script,
+which was born during the rewrite, so `main` never carried it. This corpus
+cannot be regenerated from `main`; treat it as frozen evidence. To re-derive
+it, recover the script from history:
+`git log --diff-filter=A -- scripts/harvest-fixtures.sh` finds the commit that
+added it, then `git checkout <that commit> -- scripts/harvest-fixtures.sh`.
 Scenario: two 800-byte files spill across discs 1-2 (one disc per burn cycle) ->
 modify + delete cycle lands a@2 on disc 3 -> disc 3 marked dead -> recovery burn
 onto disc 4 -> `plan --finalize` seals disc 4. Run with
