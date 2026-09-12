@@ -311,7 +311,13 @@ dependencies = [
  "diskrement-shell",
  "insta",
  "predicates",
+ "reflink-copy",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
+ "walkdir",
 ]
 
 [[package]]
@@ -320,19 +326,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "proptest",
-]
-
-[[package]]
-name = "diskrement-difftest"
-version = "0.1.0"
-dependencies = [
- "diskrement-shell",
- "proptest",
- "reflink-copy",
- "rusqlite",
- "serde_json",
- "sha2",
- "tempfile",
 ]
 
 [[package]]

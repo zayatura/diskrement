@@ -2421,10 +2421,208 @@ with `crates/diskrement-difftest/` in Task 9.
 *(Append during execution. Anything done differently from the plan, and why,
 goes here rather than in a commit message.)*
 
+### P10 Task 6 — differential corpus and chunked wide sweep record (2026-09-10)
+
+Run against the Task 5 binaries: `cli/target/universal/stage/bin/diskrement`
+(Scala, re-staged) and `target/release/diskrement` (Rust, rebuilt); xorriso
+1.5.8.pl02 present. Evidence: `/tmp/p10-corpus.txt`, `/tmp/p10-sweep-{1..5}.txt`.
+
+**Corpus (Task 6 Step 3):** 13 scenarios × 3 modes, **0 skipped** —
+`bootstrap: 13 reproduced identically`, `all-rust: 13 compared, 0 skipped`,
+`interleaved: 13 compared, 0 skipped`. `real-backend` is one of the 13 in
+`corpus::all()` and ran (the log prints totals only, not names). §9's
+differential bar is satisfied vacuously: no counterexample was found.
+
+**Narrow sweep (Step 4):** green, 12 cases (12 executed) — `burn 6 (2
+refused)` ⇒ 4 burns at exit 0; every shipped command exercised. *(Figures are
+from the live console output — Step 4's command had no `tee`, so this run is
+not captured; the wide-sweep chunks below are.)*
+
+**Wide sweep (Steps 5–6):** five chunks, `PROPTEST_CASES=200`, fresh seeds each
+(failure persistence off). Coverage figures are from each chunk's `exercised:`
+line; "burns ok" / "mark-dead ok" are commands with exit 0 in the reference
+world (the coverage's own success definition). Every chunk reached successful
+burns; all five count.
+
+| Chunk | Cases | burn issued (refused / ok) | mark-dead issued (refused / ok) | Other commands issued | Stray `/tmp/.tmp*` (live) |
+|---|---|---|---|---|---|
+| 1 | 200 | 103 (37 / 66) | 52 (46 / 6) | init 208, plan 200, scan 210, status 81, verify 110, history 54, reset 79 | 410 (0 new) |
+| 2 | 200 | 99 (34 / 65) | 48 (41 / 7) | init 204, plan 194, scan 207, status 91, verify 92, history 43, reset 73 | 410 (0 new) |
+| 3 | 200 | 120 (44 / 76) | 44 (38 / 6) | init 203, plan 186, scan 210, status 86, verify 129, history 47, reset 81 | 410 (0 new) |
+| 4 | 200 | 107 (39 / 68) | 52 (49 / 3) | init 204, plan 162, scan 204, status 75, verify 95, history 59, reset 86 | 410 (0 new) |
+| 5 | 200 | 108 (43 / 65) | 48 (40 / 8) | init 205, plan 175, scan 207, status 75, verify 107, history 38, reset 83 | 410 (0 new) |
+| **Total** | **1000** | **537 (197 / 340)** | **244 (214 / 30)** | | |
+
+**Cumulative: 1000 generated cases, burns reached in 5/5 chunks (340 successful
+burn commands, 30 successful `disc mark-dead` commands)** — the ≥1000-cases bar
+is met with margin 0, exactly as planned (5 × 200).
+
+Notes: the `/tmp/.tmp*` count was a stable 410 across all chunk boundaries —
+no chunk was killed and nothing accumulated. These are live `ls` observations
+taken between chunks (as the brief's Step 5 directs), not captured output —
+the column above is the only record of them. The 410 are pre-existing strays
+from Sep 6–8 and from that morning's Task 5 runs (dated 14:32–15:02, before
+this task started at ~15:34), left untouched. No chunk needed the
+`PROPTEST_CASES=100` fallback. **No counterexample was found** — the sweep and
+corpus agreed across all three modes throughout, so Step 7 triage never
+engaged and no commit was made for this task.
+
+### P10 Task 7 — the smoke checklist's Rust paths (2026-09-10)
+
+This plan's Task 7 Step 3 said item 8 should name "`burn::media`'s parser and
+`burn::cmd::classify_failure`". `burn::cmd::classify_failure` does not exist —
+the function lives at `crates/diskrement-shell/src/burn/xorriso/parse.rs:119`
+(`pub fn classify_failure`), called from `burn/media.rs:68`. The checklist was
+written with the real path (`burn::xorriso::parse::classify_failure`);
+`burn::media` remains named as the parser's caller, per the plan's intent.
+
+### P10 Task 8 — the real-media smoke run (2026-09-11)
+
+Performed on the Pioneer BD-RW BDR-UD04 — at `/dev/sr1` on this machine, not
+`/dev/sr0` as the checklist's hardware note said (`/dev/sr0` now hosts the
+PiKVM virtual boot drive; the checklist was corrected). One blank unformatted
+CMC BD-R, Rust binary at commit b81b342. Items 1–8 performed and passed with
+the operator at the drive; every captured string is recorded inline in
+`docs/smoke-test-real-media.md`. Highlights: the two-prompt burn (plan + insert),
+auto-eject after every burn, 2- then 3-session TOC growth, Tier-2 verify proven
+arithmetically (4 visible + 1 superseded = "5 files OK"), the finalize seal
+reproducing `Media status : is written , is closed` verbatim, and the identity
+check refusing a wrong disc, the sealed disc and the empty tray with exit 0.
+
+Two items were not performed and say so in the file: item 0 (arranging a
+process without the optical group needs root; the mapping is pinned by unit
+tests) and item 9 (optional bit-rot drill; no second machine). What stays
+unproven is narrower than the plan's worst case, because the automated suites
+plus the difftest `real_backend` scenario already covered the sealing,
+capacity-refusal and device-open paths — the run's unique evidence was the
+udisks mount (item 2, exercised), the real eject behavior (item 1, confirmed
+by the operator), and Tier-2 extraction from real media (item 5, confirmed).
+
+Deviation from this plan's Task 7: the checklist's item 7 said "confirm
+DiscClosed refusal", but `DiscClosed` was deliberately not ported to Rust
+(`burn/mod.rs`: four Scala variants nothing constructed and nothing pinned).
+The live equivalent was captured instead: the planner targets a new disc and
+the identity check refuses the sealed disc ("found a finalized (closed)
+disc"), which is item 7's intent. The checklist text was updated accordingly.
+
+### P10 Task 9 — deletion-time comment rulings (2026-09-11)
+
+Step 1's dependency grep expected only the Cargo.toml member line, but found
+two prose provenance comments citing soon-deleted artifacts
+(`crates/diskrement-cli/src/args.rs` — the difftest harness's `Expect::ExitOnly`;
+`crates/diskrement-cli/tests/scenarios/support.rs` — the harvest-script recipe
+origin). Both were rewritten minimally to cite the `scala` branch, mirroring
+Step 5's fixtures/README.md treatment; no code changed.
+
+Step 8's `sbt|scala-3|zio` grep still matches ~20 prose sites in `crates/`
+comments (plus one test fn named `pretty_output_matches_zio_json`). These are
+blessed as permanent provenance, the same carve-out this plan gives `docs/`:
+they record why the Rust code is shaped the way it is (e.g. a bare error
+message kept byte-identical to the Scala constant), and they name Scala
+libraries, not deleted artifacts of this repository. No dangling reference to
+the difftest harness or the harvest script remains in shipped code.
+
+### P10 Task 10 — doc-rewrite corrections against the tree (2026-09-11)
+
+Four brief claims were corrected after verification, per this task's
+"verify, don't trust" instruction:
+
+- **Exit-code contract location.** The brief said the contract lives at
+  `crates/diskrement-cli/src/render.rs`; the mapping actually lives at
+  `crates/diskrement-shell/src/error.rs:127` (`PipelineError::exit_code`),
+  with its contract assertions in that file's tests. `render.rs`'s tests
+  assert parts of it (aborted→0, the verify-result-driven exit) and
+  `crates/diskrement-cli/tests/binary.rs` pins the process exits; CLAUDE.md
+  names `error.rs`.
+- **"a test proves it" (the `Utc::now()` purity claim in README's Design
+  section).** No standing test proves this: the P1 plan's negative-compile
+  check was deliberately deleted after proving it ("Prove it, then remove the
+  proof"). README now says purity is enforced by the dependency graph, the
+  wording of `crates/diskrement-core/Cargo.toml`'s own comment.
+- **`tests/xorriso_image.rs`.** The brief named it bare, in the context of the
+  CLI's scenario suite; the file lives at
+  `crates/diskrement-shell/tests/xorriso_image.rs`. CLAUDE.md names the crate.
+- **The promoted "real backend prompts" gotcha cited the differential
+  harness**, deleted at Task 9. The harness mention was dropped (verified:
+  only `tests/binary.rs` exercises the real backend with no drive; the ported
+  scenarios do not), mirroring Task 9's minimal-rewrite ruling for prose
+  citing deleted artifacts.
+
+The invariants' moved-name updates the brief anticipated: `AppendOnlySpec` →
+the `file_version`-only-grows proptest in `catalog/store.rs`;
+`applyUpdateTo` → `apply_update_to`; `StagingDiscVerifier` → `StagingVerifier`
+(`burn/verifier.rs`); `ExitMappingSpec`'s no-"reset" assertion → the
+`s07_reset` scenario; `PathResolver` → `paths.rs::resolve`;
+`archivePointers`/`writeDisc` → `archive_pointers`/`write_disc`. The Step 3
+grep retains exactly three hits, all deliberate: README's "no JVM" sentence,
+the fixtures history sentence, and the promoted gotcha's "ports Scala's
+`redirectErrorStream`" provenance.
+
+### P10 Task 1 — the scenario suite's file layout (2026-09-11)
+
+The plan's File Structure table puts the test target at
+`crates/diskrement-cli/tests/scenarios.rs` declaring `mod support;` etc.
+That layout cannot compile: in Rust 2018, a non-`mod.rs` crate root resolves
+child modules against its *parent* directory, so `mod support;` in
+`tests/scenarios.rs` looks for `tests/support.rs` (E0583), not
+`tests/scenarios/support.rs`. The suite's root is therefore
+`crates/diskrement-cli/tests/scenarios/main.rs`, which owns its same-named
+directory; cargo still names the target `scenarios`, so every verification
+command in this plan works verbatim. Tasks 2–4's "edit `tests/scenarios.rs`"
+instructions were applied to `main.rs` under the same ruling.
+
+Related: with the harness built ahead of its consumers under
+`-D warnings`, `support.rs` and `disc.rs` carried crate-level
+`#![allow(dead_code)]` from Task 1; narrowing began at Task 3 (disc.rs, once
+s01–s04 consumed its helpers) and finished at Task 4 (support.rs, once s09
+consumed `line_starts_with`). No allow attributes remain in the suite.
+
 ---
 
 ## Execution verification
 
-*(Append at Task 11 Step 2: the measured test counts, the scenario suite's ran
-count, the differential corpus result, the per-chunk sweep coverage, the perf
-verdict, and the smoke-run outcome.)*
+Measured 2026-09-10 and 2026-09-11 on this host, on `feat/rewrite-p10`.
+
+- **Baseline and counts.** Task 1 Step 1 re-derived the P9 landing:
+  527 passed / 0 failed / 4 ignored. The ported suite added 16 tests
+  (4 harness + 12 scenario tests across the eleven scenarios), reaching
+  543 / 0 / 4. Task 9's deletion dropped exactly the difftest crate's own 54
+  (52 lib + 2 sweep passed, the 4 ignored included) — predicted before
+  running, then measured: **489 / 0 / 0**. Re-measured fresh at Task 11
+  Step 1: 489 / 0 / 0, `cargo clippy --workspace --all-targets -- -D warnings`
+  clean, `cargo fmt --check` clean.
+- **The scenario suite ran.** `DISKREMENT_SCENARIOS_REQUIRED=1 cargo test
+  -p diskrement-cli --test scenarios` → `16 passed; 0 failed`, at every task
+  checkpoint and at Gate 1; with the variable set, a skip fails the run, so
+  "passed" here means "ran" — the suite's CoW gate never tripped (host /tmp
+  is btrfs).
+- **Differential corpus.** 13 scenarios × 3 modes (bootstrap, all-rust,
+  interleaved), **0 skipped**, `real_backend` included under xorriso
+  1.5.8.pl02; bootstrap reproduced identically; run recorded in the Task 6
+  deviation entry.
+- **Wide sweep.** Five chunks of `PROPTEST_CASES=200`: **1000 cumulative
+  generated cases**, burns reached in 5/5 chunks (per-chunk exit-0 burns
+  66 / 65 / 76 / 68 / 65 = 340, plus 30 successful `disc mark-dead`s), no
+  chunk killed, nothing accumulated in `/tmp`. **No counterexample was
+  found** — spec §9's bar is satisfied vacuously; triage (Task 6 Step 7)
+  never engaged.
+- **Perf A/B** (`fixtures/perf-rust.txt`, same host, same regenerated
+  2000-file / 2.07 GB tree, rust → scala → rust): **Rust faster on every
+  step** — init ~48–53×, scan1 2.3–2.9×, plan ~150–206×, burn ~3.3×, warm
+  rescan ~20–22×. Decomposition for the skeptical (Gate 1 challenge, 
+  resolved with measurement): ~0.5 s of every Scala step is JVM
+  startup/classloading (scala `--help` ≈ 0.50 s vs rust `--help` ≈ 0.002 s);
+  floor-subtracted, the work-vs-work wins remain Rust's on every step
+  (scan1 ~1.7× hashing-bound, burn ~2.6×, rescan ~12×, plan ~100×, init
+  ~24×). Identical ~2 GB read traffic per binary and 2000-fingerprint reuse
+  at scan2 rule out skipped work; the run order gave Scala the warmest cache.
+- **Real-media smoke run.** Performed 2026-09-11 with the operator at the
+  drive (Pioneer BDR-UD04 at `/dev/sr1`; blank unformatted CMC BD-R; Rust
+  binary at commit b81b342). Items 1–8 performed and passed with captured
+  strings inline in `docs/smoke-test-real-media.md`; item 0 not performed
+  (needs root to arrange a non-optical process; mapping pinned by unit
+  tests) and item 9 not performed (optional drill, no second machine).
+  Finding: `DiscClosed` was deliberately never ported — the planner never
+  targets a sealed disc and the identity check refuses it live; recorded in
+  the Task 8 deviation entry.
+

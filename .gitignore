@@ -1,6 +1,3 @@
 .superpowers/
 target/
-.bsp/
-.metals/
-.bloop/
 *.snap.new

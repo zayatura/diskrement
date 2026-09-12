@@ -28,8 +28,9 @@ a8668face140b5f518d261cfc845750b96d2b7efa89d7c58e3da07d60a632973  ./discs/disc-3
 58b688a8ce4158ee5ee223ebd59ceba3178d6e8c2306686c3bf00276e901e477  ./discs/disc-4/.diskrement/manifest.json
 53621343a0580b31480d9f0589e8aea107bbbb0a6bb2bc7c70e6e330f7b7bf68  ./discs/disc-4/.diskrement/pointers.json
 841d1c121765094de8b6db6d4eede2841af11da31e2cbbaba1f759334e6dca20  ./discs/disc-4/.diskrement/project.json
-7ea44b282de2aed4dffa478c842ed7f05d9993f3fa73705eeb6f9f81121b8ee8  ./perf-baseline.txt
-df566064c8aa8975ade98afa86a1a2435af3e2ffe8c5ab0defcab17d6953978b  ./README.md
+bb92d4af07c5f8eeb38137b507345e07054c9e561b429c97fdf373bad640f62f  ./perf-baseline.txt
+8f4650ad9c828809484ac8f551f113b7bcd7bb5eafef6b2027020deb5867b767  ./perf-rust.txt
+2c735ed968d36f3631943bb96e12c22d8cbcf8258010b375082cfc4071ed2c3f  ./README.md
 f9f5bd814630738f1f594cfb3a1685240bc1ec06cbe1c17e1b006b5d5fc7802f  ./run-manifest.txt
 36b0abc61d69ec21abffeb0f72efe13cdd88541583db7310e61fac9836fa9bba  ./scancache/01-after-scan1.sqlite
 82c755249a8a0e8a64fd266d33fa1353dc645853923c953f47e9c028352e3e5a  ./scancache/02-after-scan2.sqlite
