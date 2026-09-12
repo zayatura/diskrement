@@ -51,7 +51,7 @@ SOURCE_DIR_ARG=$1
 WORK_AREA_ARG=$2
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_BIN="$SCRIPT_DIR/../cli/target/universal/stage/bin/diskrement"
+DEFAULT_BIN="$SCRIPT_DIR/../target/release/diskrement"
 BIN_ARG="${3:-$DEFAULT_BIN}"
 
 if [[ ! -d "$SOURCE_DIR_ARG" ]]; then
@@ -61,7 +61,7 @@ fi
 SOURCE_DIR="$(cd -- "$SOURCE_DIR_ARG" && pwd)"
 
 if [[ ! -x "$BIN_ARG" || -d "$BIN_ARG" ]]; then
-  echo "error: BIN '$BIN_ARG' is not an executable file (did you run 'sbt cli/stage'?)" >&2
+  echo "error: BIN '$BIN_ARG' is not an executable file (did you run 'cargo build --release -p diskrement-cli'?)" >&2
   exit 2
 fi
 BIN="$(cd -- "$(dirname -- "$BIN_ARG")" && pwd)/$(basename -- "$BIN_ARG")"
@@ -179,15 +179,18 @@ get_io_snapshot() {
   ' "$f" 2>/dev/null
 }
 
-# Identify the diskrement JVM among $1 (the launcher's pid) and its process
-# tree. The staged launcher execs java, so root_pid usually *is* the JVM;
-# fall back to a systemwide search by main class if that ever changes.
-resolve_jvm_pid() {
-  local root_pid="$1"
-  if [[ -r "/proc/$root_pid/cmdline" ]] \
-      && tr '\0' ' ' < "/proc/$root_pid/cmdline" 2>/dev/null | grep -q 'diskrement\.cli\.Main'; then
-    echo "$root_pid"
-    return 0
+# Identify the process to sample among $1 (the launcher's pid) and its
+# process tree. Two shapes: the Scala launcher execs java, so root_pid
+# usually *is* the JVM and its cmdline names the main class; the Rust
+# binary is root_pid itself and its cmdline names $BIN. Match either.
+resolve_target_pid() {
+  local root_pid="$1" cmdline
+  if [[ -r "/proc/$root_pid/cmdline" ]]; then
+    cmdline="$(tr '\0' ' ' < "/proc/$root_pid/cmdline" 2>/dev/null)" || cmdline=""
+    if grep -qF -e 'diskrement.cli.Main' -e "$BIN" <<< "$cmdline"; then
+      echo "$root_pid"
+      return 0
+    fi
   fi
   local found
   found="$(pgrep -f 'diskrement\.cli\.Main' 2>/dev/null | head -n1)" || true
@@ -214,14 +217,14 @@ resolve_jvm_pid() {
 # under-report; do not use a small fixture to validate this instrument or
 # to draw conclusions from its numbers.
 sample_io() {
-  local pid="$1" outfile="$2" jvm_pid="" snap
+  local pid="$1" outfile="$2" target_pid="" snap
   : > "$outfile"
   while kill -0 "$pid" 2>/dev/null; do
-    if [[ -z "$jvm_pid" ]]; then
-      jvm_pid="$(resolve_jvm_pid "$pid" 2>/dev/null)" || jvm_pid=""
+    if [[ -z "$target_pid" ]]; then
+      target_pid="$(resolve_target_pid "$pid" 2>/dev/null)" || target_pid=""
     fi
-    if [[ -n "$jvm_pid" ]]; then
-      snap="$(get_io_snapshot "$jvm_pid")" && [[ -n "$snap" ]] \
+    if [[ -n "$target_pid" ]]; then
+      snap="$(get_io_snapshot "$target_pid")" && [[ -n "$snap" ]] \
         && printf '%s\n' "$snap" > "$outfile.tmp" && mv -f "$outfile.tmp" "$outfile"
     fi
     sleep 0.2
@@ -302,7 +305,7 @@ drop_caches_if_requested() {
 
 # --- M6: provenance header -------------------------------------------------
 print_provenance() {
-  local repo_dir commit kernel ram_kb ram_gb fs_info jvm_ver
+  local repo_dir commit kernel ram_kb ram_gb fs_info jvm_ver rustc_ver
   repo_dir="$(cd -- "$SCRIPT_DIR/.." && pwd)"
   commit="$(git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null)" || commit="unknown"
   kernel="$(uname -r)"
@@ -321,6 +324,12 @@ print_provenance() {
   echo "  ram:          ${ram_gb} GB"
   echo "  work area fs: $fs_info"
   echo "  jvm:          $jvm_ver"
+  if command -v rustc >/dev/null 2>&1; then
+    rustc_ver="$(rustc --version 2>&1 | head -n1)"
+  else
+    rustc_ver="unknown (no 'rustc' on PATH)"
+  fi
+  echo "  rustc:        $rustc_ver"
 
   echo "  source tree:  counting files (single find+awk pass; may take a few seconds on large trees)..." >&2
   local file_count total_bytes total_gb

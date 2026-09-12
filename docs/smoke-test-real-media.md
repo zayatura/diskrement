@@ -1,6 +1,12 @@
-# Real-media smoke test (Plan 4a)
+# Real-media smoke test
 
-Run on the dev machine (Pioneer BD-RW BDR-UD04, /dev/sr0) with one expendable
+Run this with the Rust binary: `cargo build --release -p diskrement-cli`, then
+`target/release/diskrement`. Item 5 (Tier-2 verification) and item 2 (udisks
+mount) are the two the automated image-backed suite cannot reach at all —
+`tests/xorriso_image.rs` covers osirrox extraction, but never a mount.
+
+Run on the dev machine (Pioneer BD-RW BDR-UD04, `/dev/sr1` as of 2026-09-11 —
+`/dev/sr0` is now the PiKVM virtual boot drive) with one expendable
 BD-R (or BD-RE for repeatable drills) before declaring cycle 2 done.
 Prereq: `sudo usermod -aG optical $USER` + re-login (else expect the
 DevicePermissionDenied message — which is itself checklist item 0).
@@ -10,27 +16,72 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
 
 - [ ] 0. Without group membership: `diskrement burn ...` prints the
       optical-group hint and exits 6.
-- [ ] 1. `init` a scratch project (small source dir, a few MB), `scan`, `plan`,
+      (Not performed on hardware 2026-09-11: a non-optical process cannot be
+      arranged without root. The mapping is pinned by unit tests —
+      `burn/media.rs` permission→`DevicePermissionDenied`,
+      `error.rs` →exit 6, `pipeline` exit-code test.)
+- [x] 1. `init` a scratch project (small source dir, a few MB), `scan`, `plan`,
       `burn` to a blank BD-R. Confirm: insert prompt appears, xorriso UPDATE
       progress streams, disc ejects, catalog commits (`status` shows the disc).
-- [ ] 2. `verify` — confirm the disc mounts via udisks, all files OK, session
+      (Rust, 2026-09-11 — blank CMC BD-R in sr1: both prompts appeared,
+      `UPDATE : Writing:` streamed, `✔ Wrote disc 1`, drive ejected,
+      `status` showed `#1 OPEN`. First burn: single `y` answers the plan
+      prompt only — the insert prompt is a second confirmation.)
+- [x] 2. `verify` — confirm the disc mounts via udisks, all files OK, session
       marked VERIFIED.
-- [ ] 3. Add/modify a file, `scan`/`plan`/`burn` again to the SAME disc
+      (Rust, 2026-09-11 — `disc 1: 3 files OK ✓`; `session` row advanced to
+      `VERIFIED`.)
+- [x] 3. Add/modify a file, `scan`/`plan`/`burn` again to the SAME disc
       (top-off). Confirm the identity check accepted it and `-toc` (or
-      `xorriso -indev /dev/sr0 -toc`) shows 2 sessions.
-- [ ] 4. Insert a WRONG disc (any other disc) for a top-off: confirm refusal +
+      `xorriso -indev /dev/sr1 -toc`) shows 2 sessions.
+      (Rust, 2026-09-11 — `appending to open disc 1` accepted;
+      `xorriso -outdev /dev/sr1 -toc`: `Media status : is written , is appendable`,
+      `Media summary: 2 sessions`, `ISO session 1` + `ISO session 2`, both
+      `P_DISC_1`. Note: `-indev` refuses an appendable disc outright — use
+      `-outdev -toc` while the disc is open.)
+- [x] 4. Insert a WRONG disc (any other disc) for a top-off: confirm refusal +
       re-prompt, then decline: "Aborted.", exit 0, catalog unchanged.
-- [ ] 5. `verify` again: with a version superseded in-disc (the modified file),
+      (Rust, 2026-09-11 — `Not the expected disc: found unsuitable media
+      (e.g. a POW-formatted BD-R) — use a plain unformatted BD-R. Swap discs
+      and confirm again.` → re-prompt → `Aborted.`, exit 0; catalog still
+      exactly the burned sessions, 0 PLANNED rows.)
+- [x] 5. `verify` again: with a version superseded in-disc (the modified file),
       confirm Tier 2 ran (superseded version extracted and OK).
+      (Rust, 2026-09-11 — `disc 1: 5 files OK ✓` where the merged mount holds
+      4 files: 4 Tier-1 + 1 Tier-2 extraction of the superseded `file1.bin`
+      v1 from session 1. An extraction or hash failure would have printed a
+      mismatch — `verifier.rs` tier2.)
 - [x] 6. `plan --finalize` + `burn`: confirm the disc closes. Record the exact
       `Media status` line of the closed disc here: `Media status : is written , is closed`
-      (captured 2026-08-30; matches closedFixture verbatim — no parser change needed).
-- [ ] 7. Attempt a top-off of the finalized disc: confirm DiscClosed refusal.
+      (captured 2026-08-30; matches closedFixture verbatim — no parser change needed)
+      (Rust, 2026-09-11 — re-confirmed: same line verbatim, `Media summary:
+      3 sessions ... 0 free`; plan printed `will FINALIZE`, burn printed
+      `Status: FINALIZED — set this disc aside, it is sealed.`).
+- [x] 7. Attempt a top-off of the finalized disc: confirm refusal.
+      (Rust, 2026-09-11 — `DiscClosed` was deliberately not ported
+      (`burn/mod.rs`: four Scala variants nothing constructed and nothing
+      pinned). The Rust guard is structural: the planner targets a new disc,
+      and the identity check refuses the sealed disc live:
+      `Not the expected disc: found a finalized (closed) disc. Swap discs and
+      confirm again.` → re-prompt → `Aborted.`, exit 0.)
 - [x] 8. Empty tray: run `burn` with no disc; record the exact failure text:
       NOT a failure — xorriso exits 0 with `Media status : is not present`
-      (captured 2026-08-30). Fixed in `MediaParse.parse` (RawStatus.NotPresent →
-      MediaStatus.NoMedia); `classifyFailure` unchanged.
+      (captured 2026-08-30). Fixed in `burn::media`'s parser
+      (RawStatus::NotPresent → MediaStatus::NoMedia);
+      `burn::xorriso::parse::classify_failure` unchanged.
+      (Rust, 2026-09-11 — re-confirmed both halves: the raw xorriso probe on
+      the empty tray printed `Media status : is not present`, and the CLI
+      refuses pre-open via the identity check — `Not the expected disc: found
+      no disc in the drive. Swap discs and confirm again.` → re-prompt →
+      `Aborted.`, exit 0.)
 - [ ] 9. `verify` with the disc in another machine's drive or after remount —
-      optional bit-rot drill.
+      optional bit-rot drill. (Not performed 2026-09-11 — no second machine.)
 
-Findings feed parser fixes; re-run `sbt shell/test` after any parser change.
+Run record: 2026-09-11, Rust binary @ commit b81b342 (release build), Pioneer
+BDR-UD04 at `/dev/sr1`, one CMC BD-R (POW caveat above did not apply — media
+was unformatted). Items 1–8 performed and passed; the only unticked items are
+0 (needs root to arrange) and 9 (optional drill, no second machine).
+
+Findings feed parser fixes; re-run `cargo test -p diskrement-shell` after any
+parser change.
+

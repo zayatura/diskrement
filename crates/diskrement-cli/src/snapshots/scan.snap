@@ -1,0 +1,14 @@
+---
+source: crates/diskrement-cli/src/render.rs
+expression: doc
+---
+## a fresh scan
+Scanned: 2 added, 1 modified, 0 deleted, 3 unchanged.
+Hashed 3 of 6 files (3 fingerprints reused).
+
+## a reused staged scan (no Hashed line)
+Scanned: 2 added, 1 modified, 0 deleted, 3 unchanged.
+
+## nothing changed
+Scanned: 0 added, 0 modified, 0 deleted, 6 unchanged.
+Hashed 0 of 6 files (6 fingerprints reused).

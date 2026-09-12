@@ -1,0 +1,130 @@
+# P10 A/B: the Rust binary against the Scala binary, same host, same tree,
+# same page-cache state, in one sitting. Compare with fixtures/perf-baseline.txt
+# (the P0 Scala record) only as a drift check: that run was taken on a
+# different day, and the caveat below applies to it too.
+#
+# date: 2026-09-10T15:24:38Z
+# commit: 00184c3
+# tree: the same synthetic 2000-file / ~2.07 GB recipe recorded in
+#   fixtures/perf-baseline.txt, regenerated for this run.
+# order: rust, scala, rust — the third run shows how much of the difference
+#   is page-cache order rather than the binary.
+# caveat: 1–3 s per step. Wall times are the measurement; the per-step I/O
+#   columns are approximate, because the 0.2 s sampler cannot see I/O after
+#   its last poll (see the notes in scripts/perf-bench.sh).
+#
+# summary: init 0.017/0.019 s vs 0.905 s — Rust ~48–53x faster
+# summary: scan1 0.732/0.581 s vs 1.713 s — Rust 2.3–2.9x faster
+# summary: plan 0.005/0.007 s vs 1.030 s — Rust ~150–200x faster
+# summary: burn 0.774/0.766 s vs 2.517 s — Rust ~3.3x faster
+# summary: scan2 0.049/0.052 s vs 1.065 s — Rust ~20–22x faster
+# summary: Rust is faster on every step in both of its runs; the third run
+#   (warm) only widens scan1's lead, so page-cache order does not change the verdict.
+diskrement performance benchmark
+  source:  /tmp/diskrement-bench-src
+  bin:     ~/work/diskrement/target/release/diskrement
+  project: /tmp/diskrement-bench-work/perf-bench-158458
+  logs:    /tmp/diskrement-bench-work/perf-bench-158458-logs
+
+provenance:
+  commit:       00184c3
+  kernel:       6.18.50-2-lts
+  ram:          31.1 GB
+  work area fs: btrfs rw,noatime,nodiratime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=257,subvol=/@tmp
+  jvm:          openjdk version "21.0.12.1" 2026-08-18
+  rustc:        rustc 1.98.1 (48a229cea 2026-09-01) (Arch Linux rust 1:1.98.1-1)
+  source tree:  counting files (single find+awk pass; may take a few seconds on large trees)...
+  source tree:  2000 files, 2.072 GB
+
+init         0.017 s   rchar=    0.000 GB   read_bytes=    0.000 GB   write_bytes=    0.000 GB   cached=   25.618 GB   exit=0
+scan1        0.732 s   rchar=    1.965 GB   read_bytes=    1.968 GB   write_bytes=    0.001 GB   cached=   27.462 GB   exit=0
+plan         0.005 s   rchar=    0.000 GB   read_bytes=    0.000 GB   write_bytes=    0.000 GB   cached=   27.462 GB   exit=0
+burn         0.774 s   rchar=    2.074 GB   read_bytes=    2.075 GB   write_bytes=    0.004 GB   cached=   25.349 GB   exit=0
+scan2        0.049 s   rchar=    0.000 GB   read_bytes=    0.000 GB   write_bytes=    0.000 GB   cached=   25.349 GB   exit=0
+
+page cache: not requested (DROP_CACHES not set)
+
+cache evidence (P2: scan2 should show ~0 hashed):
+  scan1: Hashed 2000 of 2000 files (0 fingerprints reused).
+  scan2: Hashed 0 of 2000 files (2000 fingerprints reused).
+
+note: rchar has a nonzero floor (jars, sqlite catalog, staged scan.json,
+      fingerprint sidecar) -- read scan2's rchar as '<< source size', not '== 0'.
+note: the I/O sampler polls every 0.2s and cannot see any I/O the process
+      does after its last poll before exiting -- on a small/fast fixture
+      (a run finishing in a second or two) that residual can be a large
+      fraction of the total and rchar/write_bytes will badly under-report;
+      trust these numbers only on runs long enough to span many polls.
+logs retained at: /tmp/diskrement-bench-work/perf-bench-158458-logs
+diskrement performance benchmark
+  source:  /tmp/diskrement-bench-src
+  bin:     ~/work/diskrement/cli/target/universal/stage/bin/diskrement
+  project: /tmp/diskrement-bench-work/perf-bench-158803
+  logs:    /tmp/diskrement-bench-work/perf-bench-158803-logs
+
+provenance:
+  commit:       00184c3
+  kernel:       6.18.50-2-lts
+  ram:          31.1 GB
+  work area fs: btrfs rw,noatime,nodiratime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=257,subvol=/@tmp
+  jvm:          openjdk version "21.0.12.1" 2026-08-18
+  rustc:        rustc 1.98.1 (48a229cea 2026-09-01) (Arch Linux rust 1:1.98.1-1)
+  source tree:  counting files (single find+awk pass; may take a few seconds on large trees)...
+  source tree:  2000 files, 2.072 GB
+
+init         0.905 s   rchar=    0.009 GB   read_bytes=    0.018 GB   write_bytes=    0.001 GB   cached=   23.319 GB   exit=0
+scan1        1.713 s   rchar=    2.082 GB   read_bytes=    2.078 GB   write_bytes=    0.003 GB   cached=   25.398 GB   exit=0
+plan         1.030 s   rchar=    0.011 GB   read_bytes=    0.000 GB   write_bytes=    0.002 GB   cached=   25.401 GB   exit=0
+burn         2.517 s   rchar=    2.085 GB   read_bytes=    2.075 GB   write_bytes=    0.014 GB   cached=   25.025 GB   exit=0
+scan2        1.065 s   rchar=    0.011 GB   read_bytes=    0.000 GB   write_bytes=    0.002 GB   cached=   25.026 GB   exit=0
+
+page cache: not requested (DROP_CACHES not set)
+
+cache evidence (P2: scan2 should show ~0 hashed):
+  scan1: Hashed 2000 of 2000 files (0 fingerprints reused).
+  scan2: Hashed 0 of 2000 files (2000 fingerprints reused).
+
+note: rchar has a nonzero floor (jars, sqlite catalog, staged scan.json,
+      fingerprint sidecar) -- read scan2's rchar as '<< source size', not '== 0'.
+note: the I/O sampler polls every 0.2s and cannot see any I/O the process
+      does after its last poll before exiting -- on a small/fast fixture
+      (a run finishing in a second or two) that residual can be a large
+      fraction of the total and rchar/write_bytes will badly under-report;
+      trust these numbers only on runs long enough to span many polls.
+logs retained at: /tmp/diskrement-bench-work/perf-bench-158803-logs
+diskrement performance benchmark
+  source:  /tmp/diskrement-bench-src
+  bin:     ~/work/diskrement/target/release/diskrement
+  project: /tmp/diskrement-bench-work/perf-bench-159713
+  logs:    /tmp/diskrement-bench-work/perf-bench-159713-logs
+
+provenance:
+  commit:       00184c3
+  kernel:       6.18.50-2-lts
+  ram:          31.1 GB
+  work area fs: btrfs rw,noatime,nodiratime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=257,subvol=/@tmp
+  jvm:          openjdk version "21.0.12.1" 2026-08-18
+  rustc:        rustc 1.98.1 (48a229cea 2026-09-01) (Arch Linux rust 1:1.98.1-1)
+  source tree:  counting files (single find+awk pass; may take a few seconds on large trees)...
+  source tree:  2000 files, 2.072 GB
+
+init         0.019 s   rchar=    0.000 GB   read_bytes=    0.000 GB   write_bytes=    0.000 GB   cached=   22.960 GB   exit=0
+scan1        0.581 s   rchar=    1.446 GB   read_bytes=    1.451 GB   write_bytes=    0.001 GB   cached=   25.036 GB   exit=0
+plan         0.007 s   rchar=    0.000 GB   read_bytes=    0.000 GB   write_bytes=    0.000 GB   cached=   25.037 GB   exit=0
+burn         0.766 s   rchar=    2.074 GB   read_bytes=    2.075 GB   write_bytes=    0.005 GB   cached=   25.038 GB   exit=0
+scan2        0.052 s   rchar=    0.000 GB   read_bytes=    0.000 GB   write_bytes=    0.000 GB   cached=   25.038 GB   exit=0
+
+page cache: not requested (DROP_CACHES not set)
+
+cache evidence (P2: scan2 should show ~0 hashed):
+  scan1: Hashed 2000 of 2000 files (0 fingerprints reused).
+  scan2: Hashed 0 of 2000 files (2000 fingerprints reused).
+
+note: rchar has a nonzero floor (jars, sqlite catalog, staged scan.json,
+      fingerprint sidecar) -- read scan2's rchar as '<< source size', not '== 0'.
+note: the I/O sampler polls every 0.2s and cannot see any I/O the process
+      does after its last poll before exiting -- on a small/fast fixture
+      (a run finishing in a second or two) that residual can be a large
+      fraction of the total and rchar/write_bytes will badly under-report;
+      trust these numbers only on runs long enough to span many polls.
+logs retained at: /tmp/diskrement-bench-work/perf-bench-159713-logs

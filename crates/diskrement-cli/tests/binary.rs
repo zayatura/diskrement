@@ -1,0 +1,993 @@
+//! The spawned-binary harness. This is the P0 analogue of `BuildSmokeSpec`:
+//! every later phase's exit-code assertions run through `Command::cargo_bin`,
+//! so prove the mechanism works before anything depends on it.
+
+use assert_cmd::Command;
+use predicates::prelude::*;
+use predicates::str::contains;
+
+#[test]
+fn binary_runs_and_prints_its_version() {
+    // `--version` explicitly: a bare invocation is a missing-subcommand
+    // argument error now that the real command surface exists (exit 1).
+    Command::cargo_bin("diskrement")
+        .expect("binary builds")
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(contains(env!("CARGO_PKG_VERSION")));
+}
+
+mod p3 {
+    use super::*;
+
+    fn cmd() -> Command {
+        Command::cargo_bin("diskrement").expect("binary builds")
+    }
+
+    /// The happy path, end to end, in a temp dir: init → scan → status.
+    #[test]
+    fn init_scan_status_round_trip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/sub")).unwrap();
+        std::fs::write(root.join("src/a.txt"), b"hello").unwrap();
+        std::fs::write(root.join("src/sub/b.txt"), b"world").unwrap();
+        let catalog = root.join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let work = root.join("work");
+        let base = |catalog: &std::path::Path| {
+            let mut c = cmd();
+            c.arg("--catalog").arg(catalog);
+            c
+        };
+
+        base(&catalog)
+            .args(["init", "p", "--source"])
+            .arg(root.join("src"))
+            .arg("--work-dir")
+            .arg(&work)
+            .assert()
+            .success()
+            .stdout(contains("Created project p (id 1)."));
+
+        base(&catalog)
+            .args(["scan", "p"])
+            .env("DISKREMENT_HASH_PARALLELISM", "2")
+            .assert()
+            .success()
+            .stdout(contains(
+                "Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged.",
+            ))
+            .stdout(contains("Hashed 2 of 2 files (0 fingerprints reused)."));
+
+        base(&catalog)
+            .args(["status", "p"])
+            .assert()
+            .success()
+            .stdout(
+                contains("Project p  (source")
+                    .and(contains("Discs:"))
+                    .and(contains("Current files: 0      Last burn: never")),
+            );
+
+        // The staged scan and the sidecar exist where the contract says.
+        assert!(work.join("staged/scan.json").is_file());
+        assert!(root.join("catalog/cat.p.scancache.sqlite").is_file());
+
+        // A second scan reuses the staged scan: no Hashed line.
+        base(&catalog)
+            .args(["scan", "p"])
+            .assert()
+            .success()
+            .stdout(contains(
+                "Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged.",
+            ))
+            .stdout(contains("Hashed").not());
+    }
+
+    #[test]
+    fn an_unknown_project_exits_2_with_the_contract_message() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let catalog = dir.path().join("cat.sqlite");
+        // The catalog does not exist yet; the binary must create it (empty)
+        // and report the lookup failure, like the Scala Runner does.
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["status", "nosuch"])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(contains("project not found: nosuch"));
+        assert!(catalog.is_file(), "the binary creates an empty catalog");
+    }
+
+    #[test]
+    fn scan_on_an_unknown_project_also_exits_2() {
+        let dir = tempfile::TempDir::new().unwrap();
+        cmd()
+            .arg("--catalog")
+            .arg(dir.path().join("cat.sqlite"))
+            .args(["scan", "nosuch"])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(contains("project not found: nosuch"));
+    }
+
+    #[test]
+    fn an_argument_parse_error_exits_1_with_clap_wording() {
+        cmd()
+            .args(["scan"])
+            .assert()
+            .failure()
+            .code(1) // the contract's argument-error exit; wording may drift (§3.2)
+            .stderr(contains("error:"));
+    }
+}
+
+mod p4 {
+    use super::*;
+
+    fn cmd() -> Command {
+        Command::cargo_bin("diskrement").expect("binary builds")
+    }
+
+    /// A scratch project with `sizes` written into the source tree, already
+    /// init'd and scanned. Returns the temp dir, the catalog path and the work
+    /// dir.
+    fn scanned_project(
+        sizes: &[(&str, usize)],
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for (name, size) in sizes {
+            std::fs::write(src.join(name), vec![b'x'; *size]).unwrap();
+        }
+        let catalog = root.join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let work = root.join("work");
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["init", "p", "--source"])
+            .arg(&src)
+            .arg("--work-dir")
+            .arg(&work)
+            .assert()
+            .success();
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["scan", "p"])
+            .assert()
+            .success();
+        (dir, catalog, work)
+    }
+
+    #[test]
+    fn plan_stages_a_plan_and_prints_the_summary() {
+        let (_dir, catalog, work) = scanned_project(&[("a.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .assert()
+            .success()
+            .stdout(
+                contains("Plan: disc 1 (new disc, BD_R) —")
+                    .and(contains("left OPEN"))
+                    .and(contains("This disc completes the set.")),
+            );
+        assert!(work.join("staged/plan.json").is_file());
+        // The staged scan survives: `plan` does not consume it.
+        assert!(work.join("staged/scan.json").is_file());
+    }
+
+    #[test]
+    fn plan_finalize_seals_the_disc() {
+        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p", "--finalize"])
+            .assert()
+            .success()
+            .stdout(contains("will FINALIZE"));
+    }
+
+    #[test]
+    fn plan_disc_type_overrides_the_projects_default() {
+        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p", "--disc-type", "DVD"])
+            .assert()
+            .success()
+            .stdout(contains("(new disc, DVD)"));
+    }
+
+    /// The shrink-only capacity override, end to end. Two 800-byte files
+    /// against a 1000-byte disc: the plan spills and seals.
+    #[test]
+    fn the_disc_bytes_override_shrinks_capacity_and_spills() {
+        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800), ("b.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .env("DISKREMENT_DISC_BYTES", "1000")
+            .assert()
+            .success()
+            .stdout(contains("will FINALIZE").and(contains(
+                "~1 more files (~1 more discs) remain after this one.",
+            )));
+    }
+
+    /// A value at or above the margin-adjusted capacity is ignored, so the
+    /// override can never plan past the safety margin.
+    #[test]
+    fn the_disc_bytes_override_never_grows_capacity() {
+        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800), ("b.bin", 800)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .env("DISKREMENT_DISC_BYTES", "999999999999")
+            .assert()
+            .success()
+            .stdout(contains("This disc completes the set."));
+    }
+
+    #[test]
+    fn an_oversized_file_is_listed_but_the_plan_still_succeeds() {
+        let (_dir, catalog, _work) = scanned_project(&[("big.bin", 800), ("small.bin", 100)]);
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .env("DISKREMENT_DISC_BYTES", "500")
+            .assert()
+            .success()
+            .stdout(contains("Oversized (cannot be placed):").and(contains("big.bin")));
+    }
+
+    #[test]
+    fn plan_without_a_staged_scan_exits_2_and_says_to_run_scan() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let catalog = root.join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["init", "p", "--source"])
+            .arg(root.join("src"))
+            .arg("--work-dir")
+            .arg(root.join("work"))
+            .assert()
+            .success();
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "p"])
+            .assert()
+            .code(2)
+            .stderr(contains("no staged scan for p (run scan)"));
+    }
+
+    #[test]
+    fn plan_on_an_unknown_project_exits_2() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let catalog = dir.path().join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        cmd()
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["plan", "nosuch"])
+            .assert()
+            .code(2)
+            .stderr(contains("project not found: nosuch"));
+    }
+}
+
+/// Shared fixtures for the project-driving modules: `project` builds a
+/// scratch project, `base`/`cmd` run the binary without ever touching a real
+/// drive, and `burned_project` starts from one burned disc.
+fn cmd() -> Command {
+    let mut c = Command::cargo_bin("diskrement").expect("binary builds");
+    // Never touch a real drive from a test.
+    c.env("DISKREMENT_BURNER", "simulated");
+    c.env("DISKREMENT_HASH_PARALLELISM", "2");
+    c.env_remove("DISKREMENT_DISC_BYTES");
+    c
+}
+
+struct Project {
+    _dir: tempfile::TempDir,
+    catalog: std::path::PathBuf,
+    work: std::path::PathBuf,
+    source: std::path::PathBuf,
+}
+
+fn project() -> Project {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+    let source = root.join("src");
+    let work = root.join("work");
+    let catalog = root.join("catalog/cat.sqlite");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+    std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
+    Project {
+        _dir: dir,
+        catalog,
+        work,
+        source,
+    }
+}
+
+fn base(p: &Project) -> Command {
+    let mut c = cmd();
+    c.arg("--catalog").arg(&p.catalog);
+    c
+}
+
+fn init_scan_plan(p: &Project) {
+    base(p)
+        .args(["init", "p", "--source"])
+        .arg(&p.source)
+        .arg("--work-dir")
+        .arg(&p.work)
+        .assert()
+        .success();
+    base(p).args(["scan", "p"]).assert().success();
+    base(p).args(["plan", "p"]).assert().success();
+}
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    catalog: std::path::PathBuf,
+    work: std::path::PathBuf,
+}
+
+/// init → scan → plan → burn, leaving one burned disc with two files staged.
+/// Every assertion that starts from a burn starts here.
+fn burned_project() -> Fixture {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    let source = root.join("source");
+    std::fs::create_dir_all(source.join("nested")).unwrap();
+    std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
+    std::fs::write(source.join("nested/c.bin"), vec![b'c'; 100]).unwrap();
+    let catalog = root.join("catalog/cat.sqlite");
+    std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+    let work = root.join("work");
+
+    let run = |c: &std::path::Path| {
+        let mut x = cmd();
+        x.arg("--catalog").arg(c);
+        x
+    };
+    run(&catalog)
+        .args(["init", "p", "--source"])
+        .arg(&source)
+        .arg("--work-dir")
+        .arg(&work)
+        .assert()
+        .success();
+    run(&catalog).args(["scan", "p"]).assert().success();
+    run(&catalog).args(["plan", "p"]).assert().success();
+    run(&catalog)
+        .args(["burn", "p", "--yes"])
+        .assert()
+        .success();
+
+    Fixture {
+        _dir: dir,
+        catalog,
+        work,
+    }
+}
+
+mod p5 {
+    use super::*;
+
+    #[test]
+    fn burn_writes_the_disc_and_reports_it() {
+        let p = project();
+        init_scan_plan(&p);
+
+        base(&p)
+            .args(["burn", "p", "--yes"])
+            .assert()
+            .success()
+            .stdout(contains("✔ Wrote disc 1  —  label: \"p disc 1\""))
+            .stdout(contains(
+                "Status: left OPEN — may receive more sessions later.",
+            ))
+            .stdout(contains("No more changes — the set is up to date."));
+
+        assert!(p.work.join("staging/disc-1/data/a.bin").is_file());
+        assert!(p
+            .work
+            .join("staging/disc-1/.diskrement/manifest.json")
+            .is_file());
+        assert!(p
+            .work
+            .join("staging/disc-1/.diskrement/catalog.sqlite")
+            .is_file());
+    }
+
+    /// A second burn with nothing staged is the state error, exit 2.
+    #[test]
+    fn burning_twice_fails_with_the_staged_state_error() {
+        let p = project();
+        init_scan_plan(&p);
+        base(&p).args(["burn", "p", "--yes"]).assert().success();
+
+        base(&p)
+            .args(["burn", "p", "--yes"])
+            .assert()
+            .code(2)
+            .stderr(contains("no staged scan for p (run scan)"));
+    }
+
+    #[test]
+    fn burning_an_unknown_project_exits_two() {
+        let p = project();
+        init_scan_plan(&p);
+        base(&p)
+            .args(["burn", "nosuch", "--yes"])
+            .assert()
+            .code(2)
+            .stderr(contains("project not found: nosuch"));
+    }
+
+    /// Without `--yes` and with no terminal, the read hits EOF and the burn is
+    /// refused: exit 0, nothing written.
+    #[test]
+    fn declining_the_prompt_is_a_successful_no_op() {
+        let p = project();
+        init_scan_plan(&p);
+
+        base(&p)
+            .args(["burn", "p"])
+            .write_stdin("n\n")
+            .assert()
+            .success()
+            .stdout(contains("Aborted."));
+
+        assert!(!p.work.join("staging").exists(), "nothing was staged");
+        // The plan survives, so the operator can retry.
+        assert!(p.work.join("staged/plan.json").is_file());
+    }
+
+    /// A bad `--burner` value is an argument error (exit 1), the one place
+    /// spec §3.2 lets clap and zio-cli word things differently.
+    #[test]
+    fn a_bogus_burner_flag_is_an_argument_error() {
+        let p = project();
+        base(&p)
+            .args(["--burner", "pretend", "burn", "p", "--yes"])
+            .assert()
+            .code(1);
+    }
+
+    /// The full cycle the corpus records: spill across two discs, one disc per
+    /// burn, with the remaining-discs line changing between them.
+    #[test]
+    fn two_cycles_spill_across_two_discs() {
+        let p = project();
+        std::fs::write(p.source.join("b.bin"), vec![b'b'; 800]).unwrap();
+        let with_shrink = |p: &Project| {
+            let mut c = base(p);
+            c.env("DISKREMENT_DISC_BYTES", "1000");
+            c
+        };
+
+        with_shrink(&p)
+            .args(["init", "p", "--source"])
+            .arg(&p.source)
+            .arg("--work-dir")
+            .arg(&p.work)
+            .assert()
+            .success();
+        with_shrink(&p).args(["scan", "p"]).assert().success();
+        with_shrink(&p).args(["plan", "p"]).assert().success();
+        with_shrink(&p)
+            .args(["burn", "p", "--yes"])
+            .assert()
+            .success()
+            .stdout(contains("✔ Wrote disc 1"))
+            .stdout(contains("more discs of changes remain"));
+
+        with_shrink(&p).args(["scan", "p"]).assert().success();
+        with_shrink(&p).args(["plan", "p"]).assert().success();
+        with_shrink(&p)
+            .args(["burn", "p", "--yes"])
+            .assert()
+            .success()
+            .stdout(contains("✔ Wrote disc 2"))
+            .stdout(contains("No more changes — the set is up to date."));
+
+        assert!(p.work.join("staging/disc-1/data/a.bin").is_file());
+        assert!(p.work.join("staging/disc-2/data/b.bin").is_file());
+    }
+}
+
+mod p6 {
+    use super::*;
+
+    fn cmd() -> Command {
+        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
+        c.env("DISKREMENT_BURNER", "simulated");
+        c.env_remove("DISKREMENT_DEVICE");
+        c.env_remove("DISKREMENT_DISC_BYTES");
+        c
+    }
+
+    fn run(f: &Fixture, args: &[&str]) -> assert_cmd::assert::Assert {
+        let mut c = cmd();
+        c.arg("--catalog").arg(&f.catalog);
+        c.args(args).assert()
+    }
+
+    #[test]
+    fn verify_of_a_clean_burn_exits_0_and_names_every_disc() {
+        let f = burned_project();
+        run(&f, &["verify", "p"])
+            .success()
+            .stdout("disc 1: 2 files OK ✓\n");
+    }
+
+    /// Result-driven exit: corruption found is a successful run with a bad
+    /// outcome, and its code is 4, not one of the error-ladder codes.
+    #[test]
+    fn a_corrupted_staged_file_exits_4_and_lists_the_path() {
+        let f = burned_project();
+        std::fs::write(f.work.join("staging/disc-1/data/a.bin"), b"CORRUPT").unwrap();
+        run(&f, &["verify", "p"])
+            .failure()
+            .code(4)
+            .stdout("disc 1: 2 checked, 1 MISMATCH:\n  a.bin\n");
+    }
+
+    #[test]
+    fn verifying_a_named_disc_that_does_not_exist_exits_2() {
+        let f = burned_project();
+        run(&f, &["verify", "p", "--disc", "99"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal 99"));
+    }
+
+    /// The parser must not turn a negative ordinal into an argument error:
+    /// the Scala build answers it from the domain, with exit 2.
+    #[test]
+    fn a_negative_disc_ordinal_is_a_lookup_failure_not_an_argument_error() {
+        let f = burned_project();
+        run(&f, &["verify", "p", "--disc", "-1"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal -1"));
+    }
+
+    #[test]
+    fn verify_before_any_burn_says_there_is_nothing_to_check() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let catalog = dir.path().join("cat.sqlite");
+        let source = dir.path().join("source");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&source).unwrap();
+        let mut c = cmd();
+        c.arg("--catalog")
+            .arg(&catalog)
+            .args(["init", "p", "--source"])
+            .arg(&source)
+            .arg("--work-dir")
+            .arg(&work)
+            .assert()
+            .success();
+        let mut c = cmd();
+        c.arg("--catalog")
+            .arg(&catalog)
+            .args(["verify", "p"])
+            .assert()
+            .success()
+            .stdout("Nothing to verify: no burned discs.\n");
+    }
+
+    #[test]
+    fn history_prints_one_line_per_version() {
+        let f = burned_project();
+        run(&f, &["history", "p", "nested/c.bin"]).success().stdout(
+            contains("nested/c.bin\n")
+                .and(contains("  v1  disc 1 / session 1   0.0 GB  "))
+                .and(contains("  CURRENT")),
+        );
+    }
+
+    #[test]
+    fn history_of_an_unknown_path_says_so_and_exits_0() {
+        let f = burned_project();
+        run(&f, &["history", "p", "nope.bin"])
+            .success()
+            .stdout("No history for nope.bin.\n");
+    }
+
+    /// `reset` destroys the staging trees, so the next verify skips the disc
+    /// rather than reporting it clean — and the catalog still knows the disc
+    /// was burned.
+    #[test]
+    fn reset_clears_the_work_dir_and_the_next_verify_skips() {
+        let f = burned_project();
+        assert!(f.work.join("staging/disc-1").is_dir());
+        run(&f, &["reset", "p"]).success().stdout("Reset p.\n");
+        assert!(!f.work.join("staging").exists());
+        assert!(!f.work.join("snapshot").exists());
+        run(&f, &["verify", "p"])
+            .success()
+            .stdout("disc 1: skipped (not checked)\n");
+        run(&f, &["status", "p"])
+            .success()
+            .stdout(contains("  #1   "));
+    }
+
+    #[test]
+    fn planning_after_a_reset_needs_a_fresh_scan() {
+        let f = burned_project();
+        run(&f, &["scan", "p"]).success();
+        run(&f, &["reset", "p"]).success();
+        run(&f, &["plan", "p"])
+            .failure()
+            .code(2)
+            .stderr(contains("no staged scan for p (run scan)"));
+    }
+
+    #[test]
+    fn the_three_new_commands_exit_2_on_an_unknown_project() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let catalog = dir.path().join("cat.sqlite");
+        for args in [
+            vec!["verify", "nosuch"],
+            vec!["history", "nosuch", "a.bin"],
+            vec!["reset", "nosuch"],
+        ] {
+            let mut c = cmd();
+            c.arg("--catalog")
+                .arg(&catalog)
+                .args(&args)
+                .assert()
+                .failure()
+                .code(2)
+                .stderr(contains("project not found: nosuch"));
+        }
+    }
+}
+
+/// P7: `disc mark-dead`, the lost report, and the recovery cycle.
+mod p7 {
+    use super::*;
+
+    /// The content hashes of `b.bin`'s two versions, which the lost report and
+    /// `history` print verbatim. Written out, not computed at test time: a
+    /// helper that hashed the same bytes the fixture wrote would agree with
+    /// itself no matter what the binary printed.
+    const B1: &str = "b9749f157163b4bbb7faec0a55cfb88c69968a25eac4cfe13e45d6286874709a";
+    const B2: &str = "49a7906775663af7970f00f946d1d540822233477e75f5b2912ca497780a01bc";
+
+    fn cmd() -> Command {
+        let mut c = Command::cargo_bin("diskrement").expect("binary builds");
+        c.env("DISKREMENT_BURNER", "simulated");
+        c.env_remove("DISKREMENT_DEVICE");
+        c.env_remove("DISKREMENT_DISC_BYTES");
+        c
+    }
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        catalog: std::path::PathBuf,
+        source: std::path::PathBuf,
+    }
+
+    fn run(f: &Fixture, args: &[&str]) -> assert_cmd::assert::Assert {
+        let mut c = cmd();
+        c.arg("--catalog").arg(&f.catalog);
+        c.args(args).assert()
+    }
+
+    /// Two burned sessions on one open disc: `a.bin` current from session 1,
+    /// `b.bin` superseded in session 2. Disc 1 therefore holds one of each
+    /// casualty class, which is what makes both halves of the report non-empty.
+    fn two_session_disc() -> Fixture {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("a.bin"), vec![b'a'; 800]).unwrap();
+        std::fs::write(source.join("b.bin"), vec![b'b'; 800]).unwrap();
+        let catalog = root.join("catalog/cat.sqlite");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let work = root.join("work");
+
+        let f = Fixture {
+            _dir: dir,
+            catalog,
+            source,
+        };
+        let mut c = cmd();
+        c.arg("--catalog")
+            .arg(&f.catalog)
+            .args(["init", "p", "--source"])
+            .arg(&f.source)
+            .arg("--work-dir")
+            .arg(&work)
+            .assert()
+            .success();
+        run(&f, &["scan", "p"]).success();
+        run(&f, &["plan", "p"]).success();
+        run(&f, &["burn", "p", "--yes"]).success();
+
+        std::fs::write(f.source.join("b.bin"), vec![b'B'; 800]).unwrap();
+        run(&f, &["scan", "p"]).success();
+        run(&f, &["plan", "p"]).success();
+        run(&f, &["burn", "p", "--yes"]).success();
+        f
+    }
+
+    #[test]
+    fn mark_dead_prints_both_casualty_blocks_and_exits_0() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"])
+            .success()
+            .stdout(format!(
+                "Disc 1 marked DEAD.\n\
+                 Permanently lost (1):\n\
+                 \x20 b.bin  0.0 GB  {B1}  (was session 1)\n\
+                 Re-burn on next scan/plan/burn (2):\n\
+                 \x20 a.bin\n\
+                 \x20 b.bin\n"
+            ));
+    }
+
+    /// The disc becomes DEAD in `status` — the one place the CLI shows the
+    /// derived state — while the row behind it is untouched (asserted in the
+    /// shell's `fixture_mark_dead` and `mark_dead_tests`, which can see SQL).
+    #[test]
+    fn status_reports_the_disc_dead_and_drops_its_files_from_the_view() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"]).success();
+        run(&f, &["status", "p"])
+            .success()
+            .stdout(contains("  #1   DEAD").and(contains("Current files: 0")));
+    }
+
+    #[test]
+    fn marking_the_same_disc_twice_is_exit_2() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"]).success();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"])
+            .failure()
+            .code(2)
+            .stderr(contains("disc 1 is already marked dead"));
+    }
+
+    #[test]
+    fn an_ordinal_no_disc_has_is_exit_2() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "9", "--yes"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal 9"));
+    }
+
+    #[test]
+    fn mark_dead_on_an_unknown_project_is_exit_2() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "nosuch", "1", "--yes"])
+            .failure()
+            .code(2)
+            .stderr(contains("project not found: nosuch"));
+    }
+
+    /// The parse-time boundary, through the real binary: exit **1**, and the
+    /// catalog is never opened. Compare `verify --disc -1`, which is exit 2 —
+    /// the two ordinals are deliberately different, and this is the assertion
+    /// that keeps them from drifting together.
+    #[test]
+    fn a_non_positive_or_out_of_range_ordinal_is_an_argument_error() {
+        let f = two_session_disc();
+        for bad in ["0", "-1", "4294967297", "abc"] {
+            run(&f, &["disc", "mark-dead", "p", bad, "--yes"])
+                .failure()
+                .code(1);
+        }
+        run(&f, &["verify", "p", "--disc", "-1"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal -1"));
+    }
+
+    /// Refusing the prompt is a successful no-op: exit 0, nothing appended,
+    /// and the disc still reads OPEN.
+    #[test]
+    fn declining_the_prompt_leaves_the_disc_alive() {
+        let f = two_session_disc();
+        let mut c = cmd();
+        c.arg("--catalog")
+            .arg(&f.catalog)
+            .args(["disc", "mark-dead", "p", "1"])
+            .write_stdin("n\n")
+            .assert()
+            .success()
+            .stdout(
+                "Mark disc 1 of p DEAD? Superseded versions on it are lost forever; \
+                 its live files will re-plan. [y/N] Aborted.\n",
+            );
+
+        run(&f, &["status", "p"])
+            .success()
+            .stdout(contains("  #1   OPEN"));
+    }
+
+    /// The whole point of the phase: the live files come back. After the
+    /// coaster, `scan` sees both paths as *added*, `plan` opens a fresh disc
+    /// 2, and the recovery burn restores them — while `history` keeps both
+    /// dead copies visible as LOST.
+    #[test]
+    fn the_live_files_re_plan_onto_a_fresh_disc_and_history_shows_lost_per_copy() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"]).success();
+
+        run(&f, &["scan", "p"]).success().stdout(contains(
+            "Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged.",
+        ));
+        run(&f, &["plan", "p"])
+            .success()
+            .stdout(contains("Plan: disc 2 (new disc, BD_R) — 2 files"));
+        run(&f, &["burn", "p", "--yes"])
+            .success()
+            .stdout(contains("Wrote disc 2"));
+
+        // LOST is per physical copy: v2 and v3 share one content hash.
+        run(&f, &["history", "p", "b.bin"])
+            .success()
+            .stdout(format!(
+                "b.bin\n\
+             \x20 v1  disc 1 / session 1   0.0 GB  {B1}  LOST\n\
+             \x20 v2  disc 1 / session 2   0.0 GB  {B2}  LOST\n\
+             \x20 v3  disc 2 / session 1   0.0 GB  {B2}  CURRENT\n"
+            ));
+
+        // The sweep skips the dead disc silently; naming it is an error.
+        run(&f, &["verify", "p"])
+            .success()
+            .stdout("disc 2: 2 files OK ✓\n");
+        run(&f, &["verify", "p", "--disc", "1"])
+            .failure()
+            .code(2)
+            .stderr(contains("disc 1 is marked dead"));
+    }
+
+    /// Every disc dead: the sweep has nothing left to check and says so,
+    /// rather than reporting a clean run over an empty list.
+    #[test]
+    fn a_project_whose_only_disc_died_has_nothing_to_verify() {
+        let f = two_session_disc();
+        run(&f, &["disc", "mark-dead", "p", "1", "--yes"]).success();
+        run(&f, &["verify", "p"])
+            .success()
+            .stdout("Nothing to verify: no burned discs.\n");
+    }
+}
+
+/// P8: the real backend, driven as far as a machine with no drive can go.
+mod p8 {
+    use super::*;
+
+    /// Is real `xorriso` installed? The burn path preflights it, so a machine
+    /// without it can only test the tool-missing branch.
+    fn has_xorriso() -> bool {
+        std::process::Command::new("xorriso")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// `--burner real` asks for a disc. With no stdin, the answer is "no", and
+    /// an aborted burn is a successful run that wrote nothing: exit 0,
+    /// `Aborted.` on stderr, and a catalog with no discs in it.
+    #[test]
+    fn a_real_burn_asks_for_the_disc_and_an_unanswered_prompt_aborts() {
+        if !has_xorriso() {
+            eprintln!(
+                "SKIP [a_real_burn_asks_for_the_disc_and_an_unanswered_prompt_aborts]: \
+                 xorriso is not installed; the burn path preflights it. Install the \
+                 libisoburn/xorriso package and re-run."
+            );
+            return;
+        }
+        let p = project();
+        init_scan_plan(&p);
+
+        Command::cargo_bin("diskrement")
+            .expect("binary builds")
+            .arg("--catalog")
+            .arg(&p.catalog)
+            .args([
+                "--burner", "real", "--device", "/dev/sr0", "burn", "p", "--yes",
+            ])
+            .env_remove("DISKREMENT_BURNER")
+            .env_remove("DISKREMENT_DEVICE")
+            .assert()
+            .code(0)
+            .stdout(contains(
+                "Insert a blank disc for 'p' disc 1 into /dev/sr0 and confirm. [y/N]",
+            ))
+            .stderr(contains("Aborted."));
+
+        // Commit-after-success: the aborted burn committed nothing.
+        base(&p)
+            .args(["status", "p"])
+            .assert()
+            .success()
+            .stdout(contains("Last burn: never"));
+        // And the staged plan survives, so the operator can retry.
+        assert!(p.work.join("staged/plan.json").is_file());
+    }
+
+    /// Without xorriso on `PATH` the same run fails at the preflight, with the
+    /// message that names the package to install — exit 6, the media/burner
+    /// rung.
+    #[test]
+    fn a_real_burn_without_xorriso_says_what_to_install() {
+        let p = project();
+        init_scan_plan(&p);
+
+        Command::cargo_bin("diskrement")
+            .expect("binary builds")
+            .arg("--catalog")
+            .arg(&p.catalog)
+            .args(["--burner", "real", "burn", "p", "--yes"])
+            .env_remove("DISKREMENT_BURNER")
+            // An empty PATH reaches only the child: assert_cmd invokes the
+            // binary under test by absolute path.
+            .env("PATH", "/nonexistent")
+            .assert()
+            .code(6)
+            .stderr(contains("xorriso is not available"))
+            .stderr(contains("install the libisoburn/xorriso package"));
+    }
+
+    /// `verify` on the real backend asks for each disc and skips the ones the
+    /// operator does not produce. A skipped disc is reported as skipped, and
+    /// the run still exits 0 — nothing was found wrong, because nothing was
+    /// checked.
+    #[test]
+    fn a_real_verify_asks_for_each_disc_and_skips_the_ones_not_produced() {
+        let f = burned_project();
+
+        Command::cargo_bin("diskrement")
+            .expect("binary builds")
+            .env("DISKREMENT_BURNER", "real")
+            .env("DISKREMENT_DEVICE", "/dev/sr0")
+            .arg("--catalog")
+            .arg(&f.catalog)
+            .args(["verify", "p"])
+            .assert()
+            .code(0)
+            .stdout(contains(
+                "Insert disc 1 of 'p' into /dev/sr0 to verify it (or decline to skip this disc).",
+            ))
+            .stdout(contains("disc 1: skipped (not checked)"));
+    }
+}

@@ -1,0 +1,14 @@
+{
+  "projectName" : "p",
+  "discOrdinal" : 2,
+  "sessionOrdinal" : 1,
+  "added" : [
+    {
+      "relPath" : "b.bin",
+      "contentHash" : "3413ff9e166e40ad8798e36609f28433496ee3a0f8984f73d33b0a80ffef2a89",
+      "sizeBytes" : 800
+    }
+  ],
+  "modified" : [],
+  "deleted" : []
+}

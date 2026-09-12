@@ -1,0 +1,28 @@
+---
+source: crates/diskrement-cli/src/render.rs
+expression: doc
+---
+## nothing to do
+Nothing to burn: no changes to plan.
+
+## a bare seal (run-manifest step 18)
+Plan: finalize disc 4 (seal; no new files).
+
+## a spilling plan (run-manifest step 03)
+Plan: disc 1 (new disc, BD_R) — 1 files, 0.0 GB, will FINALIZE
+~1 more files (~1 more discs) remain after this one.
+
+## appending to an open disc
+Plan: disc 2 (appending to open disc 2, BD_R) — 1 files, 13.2 GB, left OPEN
+This disc completes the set.
+
+## a deletion rides along (run-manifest step 10)
+Plan: disc 3 (new disc, BD_R) — 1 files, 0.0 GB, left OPEN
+This disc completes the set.
+Deletions: 1
+
+## oversized files
+Plan: disc 1 (new disc, BD_R) — 1 files, 0.0 GB, left OPEN
+This disc completes the set.
+Oversized (cannot be placed):
+  huge.bin  99.0 GB
