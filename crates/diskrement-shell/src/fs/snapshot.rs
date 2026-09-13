@@ -60,18 +60,39 @@ fn reflink_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         let rel = entry.path().strip_prefix(src).unwrap_or(entry.path());
         let target = dst.join(rel);
         let ft = entry.file_type();
-        if ft.is_dir() {
-            std::fs::create_dir_all(&target)?;
+        let copied = if ft.is_dir() {
+            std::fs::create_dir_all(&target)
         } else if ft.is_file() {
-            reflink_copy::reflink(entry.path(), &target)?;
-            let meta = entry.metadata()?;
-            std::fs::set_permissions(&target, meta.permissions())?;
-            let mtime = meta.modified()?;
-            let f = std::fs::File::options().write(true).open(&target)?;
-            f.set_modified(mtime)?;
-        }
+            reflink_copy::reflink(entry.path(), &target)
+                .and_then(|()| copy_file_times_and_mode(entry.path(), &target))
+        } else {
+            Ok(())
+        };
+        copied.map_err(|e| naming(entry.path(), e))?;
     }
     Ok(())
+}
+
+/// Prefix `e` with the path it concerns. A capability errno is returned
+/// untouched, because `classify` reads its raw OS error to decide
+/// `NotCowCapable`.
+fn naming(path: &Path, e: std::io::Error) -> std::io::Error {
+    if clone_unsupported(&e) {
+        e
+    } else {
+        std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))
+    }
+}
+
+/// Give `dst` the mode and mtime of `src`.
+///
+/// The file is opened read-only: setting an explicit mtime needs ownership,
+/// not write access, and `dst` may already carry a read-only mode (a plain
+/// copy brings it along) — a write-open would fail on every 0444 file.
+pub(crate) fn copy_file_times_and_mode(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let meta = std::fs::metadata(src)?;
+    std::fs::File::open(dst)?.set_modified(meta.modified()?)?;
+    std::fs::set_permissions(dst, meta.permissions())
 }
 
 /// `create` with the cloner injected; the real entry point passes
@@ -262,6 +283,35 @@ mod tests {
         std::fs::write(src.join("f.txt"), b"hello").unwrap();
         let h = create(&src, &work).unwrap();
         assert_eq!(std::fs::read(h.root.join("f.txt")).unwrap(), b"hello");
+    }
+
+    /// A read-only source file snapshots with its mode and mtime intact.
+    /// `copy_file_times_and_mode` is exercised without a CoW filesystem: a
+    /// plain copy already carries the 0444 mode, which is exactly the state
+    /// a write-open would trip over.
+    #[test]
+    fn a_read_only_file_keeps_its_mode_and_mtime() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("ro.txt");
+        let dst = dir.path().join("ro.clone");
+        std::fs::write(&src, b"read only").unwrap();
+        let stamp =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::copy(&src, &dst).unwrap();
+
+        copy_file_times_and_mode(&src, &dst).unwrap();
+
+        let meta = std::fs::metadata(&dst).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o444);
+        assert_eq!(meta.modified().unwrap(), stamp);
     }
 
     #[test]

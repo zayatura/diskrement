@@ -1,8 +1,8 @@
 //! Writes the scenario's first burn cycle with the Rust store and diffs the
 //! result against the catalog the Scala build wrote at the same point.
 //!
-//! This is the one cross-implementation check on the *write* path available
-//! before P5 produces catalogs through the real pipeline, and it covers the
+//! This is the one cross-implementation check on the *write* path that does not
+//! go through the pipeline, and it covers the
 //! failure the spec calls highest-consequence (§11): a Rust binary writing a
 //! catalog the Scala version would not recognise.
 

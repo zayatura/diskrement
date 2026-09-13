@@ -188,7 +188,7 @@ impl ManifestJson {
         }
     }
 
-    /// The inverse, for the corpus oracle now and `DiscReader` at P8.
+    /// The inverse, for the corpus oracle and `DiscReader`.
     pub fn to_manifest(&self) -> Result<SessionManifest, String> {
         Ok(SessionManifest {
             project_name: self.project_name.clone(),

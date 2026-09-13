@@ -1,6 +1,5 @@
 //! The pipeline (`Pipeline.scala`): returns reports, performs no path
-//! resolution, and — for scan — **writes no catalog rows**. P3 lands `init`,
-//! `scan` and `status`; later phases append the rest of the nine methods.
+//! resolution, and — for scan — **writes no catalog rows**.
 
 pub mod planning;
 pub mod reports;
@@ -59,8 +58,15 @@ impl<'a> Pipeline<'a> {
         }
     }
 
-    fn failed(e: impl std::fmt::Display) -> PipelineError {
-        PipelineError::Failed(e.to_string())
+    fn failed(e: impl std::error::Error + 'static) -> PipelineError {
+        PipelineError::failed(&e)
+    }
+
+    fn corrupt_scan(e: impl std::error::Error + 'static) -> PipelineError {
+        PipelineError::Failed(format!(
+            "corrupt scan.json: {}",
+            crate::error::with_causes(&e)
+        ))
     }
 
     fn project(&self, name: &str) -> Result<Project, PipelineError> {
@@ -99,8 +105,8 @@ impl<'a> Pipeline<'a> {
     ) -> Result<ScanReport, PipelineError> {
         let p = self.project(name)?;
         if !force && !verify {
-            if let Some(files) = staged::read_scan(&self.paths.work_dir)
-                .map_err(|e| Self::failed(format!("corrupt scan.json: {e}")))?
+            if let Some(files) =
+                staged::read_scan(&self.paths.work_dir).map_err(Self::corrupt_scan)?
             {
                 return self.count(&p, &files, None);
             }
@@ -143,7 +149,10 @@ impl<'a> Pipeline<'a> {
             self.progress,
             &hasher::hash,
         )
-        .map_err(Self::failed)?;
+        .map_err(|e| match e {
+            scanner::ScanError::NonUtf8Names(names) => PipelineError::NonUtf8FileNames(names),
+            other => Self::failed(other),
+        })?;
         staged::write_scan(&self.paths.work_dir, &out.files).map_err(Self::failed)?;
         // Cache write is best-effort; a failure already warned with the path.
         let mut entries = BTreeMap::new();
@@ -159,7 +168,7 @@ impl<'a> Pipeline<'a> {
         }
         let _ = FingerprintCache::new(self.paths.scan_cache.clone()).put_all(&entries);
         // The snapshot is NOT released: burn re-derives `<work>/snapshot`;
-        // only `reset` (P6) removes it.
+        // only `reset` removes it.
         let ScanOutput { files, hashed } = out;
         Ok((files, hashed))
     }
@@ -194,7 +203,7 @@ impl<'a> Pipeline<'a> {
     ) -> Result<PlanReport, PipelineError> {
         let p = self.project(name)?;
         let scanned = staged::read_scan(&self.paths.work_dir)
-            .map_err(|e| Self::failed(format!("corrupt scan.json: {e}")))?
+            .map_err(Self::corrupt_scan)?
             .ok_or_else(|| PipelineError::NoStagedScan(name.to_string()))?;
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
@@ -257,6 +266,10 @@ impl<'a> Pipeline<'a> {
                 "disc {} was marked dead after this plan was staged",
                 report.disc.ordinal
             )));
+        }
+
+        if let Some(detail) = planning::stale_detail(&report, &scanned) {
+            return Err(PipelineError::StalePlan(detail));
         }
 
         let snap_root = self.paths.work_dir.join("snapshot");
@@ -739,6 +752,33 @@ mod tests {
         assert_eq!(r.hashed, Some(2));
         assert_eq!(r.scanned_files, 2);
         assert_eq!(staged::read_scan(&e.work).unwrap().unwrap().len(), 2);
+    }
+
+    /// An unexpected failure still says what failed: the rendered detail
+    /// carries the whole cause chain and the file, not just the outermost
+    /// "snapshot I/O error".
+    #[test]
+    fn an_unexpected_scan_failure_names_the_file_and_the_os_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut e = setup();
+        write_src(&e, "secret.bin", b"s");
+        std::fs::set_permissions(
+            e.src.join("secret.bin"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        e.pipeline.init(&project_init(&e)).unwrap();
+        if std::fs::File::open(e.src.join("secret.bin")).is_ok() {
+            eprintln!("SKIP: running as root, a mode-000 file is still readable");
+            return;
+        }
+
+        let err = e.pipeline.scan("p", false, false).unwrap_err();
+        let msg = err.to_string();
+        assert_eq!(err.exit_code(), 5);
+        assert!(msg.contains("snapshot I/O error"), "{msg}");
+        assert!(msg.contains("secret.bin"), "{msg}");
+        assert!(msg.contains("Permission denied"), "{msg}");
     }
 
     #[test]
@@ -1302,6 +1342,55 @@ mod burn_tests {
         assert!(!err.to_string().contains("reset"), "{err}");
     }
 
+    /// `scan --force` after `plan` re-stages the scan but leaves the plan: a
+    /// planned file whose content changed in between must not reach the
+    /// stager, where it used to fail as an exit-6 "content hash mismatch".
+    #[test]
+    fn a_planned_file_that_changed_in_the_staged_scan_makes_the_plan_stale() {
+        let mut env = staged_env(&[("a.bin", b"aaaa"), ("b.bin", b"bbbb")], false);
+        let mut scanned = staged::read_scan(&env.work).unwrap().unwrap();
+        std::fs::write(env.work.join("snapshot/a.bin"), b"AAAA-changed").unwrap();
+        scanned[0].content_hash =
+            crate::fs::hasher::hash(&env.work.join("snapshot/a.bin")).unwrap();
+        scanned[0].size_bytes = 12;
+        staged::write_scan(&env.work, &scanned).unwrap();
+
+        let err = run_burn(&mut env).unwrap_err();
+        match &err {
+            PipelineError::StalePlan(detail) => assert!(detail.contains("a.bin"), "{detail}"),
+            other => panic!("expected StalePlan, got {other}"),
+        }
+        assert_eq!(err.exit_code(), 2);
+        assert!(!err.to_string().contains("reset"), "{err}");
+        assert!(
+            env.catalog
+                .sessions_by_state(ProjectId(1), SessionState::Burned)
+                .unwrap()
+                .is_empty(),
+            "nothing committed"
+        );
+        assert!(
+            !env.work.join("staging/disc-1").exists(),
+            "refused before staging"
+        );
+    }
+
+    /// A path the plan tombstones that is back in the staged scan: burning
+    /// would record a deletion of a file that exists.
+    #[test]
+    fn a_tombstoned_path_present_in_the_staged_scan_makes_the_plan_stale() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        let mut report = staged::read_plan(&env.work).unwrap().unwrap();
+        report.tombstones.push(RelPath("a.bin".to_string()));
+        staged::write_plan(&env.work, &report).unwrap();
+
+        let err = run_burn(&mut env).unwrap_err();
+        match &err {
+            PipelineError::StalePlan(detail) => assert!(detail.contains("a.bin"), "{detail}"),
+            other => panic!("expected StalePlan, got {other}"),
+        }
+    }
+
     #[test]
     fn a_finalizing_plan_marks_the_disc_finalized() {
         let mut env = staged_env(&[("a.bin", b"aaaa")], true);
@@ -1734,7 +1823,7 @@ mod mark_dead_tests {
     /// `create_project` rather than `Pipeline::init`, and a hand-built
     /// snapshot rather than `Pipeline::scan`: `init` probes the work dir for
     /// reflink support and `scan` clones the source tree, neither of which
-    /// this phase's behaviour depends on. Every cycle below drives the real
+    /// mark-dead.s behaviour depends on. Every cycle below drives the real
     /// `plan` and `burn`, which is where mark-dead's consequences show up.
     fn env() -> Env {
         let dir = tempfile::TempDir::new().unwrap();

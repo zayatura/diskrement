@@ -1,6 +1,6 @@
-//! The spawned-binary harness. This is the P0 analogue of `BuildSmokeSpec`:
-//! every later phase's exit-code assertions run through `Command::cargo_bin`,
-//! so prove the mechanism works before anything depends on it.
+//! The spawned-binary harness. The analogue of `BuildSmokeSpec`: every
+//! exit-code assertion below runs through `Command::cargo_bin`, so the first
+//! test proves the mechanism works.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -18,7 +18,7 @@ fn binary_runs_and_prints_its_version() {
         .stdout(contains(env!("CARGO_PKG_VERSION")));
 }
 
-mod p3 {
+mod init_scan_status {
     use super::*;
 
     fn cmd() -> Command {
@@ -127,7 +127,7 @@ mod p3 {
     }
 }
 
-mod p4 {
+mod plan {
     use super::*;
 
     fn cmd() -> Command {
@@ -395,7 +395,7 @@ fn burned_project() -> Fixture {
     }
 }
 
-mod p5 {
+mod burn {
     use super::*;
 
     #[test]
@@ -521,7 +521,7 @@ mod p5 {
     }
 }
 
-mod p6 {
+mod verify_history_reset {
     use super::*;
 
     fn cmd() -> Command {
@@ -671,8 +671,8 @@ mod p6 {
     }
 }
 
-/// P7: `disc mark-dead`, the lost report, and the recovery cycle.
-mod p7 {
+/// `disc mark-dead`, the lost report, and the recovery cycle.
+mod mark_dead {
     use super::*;
 
     /// The content hashes of `b.bin`'s two versions, which the lost report and
@@ -887,8 +887,8 @@ mod p7 {
     }
 }
 
-/// P8: the real backend, driven as far as a machine with no drive can go.
-mod p8 {
+/// The real backend, driven as far as a machine with no drive can go.
+mod real_backend {
     use super::*;
 
     /// Is real `xorriso` installed? The burn path preflights it, so a machine

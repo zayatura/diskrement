@@ -66,7 +66,7 @@ fn home() -> PathBuf {
 }
 
 fn open_catalog(path: &std::path::Path) -> Result<Catalog, PipelineError> {
-    Catalog::open(path).map_err(|e| PipelineError::Failed(e.to_string()))
+    Catalog::open(path).map_err(|e| PipelineError::failed(&e))
 }
 
 /// Print one blob of success output.
@@ -97,8 +97,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
         &env_lookup,
         &home(),
     );
-    std::fs::create_dir_all(&resolved.data_dir)
-        .map_err(|e| PipelineError::Failed(e.to_string()))?;
+    std::fs::create_dir_all(&resolved.data_dir).map_err(|e| PipelineError::failed(&e))?;
 
     match cli.command {
         Command::Init {
@@ -110,7 +109,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             copies,
         } => {
             // The work dir exists before anything else (Runner.dispatch).
-            std::fs::create_dir_all(&work_dir).map_err(|e| PipelineError::Failed(e.to_string()))?;
+            std::fs::create_dir_all(&work_dir).map_err(|e| PipelineError::failed(&e))?;
             let mut catalog = open_catalog(&resolved.catalog)?;
             let scan_cache = paths::scan_cache_path(&resolved.catalog, &name);
             let sink = progress::ConsoleProgress::new();
@@ -353,6 +352,6 @@ fn resolve_verifier<'a>(
 fn find_or_fail(catalog: &Catalog, name: &str) -> Result<Project, PipelineError> {
     catalog
         .find_project(name)
-        .map_err(|e| PipelineError::Failed(e.to_string()))?
+        .map_err(|e| PipelineError::failed(&e))?
         .ok_or_else(|| PipelineError::ProjectNotFound(name.to_string()))
 }

@@ -1,8 +1,9 @@
 //! Pure xorriso argument vectors (`Xorriso.scala`).
 //!
 //! Every vector starts with the binary name; `cmd::Exec` runs it. The shapes
-//! are validated facts from Plan 4a's "Validated xorriso facts" (xorriso
-//! 1.5.8): `-compliance iso_9660_level=3` is the native-mode spelling —
+//! are validated facts from the real-burning plan
+//! (`docs/superpowers/plans/2026-08-30-diskrement-plan-4a-real-burning.md`,
+//! "Validated xorriso facts", xorriso 1.5.8): `-compliance iso_9660_level=3` is the native-mode spelling —
 //! `-iso_level` is mkisofs-emulation syntax and silently does nothing here —
 //! and `-dev` merges a new session where `-outdev` starts a fresh image.
 

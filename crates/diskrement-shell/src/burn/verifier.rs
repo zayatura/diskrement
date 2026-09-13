@@ -4,7 +4,7 @@
 //! `Verifier` is a closed enum for the same reason `Burner` is: there are
 //! exactly two substrates, ever, and `--burner real|simulated` selects both
 //! arms together — verifying a simulated burn by mounting a physical disc is
-//! meaningless (spec §5.2). P6 lands `Staging`; P8 adds `Disc`.
+//! meaningless (spec §5.2).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,8 +24,8 @@ use crate::fs::scanner::relativize;
 /// `latest_session` is what the simulated backend's staging dir contains;
 /// `visible` and `superseded` describe the physical disc — the merged mount
 /// view, plus the versions later sessions of the same disc hid. Each verifier
-/// consumes the fields that match its substrate, so P6's staging verifier reads
-/// only `latest_session` and P8's disc verifier reads only the other two.
+/// consumes the fields that match its substrate, so the staging verifier reads
+/// only `latest_session` and the disc verifier reads only the other two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscExpectation {
     pub project_name: String,
@@ -37,7 +37,7 @@ pub struct DiscExpectation {
 
 /// The result of checking one disc.
 ///
-/// `skipped` means nothing was checked — no staged data, or (P8) an operator
+/// `skipped` means nothing was checked — no staged data, or an operator
 /// who declined the disc. A skipped disc is never marked verified, which is the
 /// whole reason the flag exists rather than "zero files, zero mismatches".
 #[derive(Debug, Clone, PartialEq, Eq)]

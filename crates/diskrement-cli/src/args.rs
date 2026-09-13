@@ -1,9 +1,8 @@
 //! The clap surface (`Commands.scala`). Wording of clap's usage and argument
 //! errors may drift from zio-cli — the one sanctioned divergence (spec §3.2);
 //! the differential harness that compared the two builds declared such steps
-//! `Expect::ExitOnly` (deleted at P10; it survives only in this repository's
-//! git history — the `scala` branch preserves the Scala tree it compared
-//! against).
+//! `Expect::ExitOnly` (the harness was deleted with the Scala tree; the
+//! `scala` branch preserves both).
 
 use std::path::PathBuf;
 

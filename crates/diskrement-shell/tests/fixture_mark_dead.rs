@@ -4,7 +4,7 @@
 //! marked disc 3 dead; `08-after-mark-dead.sqlite` is the moment after. The
 //! Rust `mark_dead`, applied to a copy of the first at the same instant, must
 //! reproduce the second row for row — which is the §11 failure this whole
-//! corpus exists to catch, on the one write path P7 adds.
+//! corpus exists to catch, on the write path mark-dead adds.
 
 mod support;
 

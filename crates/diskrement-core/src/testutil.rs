@@ -1,5 +1,5 @@
-//! Test-only fixtures shared by the unit test modules, and (from Task 7) the
-//! proptest strategies that replace `Generators.scala`.
+//! Test-only fixtures shared by the unit test modules, and the proptest
+//! strategies that replace `Generators.scala`.
 
 use std::collections::HashSet;
 

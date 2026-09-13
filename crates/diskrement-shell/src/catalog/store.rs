@@ -219,8 +219,8 @@ impl Catalog {
     /// Write a consistent full-database snapshot to `dest` via `VACUUM INTO`.
     ///
     /// Runs outside a transaction, and `dest` must not already exist —
-    /// `VACUUM INTO` fails if it does, which is the behaviour the burn flow
-    /// relies on to notice a stale work-directory snapshot.
+    /// `VACUUM INTO` fails if it does, so the burn flow removes any leftover
+    /// work-directory snapshot before calling this.
     pub fn snapshot_to(&self, dest: &Path) -> Result<(), CatalogError> {
         self.conn
             .execute("vacuum into ?1", params![dest.to_string_lossy()])
@@ -1166,8 +1166,8 @@ mod tests {
             .collect()
     }
 
-    /// Turn a change set into a one-disc update — the mini-orchestration the
-    /// real pipeline does for real in P4.
+    /// Turn a change set into a one-disc update — the mini-orchestration
+    /// `Pipeline::burn` does for real.
     fn to_update(project: ProjectId, session_ordinal: u32, changes: &ChangeSet) -> CatalogUpdate {
         let as_write = |f: &ScannedFile| FileWrite {
             rel_path: f.rel_path.clone(),

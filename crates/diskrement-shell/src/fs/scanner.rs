@@ -12,7 +12,6 @@ use crate::progress::{phase, ProgressSink};
 
 /// Regular files under `root`, symlinks excluded, dotfiles included
 /// (`FileSystemLive.walk`). Order is directory order; `scan` sorts at the end.
-#[allow(dead_code)]
 pub(crate) fn walk(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
@@ -34,7 +33,7 @@ pub(crate) struct FileStat {
 }
 
 pub(crate) fn stat(path: &Path) -> std::io::Result<FileStat> {
-    let meta = std::fs::metadata(path)?; // nofollow: stats the link itself
+    let meta = std::fs::metadata(path)?; // follows links; `walk` already excludes them
     let ts: DateTime<Utc> = meta.modified()?.into();
     let mtime =
         ts - chrono::Duration::nanoseconds((ts.timestamp_subsec_nanos() % 1_000_000) as i64);
@@ -63,19 +62,26 @@ pub struct ScanOutput {
     pub hashed: usize,
 }
 
-/// A per-file scan failure (`ScanError.FileFailed`): message
-/// `failed scanning <relPath>`. A walk failure carries the *root* as the rel
-/// path (`FileScanner.scala`'s behavior).
 #[derive(Debug, thiserror::Error)]
-#[error("failed scanning {rel_path}")]
-pub struct ScanError {
-    pub rel_path: RelPath,
-    #[source]
-    pub source: std::io::Error,
+pub enum ScanError {
+    /// A per-file failure: message `failed scanning <relPath>`. A walk
+    /// failure carries the *root* as the rel path.
+    #[error("failed scanning {rel_path}")]
+    FileFailed {
+        rel_path: RelPath,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Names that are not valid UTF-8, rendered lossily and sorted. A
+    /// `RelPath` is text in the catalog and in every JSON file, so such a
+    /// name cannot be recorded faithfully; decoding it lossily would let two
+    /// distinct files collapse into one path and fail much later, at burn.
+    #[error("file names are not valid UTF-8")]
+    NonUtf8Names(Vec<String>),
 }
 
 fn failed(rel_path: RelPath, source: std::io::Error) -> ScanError {
-    ScanError { rel_path, source }
+    ScanError::FileFailed { rel_path, source }
 }
 
 /// Scan the snapshot at `root` (`FileScannerLive.scan`).
@@ -97,6 +103,17 @@ pub fn scan(
     use rayon::prelude::*;
 
     let paths = walk(root).map_err(|e| failed(RelPath(root.display().to_string()), e))?;
+
+    let mut non_utf8: Vec<String> = paths
+        .iter()
+        .map(|p| p.strip_prefix(root).unwrap_or(p))
+        .filter(|rel| rel.to_str().is_none())
+        .map(|rel| rel.display().to_string())
+        .collect();
+    if !non_utf8.is_empty() {
+        non_utf8.sort();
+        return Err(ScanError::NonUtf8Names(non_utf8));
+    }
 
     struct Candidate {
         rel: RelPath,
@@ -400,6 +417,29 @@ mod tests {
         }
 
         #[test]
+        fn names_that_are_not_utf8_are_refused_before_anything_is_hashed() {
+            use std::os::unix::ffi::OsStrExt as _;
+            let dir = tempfile::TempDir::new().unwrap();
+            let root = dir.path();
+            file(root, "ok.txt", b"fine");
+            std::fs::create_dir(root.join("d")).unwrap();
+            for name in [&b"d/x\xff"[..], &b"d/x\xfe"[..]] {
+                std::fs::write(root.join(std::ffi::OsStr::from_bytes(name)), b"x").unwrap();
+            }
+            let sink = Recording::default();
+            let err = scan(root, &BTreeMap::new(), false, 4, &sink, HASH).unwrap_err();
+            match err {
+                // Both are listed: lossily they are the same string, which is
+                // exactly why neither may be recorded.
+                ScanError::NonUtf8Names(names) => {
+                    assert_eq!(names, vec!["d/x\u{FFFD}", "d/x\u{FFFD}"])
+                }
+                other => panic!("expected NonUtf8Names, got {other:?}"),
+            }
+            assert!(sink.events().is_empty(), "nothing was hashed");
+        }
+
+        #[test]
         fn fast_path_reuses_the_stored_hash_without_hashing() {
             let dir = tempfile::TempDir::new().unwrap();
             let root = dir.path();
@@ -519,7 +559,10 @@ mod tests {
                 }
             };
             let err = scan(root, &BTreeMap::new(), false, 1, &NoopSink, &fail).unwrap_err();
-            assert_eq!(err.rel_path, RelPath("bad".into()));
+            assert!(
+                matches!(&err, ScanError::FileFailed { rel_path, .. } if *rel_path == RelPath("bad".into())),
+                "{err:?}"
+            );
         }
 
         #[test]

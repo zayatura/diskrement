@@ -3,6 +3,7 @@ name = "diskrement-cli"
 description = "diskrement CLI: argument parsing, rendering, exit-code contract"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 repository.workspace = true

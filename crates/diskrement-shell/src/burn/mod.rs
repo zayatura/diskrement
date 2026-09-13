@@ -4,7 +4,7 @@
 //!
 //! `Burner` is a closed enum rather than a trait object: there are exactly two
 //! backends, ever, and the split is the real-vs-simulated one the Scala build
-//! expressed as two `ZLayer`s. P5 lands the simulated arm; P8 adds `Real`.
+//! expressed as two `ZLayer`s.
 
 pub mod cmd;
 pub mod json;
@@ -98,9 +98,7 @@ pub struct BurnResult {
 /// Where a burn physically goes: a real optical drive, or (tests only) a plain
 /// file addressed through xorriso's `stdio:` pseudo-drive.
 ///
-/// `ImageFile` has no constructor until P8 wires the image-file integration
-/// tests; it is here because `BurnDevice` is the CLI backend resolver's return
-/// type and splitting the enum across two phases would churn that signature.
+/// `ImageFile` is constructed only by the image-file integration tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BurnDevice {
     RealDevice(String),

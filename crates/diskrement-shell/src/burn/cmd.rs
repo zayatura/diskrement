@@ -7,7 +7,6 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
 
 use crate::burn::BurnError;
 
@@ -58,13 +57,31 @@ where
     }
 }
 
+/// Every line of `reader`, decoded lossily, until EOF or a read error.
+///
+/// Not `BufRead::lines`, which errors on the first non-UTF-8 line: stopping
+/// there would leave the pipe undrained, and a child that keeps writing would
+/// block on it forever.
+fn lossy_lines(reader: impl std::io::Read) -> impl Iterator<Item = String> {
+    BufReader::new(reader)
+        .split(b'\n')
+        .map_while(Result::ok)
+        .map(|mut bytes| {
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+}
+
 /// The production `Exec`: spawn, stream, wait.
 ///
-/// stdout and stderr are read on separate threads and appended to one buffer,
-/// which is what `ProcessBuilder.redirectErrorStream(true)` did in one call.
-/// The two consumers of the order — `tail` in an error message and
+/// stdout is read on this thread and stderr on a second one; the output is
+/// stdout's lines followed by stderr's, which stands in for what
+/// `ProcessBuilder.redirectErrorStream(true)` merged in one call. The two
+/// consumers of the order — `tail` in an error message and
 /// `classify_failure`, which concatenates everything — are both insensitive to
-/// how the two streams interleave, so approximating it is enough.
+/// how the two streams interleave.
 pub fn system(command: &[String], on_line: &mut dyn FnMut(&str)) -> Result<CmdOutput, BurnError> {
     let (program, args) = command
         .split_first()
@@ -86,48 +103,31 @@ pub fn system(command: &[String], on_line: &mut dyn FnMut(&str)) -> Result<CmdOu
             _ => BurnError::Io(e),
         })?;
 
-    let collected: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
-    // stderr goes to the shared buffer from its own thread; stdout is read on
-    // this one, so `on_line` (which the caller may borrow mutably) never
-    // crosses a thread boundary. stderr lines are kept apart as well and
-    // replayed through `on_line` below, after the streams drain: the Scala
-    // runner merged the streams before reading, so its `onLine` saw them too.
-    let err_sink = Arc::clone(&collected);
-    let err_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let err_only = Arc::clone(&err_lines);
-    let err_thread = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            err_sink
-                .lock()
-                .expect("no panic holds this lock")
-                .push(line.clone());
-            err_only
-                .lock()
-                .expect("no panic holds this lock")
-                .push(line);
-        }
-    });
+    // stdout is read on this thread, so `on_line` (which the caller may
+    // borrow mutably) never crosses a thread boundary. stderr drains
+    // concurrently so neither pipe can fill and stall the child.
+    let err_thread = std::thread::spawn(move || lossy_lines(stderr).collect::<Vec<_>>());
 
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+    let mut lines = Vec::new();
+    for line in lossy_lines(stdout) {
         on_line(&line);
-        collected
-            .lock()
-            .expect("no panic holds this lock")
-            .push(line);
+        lines.push(line);
     }
-    let _ = err_thread.join();
+    let err_lines = err_thread.join().unwrap_or_default();
 
     // Replayed, not live: xorriso's `UPDATE` progress is on stdout, so the
     // only caller that streams as it appears loses nothing by the deferral.
-    for line in err_lines.lock().expect("no panic holds this lock").iter() {
+    // The Scala runner merged the streams before reading, so its `onLine`
+    // saw stderr too.
+    for line in &err_lines {
         on_line(line);
     }
+    lines.extend(err_lines);
 
     let status = child.wait().map_err(BurnError::Io)?;
-    let lines = collected.lock().expect("no panic holds this lock").clone();
     // A signal-killed child has no code. -1 is not a valid exit code, so it
     // can never collide with one xorriso actually returned.
     Ok(CmdOutput {
@@ -165,6 +165,25 @@ mod tests {
         );
         seen.sort();
         assert_eq!(seen, lines, "every captured line also reached the callback");
+    }
+
+    /// A line that is not UTF-8 (a file name xorriso echoes, say) is decoded
+    /// lossily and reading carries on. Stopping at it would leave the pipe
+    /// undrained, and a child that keeps writing would block on it forever.
+    #[test]
+    fn a_non_utf8_line_is_decoded_lossily_and_both_streams_keep_draining() {
+        let out = system(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                r"printf 'a\n\377\nc\n'; printf 'x\n\376\nz\n' 1>&2".to_string(),
+            ],
+            &mut |_| {},
+        )
+        .expect("the process launched");
+        let mut lines = out.lines.clone();
+        lines.sort();
+        assert_eq!(lines, vec!["a", "c", "x", "z", "\u{FFFD}", "\u{FFFD}"]);
     }
 
     /// A missing binary is `ToolMissing`, not an I/O error: the message tells

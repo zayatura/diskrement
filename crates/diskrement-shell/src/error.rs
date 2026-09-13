@@ -5,8 +5,8 @@
 ///
 /// The Scala equivalent was a sealed `CatalogError` reached through
 /// `refineOrDie`: expected faults became typed errors and anything else killed
-/// the fiber. `Unexpected` is that second case — it stays a value here, and P6
-/// maps it to the same exit code an unexpected failure had (5).
+/// the fiber. `Unexpected` is that second case — it stays a value here, and
+/// maps to the same exit code an unexpected failure had (5).
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
     #[error("project already exists: {0}")]
@@ -55,8 +55,7 @@ pub(crate) fn is_unique_violation(e: &rusqlite::Error) -> bool {
     )
 }
 
-/// `PipelineError.scala` — the variants P3 can produce. Later phases append
-/// the plan/burn/verify variants; the exit ladder is the stable contract
+/// `PipelineError.scala`. The exit ladder is the stable contract
 /// (spec §3.2) and is pinned by the CLI's ExitMapping port.
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
@@ -95,7 +94,7 @@ pub enum PipelineError {
     /// `verify --disc`'s does, which is why that one stays signed.
     #[error("disc {0} is already marked dead")]
     DiscAlreadyDead(u32),
-    /// Surfaced by `plan` in its report and refused by `burn` (P5): the
+    /// Surfaced by `plan` in its report and refused by `burn`: the
     /// two-stage oversize check.
     #[error(
         "oversized files cannot be placed: {}",
@@ -114,6 +113,13 @@ pub enum PipelineError {
         work_dir: std::path::PathBuf,
         detail: String,
     },
+    /// Source file names that cannot be recorded as text. An environment
+    /// problem the operator fixes by renaming, so exit 3.
+    #[error(
+        "file names are not valid UTF-8 and cannot be archived (rename them): {}",
+        .0.join(", ")
+    )]
+    NonUtf8FileNames(Vec<String>),
     /// Renders its cause's message and nothing else (`PipelineError.Burn`).
     #[error(transparent)]
     Burn(#[from] crate::burn::BurnError),
@@ -123,7 +129,31 @@ pub enum PipelineError {
     Failed(String),
 }
 
+/// `e`'s message followed by each of its causes, joined with `": "`.
+///
+/// A cause whose text the message already contains is skipped, since
+/// `#[error("... {0}")]` variants often embed their source.
+pub fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let text = c.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = c.source();
+    }
+    out
+}
+
 impl PipelineError {
+    /// `Failed` carrying `e`'s whole cause chain, so an unexpected failure
+    /// still names the file and the OS error behind it.
+    pub fn failed(e: &(dyn std::error::Error + 'static)) -> Self {
+        PipelineError::Failed(with_causes(e))
+    }
+
     pub fn exit_code(&self) -> i32 {
         match self {
             PipelineError::ProjectNotFound(_)
@@ -136,6 +166,7 @@ impl PipelineError {
             | PipelineError::StalePlan(_) => 2,
             PipelineError::NotSameFilesystem { .. }
             | PipelineError::NotCowCapable { .. }
+            | PipelineError::NonUtf8FileNames(_)
             | PipelineError::OversizedFiles(_) => 3,
             // An aborted burn is a successful run that wrote nothing; every
             // other burn failure is 6 (media/burner).
@@ -152,7 +183,7 @@ mod tests {
     use diskrement_core::RelPath;
 
     #[test]
-    fn exit_codes_are_the_contract_for_the_p3_variants() {
+    fn exit_codes_are_the_contract_for_the_project_and_filesystem_variants() {
         assert_eq!(
             PipelineError::ProjectNotFound("photos".into()).exit_code(),
             2
@@ -212,6 +243,31 @@ mod tests {
         assert_eq!(
             PipelineError::OversizedFiles(vec![RelPath("huge.bin".into())]).exit_code(),
             3
+        );
+    }
+
+    #[test]
+    fn failed_renders_the_cause_chain_without_repeating_an_embedded_source() {
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "a.bin: denied");
+        let snap = crate::fs::snapshot::SnapshotError::Io(io);
+        assert_eq!(
+            PipelineError::failed(&snap).to_string(),
+            "internal error: snapshot I/O error: a.bin: denied (this is a bug)"
+        );
+        // `ConstraintViolation`'s message already embeds its detail, and it
+        // has no source: nothing is appended.
+        let embedded = CatalogError::ConstraintViolation("unique".into());
+        assert_eq!(with_causes(&embedded), "constraint violation: unique");
+    }
+
+    #[test]
+    fn non_utf8_file_names_are_an_exit_3_environment_error_that_says_rename() {
+        let e = PipelineError::NonUtf8FileNames(vec!["a\u{FFFD}".into(), "b\u{FFFD}".into()]);
+        assert_eq!(e.exit_code(), 3);
+        assert_eq!(
+            e.to_string(),
+            "file names are not valid UTF-8 and cannot be archived (rename them): \
+             a\u{FFFD}, b\u{FFFD}"
         );
     }
 

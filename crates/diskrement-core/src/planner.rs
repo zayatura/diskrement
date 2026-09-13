@@ -64,7 +64,7 @@ impl DiscState {
     ///
     /// Reporting only. The planner decides whether a file fits with an
     /// addition rather than this subtraction, because the two disagree when
-    /// `used_bytes > usable_bytes` — see `Bin::fits` in Task 5.
+    /// `used_bytes > usable_bytes` — see `Bin::fits`.
     pub fn free_bytes(&self) -> u64 {
         self.usable_bytes.saturating_sub(self.used_bytes)
     }
@@ -255,7 +255,7 @@ mod tests {
         plan.discs.iter().flat_map(disc_paths).collect()
     }
 
-    // --- planner types (Task 4) ---
+    // --- planner types ---
 
     #[test]
     fn disc_state_reports_free_bytes() {

@@ -24,3 +24,4 @@ mod s08_idempotent;
 mod s09_mark_dead;
 mod s10_warm_rescan;
 mod s11_exit_codes;
+mod s12_realistic_tree;

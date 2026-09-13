@@ -42,12 +42,13 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   scanner's size+mtime fast path never hits and the fingerprint cache is
   useless. `fs::snapshot::reflink_tree` does this — keep it that way.
 - **`std::process` has no `redirectErrorStream`.** `burn::cmd::system` reads
-  stdout on the calling thread (live `UPDATE` progress) and stderr on a second
-  thread into a shared buffer, replaying the buffered stderr lines through
-  `on_line` after the drain — this ports Scala's `redirectErrorStream(true)` +
-  `onLine`, where merged lines all reach the callback. Buffer order
-  approximates the interleaving, which is enough for `tail` and
-  `classify_failure`.
+  stdout on the calling thread (live `UPDATE` progress) and drains stderr on a
+  second thread, then replays stderr's lines through `on_line` and appends
+  them after stdout's — this ports Scala's `redirectErrorStream(true)` +
+  `onLine`, where merged lines all reach the callback. Stdout-then-stderr is
+  enough for `tail` and `classify_failure`. Lines are decoded lossily: never
+  go back to `BufRead::lines`, which stops at the first non-UTF-8 line and
+  leaves the pipe undrained, so a chatty child blocks forever.
 - **xorriso extracts over an existing file** (validated 2026-09-07, 1.5.8.pl02),
   but every extraction in this tree still targets a fresh path inside a
   `TempDir`, so nothing depends on that.
@@ -67,18 +68,19 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
 - `DISKREMENT_DISC_BYTES` is test-only and **may only shrink** usable capacity; it is deliberately undocumented in `--help`.
 - Catalog path precedence (`crates/diskrement-cli/src/paths.rs` `resolve`): `--catalog` > `--data-dir` > `$STATE_DIRECTORY` > `$XDG_DATA_HOME/diskrement`.
 - Linux only. Real burning requires membership in the `optical` group. Manual hardware checklist: `docs/smoke-test-real-media.md`.
+- Toolchain: `rust-toolchain.toml` pins an exact release (warnings are errors, so a floating channel breaks the build on every new lint). The pin is honoured only by rustup; a distro `cargo` (e.g. Arch's `rust` package) ignores it, so after a system Rust upgrade a new lint failure is a toolchain bump, fixed in its own `chore:` commit together with the pin.
 
 ## Invariants — do not "fix" these
 
-- **The catalog is append-only.** Rows are never updated or deleted. Enforced by schema and pinned by the `file_version`-only-grows proptest in `crates/diskrement-shell/src/catalog/store.rs`.
+- **The catalog history is append-only.** `file_version`, `placement`, `change_record`, `disc_event` and `lost_version` rows are never updated or deleted; the `file_version`-only-grows proptest in `crates/diskrement-shell/src/catalog/store.rs` pins it. The only in-place writes are two forward-only status transitions, each guarded in its `where` clause: `disc.status` OPEN→FINALIZED and `session.state` BURNED→VERIFIED. There are no triggers — the schema bounds the values (check constraints), not the mutations; don't add a third kind of update.
 - **`DEAD` is derived, never stored.** `disc.status` keeps its `check (status in ('OPEN','FINALIZED'))` constraint; dead-ness is computed from `disc_event`. A test asserting only the derived value would pass against an illegal update-in-place, so also assert the row itself is unchanged.
 - **Commit after success.** No `PLANNED` rows are persisted; the staged plan in the work dir is the recovery unit. A crash before commit leaves the catalog untouched.
 - **One disc per cycle.** Each scan→plan→burn writes exactly one disc/session; `plan --finalize` seals a non-full disc.
-- **The embedded `catalog.sqlite` reflects post-burn state** (built via `apply_update_to` on a work copy) so each disc is self-describing. The earlier pre-burn approach was deliberately reversed; never file-swap the SQLite file under a live pool.
+- **The embedded `catalog.sqlite` reflects post-burn state** (built via `apply_update_to` on a work copy) so each disc is self-describing. The earlier pre-burn approach was deliberately reversed; never file-swap the SQLite file under a live connection.
 - **`LOST` is per physical copy, not per content hash.** After a recovery burn, two versions sharing a hash can legitimately read `LOST` and `CURRENT`.
 - **`StalePlan` advice is always "re-run plan", never "run reset"** — `reset` destroys staging that `StagingVerifier` needs. The `s07_reset` scenario asserts the message does not contain "reset".
 - **`Pipeline` returns data and does no I/O**; the CLI resolves paths and renders.
-- **Exit codes are a stable contract** (`crates/diskrement-shell/src/error.rs`, `PipelineError::exit_code`): 2 = state/lookup, 3 = environment/oversize, 4 = verify mismatch, 5 = unexpected, 6 = media/burner; an aborted burn exits 0. Pinned by that file's tests and `crates/diskrement-cli/tests/binary.rs`.
+- **Exit codes are a stable contract** (`crates/diskrement-shell/src/error.rs`, `PipelineError::exit_code`): 2 = state/lookup, 3 = environment/oversize (including source names that are not UTF-8), 4 = verify mismatch, 5 = unexpected, 6 = media/burner; an aborted burn exits 0. Pinned by that file's tests and `crates/diskrement-cli/tests/binary.rs`.
 
 Known deferred debt, documented on purpose — don't casually "fix" it: `archive_pointers` has no dead flag and is already baked onto burned discs; `write_disc` doesn't refuse a dead disc; the fingerprint cache never prunes deleted paths; `copies>1` redundancy degrades silently.
 
