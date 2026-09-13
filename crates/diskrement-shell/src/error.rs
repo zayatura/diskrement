@@ -114,6 +114,13 @@ pub enum PipelineError {
         work_dir: std::path::PathBuf,
         detail: String,
     },
+    /// Source file names that cannot be recorded as text. An environment
+    /// problem the operator fixes by renaming, so exit 3.
+    #[error(
+        "file names are not valid UTF-8 and cannot be archived (rename them): {}",
+        .0.join(", ")
+    )]
+    NonUtf8FileNames(Vec<String>),
     /// Renders its cause's message and nothing else (`PipelineError.Burn`).
     #[error(transparent)]
     Burn(#[from] crate::burn::BurnError),
@@ -136,6 +143,7 @@ impl PipelineError {
             | PipelineError::StalePlan(_) => 2,
             PipelineError::NotSameFilesystem { .. }
             | PipelineError::NotCowCapable { .. }
+            | PipelineError::NonUtf8FileNames(_)
             | PipelineError::OversizedFiles(_) => 3,
             // An aborted burn is a successful run that wrote nothing; every
             // other burn failure is 6 (media/burner).
@@ -212,6 +220,17 @@ mod tests {
         assert_eq!(
             PipelineError::OversizedFiles(vec![RelPath("huge.bin".into())]).exit_code(),
             3
+        );
+    }
+
+    #[test]
+    fn non_utf8_file_names_are_an_exit_3_environment_error_that_says_rename() {
+        let e = PipelineError::NonUtf8FileNames(vec!["a\u{FFFD}".into(), "b\u{FFFD}".into()]);
+        assert_eq!(e.exit_code(), 3);
+        assert_eq!(
+            e.to_string(),
+            "file names are not valid UTF-8 and cannot be archived (rename them): \
+             a\u{FFFD}, b\u{FFFD}"
         );
     }
 

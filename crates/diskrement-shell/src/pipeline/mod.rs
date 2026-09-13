@@ -143,7 +143,10 @@ impl<'a> Pipeline<'a> {
             self.progress,
             &hasher::hash,
         )
-        .map_err(Self::failed)?;
+        .map_err(|e| match e {
+            scanner::ScanError::NonUtf8Names(names) => PipelineError::NonUtf8FileNames(names),
+            other => Self::failed(other),
+        })?;
         staged::write_scan(&self.paths.work_dir, &out.files).map_err(Self::failed)?;
         // Cache write is best-effort; a failure already warned with the path.
         let mut entries = BTreeMap::new();
