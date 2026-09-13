@@ -89,6 +89,35 @@ pub fn plan_from(
     }
 }
 
+/// Why `report` no longer describes `scanned`, or `None` if it still does.
+///
+/// `scan --force` re-stages the scan without touching the plan, so the two
+/// can drift apart. The plan is stale when a file it places is missing from
+/// the scan or has a different hash or size there, or when a path it
+/// tombstones is present again. A file the scan added that the plan does not
+/// place is not staleness: the next cycle picks it up.
+pub fn stale_detail(report: &PlanReport, scanned: &[ScannedFile]) -> Option<String> {
+    let by_path: std::collections::HashMap<&diskrement_core::RelPath, &ScannedFile> =
+        scanned.iter().map(|f| (&f.rel_path, f)).collect();
+    for planned in &report.disc.files {
+        let what = match by_path.get(&planned.rel_path) {
+            None => "is gone from",
+            Some(f) if f.content_hash != planned.content_hash => "changed in",
+            Some(f) if f.size_bytes != planned.size_bytes => "changed in",
+            Some(_) => continue,
+        };
+        return Some(format!(
+            "{} {what} the staged scan after this plan was staged",
+            planned.rel_path
+        ));
+    }
+    report
+        .tombstones
+        .iter()
+        .find(|t| by_path.contains_key(t))
+        .map(|t| format!("{t} is back in the staged scan after this plan tombstoned it"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +353,39 @@ mod tests {
         assert!(report.disc.files.is_empty());
         assert!(report.tombstones.is_empty());
         assert_eq!(report.remaining.more_discs, 0);
+    }
+
+    fn plan_of(scanned: &[ScannedFile]) -> PlanReport {
+        plan_from(
+            &CatalogView::empty(),
+            scanned,
+            &[],
+            DiscType::BdR,
+            Capacity::new(1_000_000),
+            false,
+        )
+    }
+
+    #[test]
+    fn a_plan_matching_its_scan_is_not_stale() {
+        let scanned = vec![file("a", 10), file("b", 20)];
+        assert_eq!(stale_detail(&plan_of(&scanned), &scanned), None);
+    }
+
+    #[test]
+    fn a_file_added_to_the_scan_after_planning_is_not_staleness() {
+        let scanned = vec![file("a", 10)];
+        let report = plan_of(&scanned);
+        assert_eq!(
+            stale_detail(&report, &[file("a", 10), file("new", 5)]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_planned_file_gone_from_the_scan_makes_the_plan_stale() {
+        let report = plan_of(&[file("a", 10), file("b", 20)]);
+        let detail = stale_detail(&report, &[file("b", 20)]).expect("stale");
+        assert!(detail.contains("a is gone"), "{detail}");
     }
 }

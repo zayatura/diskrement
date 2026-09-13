@@ -262,6 +262,10 @@ impl<'a> Pipeline<'a> {
             )));
         }
 
+        if let Some(detail) = planning::stale_detail(&report, &scanned) {
+            return Err(PipelineError::StalePlan(detail));
+        }
+
         let snap_root = self.paths.work_dir.join("snapshot");
         if !snap_root.exists() {
             return Err(PipelineError::SnapshotMissing(name.to_string()));
@@ -1303,6 +1307,55 @@ mod burn_tests {
         // the staged-disc verifier needs.
         assert!(err.to_string().contains("re-run plan"), "{err}");
         assert!(!err.to_string().contains("reset"), "{err}");
+    }
+
+    /// `scan --force` after `plan` re-stages the scan but leaves the plan: a
+    /// planned file whose content changed in between must not reach the
+    /// stager, where it used to fail as an exit-6 "content hash mismatch".
+    #[test]
+    fn a_planned_file_that_changed_in_the_staged_scan_makes_the_plan_stale() {
+        let mut env = staged_env(&[("a.bin", b"aaaa"), ("b.bin", b"bbbb")], false);
+        let mut scanned = staged::read_scan(&env.work).unwrap().unwrap();
+        std::fs::write(env.work.join("snapshot/a.bin"), b"AAAA-changed").unwrap();
+        scanned[0].content_hash =
+            crate::fs::hasher::hash(&env.work.join("snapshot/a.bin")).unwrap();
+        scanned[0].size_bytes = 12;
+        staged::write_scan(&env.work, &scanned).unwrap();
+
+        let err = run_burn(&mut env).unwrap_err();
+        match &err {
+            PipelineError::StalePlan(detail) => assert!(detail.contains("a.bin"), "{detail}"),
+            other => panic!("expected StalePlan, got {other}"),
+        }
+        assert_eq!(err.exit_code(), 2);
+        assert!(!err.to_string().contains("reset"), "{err}");
+        assert!(
+            env.catalog
+                .sessions_by_state(ProjectId(1), SessionState::Burned)
+                .unwrap()
+                .is_empty(),
+            "nothing committed"
+        );
+        assert!(
+            !env.work.join("staging/disc-1").exists(),
+            "refused before staging"
+        );
+    }
+
+    /// A path the plan tombstones that is back in the staged scan: burning
+    /// would record a deletion of a file that exists.
+    #[test]
+    fn a_tombstoned_path_present_in_the_staged_scan_makes_the_plan_stale() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        let mut report = staged::read_plan(&env.work).unwrap().unwrap();
+        report.tombstones.push(RelPath("a.bin".to_string()));
+        staged::write_plan(&env.work, &report).unwrap();
+
+        let err = run_burn(&mut env).unwrap_err();
+        match &err {
+            PipelineError::StalePlan(detail) => assert!(detail.contains("a.bin"), "{detail}"),
+            other => panic!("expected StalePlan, got {other}"),
+        }
     }
 
     #[test]
