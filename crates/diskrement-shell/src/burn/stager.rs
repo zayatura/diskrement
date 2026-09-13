@@ -18,7 +18,7 @@ use rayon::prelude::*;
 
 use crate::burn::{snapshot_writer, BurnError, BurnResult, DiscImage};
 use crate::fs::hasher;
-use crate::fs::snapshot::clone_unsupported;
+use crate::fs::snapshot::{clone_unsupported, copy_file_times_and_mode};
 use crate::progress::{phase, ProgressSink};
 
 pub fn stage(
@@ -162,15 +162,7 @@ fn copy_all(
 /// the same, but the staged tree must carry the source's file mtimes — that is
 /// what `cp -p` gave the Scala stager (CLAUDE.md).
 fn copy_file_metadata(src: &Path, dst: &Path) -> Result<(), BurnError> {
-    let meta = std::fs::metadata(src).map_err(BurnError::Io)?;
-    std::fs::set_permissions(dst, meta.permissions()).map_err(BurnError::Io)?;
-    let mtime = meta.modified().map_err(BurnError::Io)?;
-    std::fs::File::options()
-        .write(true)
-        .open(dst)
-        .map_err(BurnError::Io)?
-        .set_modified(mtime)
-        .map_err(BurnError::Io)
+    copy_file_times_and_mode(src, dst).map_err(BurnError::Io)
 }
 
 /// Every regular file under the staged tree, metadata included.
@@ -513,6 +505,43 @@ mod tests {
             std::fs::read(fx.staging.join("data/n/b.bin")).unwrap(),
             b"bb"
         );
+    }
+
+    /// A read-only source file (every git object is 0444) stages on both copy
+    /// paths, keeping its mode and mtime. Restoring the mtime must not need
+    /// write access to a destination that already carries the source's mode.
+    #[test]
+    fn a_read_only_source_file_stages_on_the_clone_and_the_fallback_path() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fallback = |_s: &Path, _d: &Path| Err(std::io::Error::from_raw_os_error(95));
+        let clone = |s: &Path, d: &Path| std::fs::copy(s, d).map(|_| ());
+        for (label, cloner) in [
+            (
+                "clone",
+                &clone as &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+            ),
+            ("fallback", &fallback),
+        ] {
+            let fx = fixture();
+            let files = vec![source(&fx, "ro.bin", b"read only")];
+            let src = fx.snapshot.join("ro.bin");
+            let stamp =
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+            std::fs::File::options()
+                .write(true)
+                .open(&src)
+                .unwrap()
+                .set_modified(stamp)
+                .unwrap();
+            std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+            stage_with(&image(&fx, files), &NoopSink, 1, cloner)
+                .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+
+            let staged = std::fs::metadata(fx.staging.join("data/ro.bin")).unwrap();
+            assert_eq!(staged.permissions().mode() & 0o777, 0o444, "{label}");
+            assert_eq!(staged.modified().unwrap(), stamp, "{label}");
+        }
     }
 
     /// A clone failure that is *not* a capability signal is a real error and
