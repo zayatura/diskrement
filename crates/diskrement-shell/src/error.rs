@@ -130,7 +130,31 @@ pub enum PipelineError {
     Failed(String),
 }
 
+/// `e`'s message followed by each of its causes, joined with `": "`.
+///
+/// A cause whose text the message already contains is skipped, since
+/// `#[error("... {0}")]` variants often embed their source.
+pub fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let text = c.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = c.source();
+    }
+    out
+}
+
 impl PipelineError {
+    /// `Failed` carrying `e`'s whole cause chain, so an unexpected failure
+    /// still names the file and the OS error behind it.
+    pub fn failed(e: &(dyn std::error::Error + 'static)) -> Self {
+        PipelineError::Failed(with_causes(e))
+    }
+
     pub fn exit_code(&self) -> i32 {
         match self {
             PipelineError::ProjectNotFound(_)
@@ -221,6 +245,20 @@ mod tests {
             PipelineError::OversizedFiles(vec![RelPath("huge.bin".into())]).exit_code(),
             3
         );
+    }
+
+    #[test]
+    fn failed_renders_the_cause_chain_without_repeating_an_embedded_source() {
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "a.bin: denied");
+        let snap = crate::fs::snapshot::SnapshotError::Io(io);
+        assert_eq!(
+            PipelineError::failed(&snap).to_string(),
+            "internal error: snapshot I/O error: a.bin: denied (this is a bug)"
+        );
+        // `ConstraintViolation`'s message already embeds its detail, and it
+        // has no source: nothing is appended.
+        let embedded = CatalogError::ConstraintViolation("unique".into());
+        assert_eq!(with_causes(&embedded), "constraint violation: unique");
     }
 
     #[test]

@@ -59,8 +59,15 @@ impl<'a> Pipeline<'a> {
         }
     }
 
-    fn failed(e: impl std::fmt::Display) -> PipelineError {
-        PipelineError::Failed(e.to_string())
+    fn failed(e: impl std::error::Error + 'static) -> PipelineError {
+        PipelineError::failed(&e)
+    }
+
+    fn corrupt_scan(e: impl std::error::Error + 'static) -> PipelineError {
+        PipelineError::Failed(format!(
+            "corrupt scan.json: {}",
+            crate::error::with_causes(&e)
+        ))
     }
 
     fn project(&self, name: &str) -> Result<Project, PipelineError> {
@@ -99,8 +106,8 @@ impl<'a> Pipeline<'a> {
     ) -> Result<ScanReport, PipelineError> {
         let p = self.project(name)?;
         if !force && !verify {
-            if let Some(files) = staged::read_scan(&self.paths.work_dir)
-                .map_err(|e| Self::failed(format!("corrupt scan.json: {e}")))?
+            if let Some(files) =
+                staged::read_scan(&self.paths.work_dir).map_err(Self::corrupt_scan)?
             {
                 return self.count(&p, &files, None);
             }
@@ -197,7 +204,7 @@ impl<'a> Pipeline<'a> {
     ) -> Result<PlanReport, PipelineError> {
         let p = self.project(name)?;
         let scanned = staged::read_scan(&self.paths.work_dir)
-            .map_err(|e| Self::failed(format!("corrupt scan.json: {e}")))?
+            .map_err(Self::corrupt_scan)?
             .ok_or_else(|| PipelineError::NoStagedScan(name.to_string()))?;
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
@@ -746,6 +753,33 @@ mod tests {
         assert_eq!(r.hashed, Some(2));
         assert_eq!(r.scanned_files, 2);
         assert_eq!(staged::read_scan(&e.work).unwrap().unwrap().len(), 2);
+    }
+
+    /// An unexpected failure still says what failed: the rendered detail
+    /// carries the whole cause chain and the file, not just the outermost
+    /// "snapshot I/O error".
+    #[test]
+    fn an_unexpected_scan_failure_names_the_file_and_the_os_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut e = setup();
+        write_src(&e, "secret.bin", b"s");
+        std::fs::set_permissions(
+            e.src.join("secret.bin"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        e.pipeline.init(&project_init(&e)).unwrap();
+        if std::fs::File::open(e.src.join("secret.bin")).is_ok() {
+            eprintln!("SKIP: running as root, a mode-000 file is still readable");
+            return;
+        }
+
+        let err = e.pipeline.scan("p", false, false).unwrap_err();
+        let msg = err.to_string();
+        assert_eq!(err.exit_code(), 5);
+        assert!(msg.contains("snapshot I/O error"), "{msg}");
+        assert!(msg.contains("secret.bin"), "{msg}");
+        assert!(msg.contains("Permission denied"), "{msg}");
     }
 
     #[test]

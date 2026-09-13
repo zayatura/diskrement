@@ -60,14 +60,28 @@ fn reflink_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         let rel = entry.path().strip_prefix(src).unwrap_or(entry.path());
         let target = dst.join(rel);
         let ft = entry.file_type();
-        if ft.is_dir() {
-            std::fs::create_dir_all(&target)?;
+        let copied = if ft.is_dir() {
+            std::fs::create_dir_all(&target)
         } else if ft.is_file() {
-            reflink_copy::reflink(entry.path(), &target)?;
-            copy_file_times_and_mode(entry.path(), &target)?;
-        }
+            reflink_copy::reflink(entry.path(), &target)
+                .and_then(|()| copy_file_times_and_mode(entry.path(), &target))
+        } else {
+            Ok(())
+        };
+        copied.map_err(|e| naming(entry.path(), e))?;
     }
     Ok(())
+}
+
+/// Prefix `e` with the path it concerns. A capability errno is returned
+/// untouched, because `classify` reads its raw OS error to decide
+/// `NotCowCapable`.
+fn naming(path: &Path, e: std::io::Error) -> std::io::Error {
+    if clone_unsupported(&e) {
+        e
+    } else {
+        std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))
+    }
 }
 
 /// Give `dst` the mode and mtime of `src`.
