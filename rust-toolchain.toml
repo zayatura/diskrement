@@ -1,2 +1,6 @@
 [toolchain]
-channel = "stable"
+# An exact release, not "stable": warnings are errors for this workspace, so a
+# floating channel turns every new rustc/clippy lint into a red build with no
+# code change. Bump deliberately, in its own `chore:` commit.
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]

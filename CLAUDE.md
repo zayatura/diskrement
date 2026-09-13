@@ -68,6 +68,7 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
 - `DISKREMENT_DISC_BYTES` is test-only and **may only shrink** usable capacity; it is deliberately undocumented in `--help`.
 - Catalog path precedence (`crates/diskrement-cli/src/paths.rs` `resolve`): `--catalog` > `--data-dir` > `$STATE_DIRECTORY` > `$XDG_DATA_HOME/diskrement`.
 - Linux only. Real burning requires membership in the `optical` group. Manual hardware checklist: `docs/smoke-test-real-media.md`.
+- Toolchain: `rust-toolchain.toml` pins an exact release (warnings are errors, so a floating channel breaks the build on every new lint). The pin is honoured only by rustup; a distro `cargo` (e.g. Arch's `rust` package) ignores it, so after a system Rust upgrade a new lint failure is a toolchain bump, fixed in its own `chore:` commit together with the pin.
 
 ## Invariants — do not "fix" these
 
