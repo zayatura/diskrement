@@ -42,12 +42,13 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   scanner's size+mtime fast path never hits and the fingerprint cache is
   useless. `fs::snapshot::reflink_tree` does this — keep it that way.
 - **`std::process` has no `redirectErrorStream`.** `burn::cmd::system` reads
-  stdout on the calling thread (live `UPDATE` progress) and stderr on a second
-  thread into a shared buffer, replaying the buffered stderr lines through
-  `on_line` after the drain — this ports Scala's `redirectErrorStream(true)` +
-  `onLine`, where merged lines all reach the callback. Buffer order
-  approximates the interleaving, which is enough for `tail` and
-  `classify_failure`.
+  stdout on the calling thread (live `UPDATE` progress) and drains stderr on a
+  second thread, then replays stderr's lines through `on_line` and appends
+  them after stdout's — this ports Scala's `redirectErrorStream(true)` +
+  `onLine`, where merged lines all reach the callback. Stdout-then-stderr is
+  enough for `tail` and `classify_failure`. Lines are decoded lossily: never
+  go back to `BufRead::lines`, which stops at the first non-UTF-8 line and
+  leaves the pipe undrained, so a chatty child blocks forever.
 - **xorriso extracts over an existing file** (validated 2026-09-07, 1.5.8.pl02),
   but every extraction in this tree still targets a fresh path inside a
   `TempDir`, so nothing depends on that.
