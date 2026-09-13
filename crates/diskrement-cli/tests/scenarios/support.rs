@@ -199,9 +199,9 @@ impl Cli {
 /// same-size files never collide and a run reproduces anywhere.
 ///
 /// `sha256("<rel_path>@<version>")` as lowercase hex, repeated and truncated
-/// to `size` — the recipe of `scripts/harvest-fixtures.sh`, which lived in
-/// this repository until P10 and survives only in its git history, and
-/// which the P0 corpus was harvested with. `Tree.scala` used a Java `Random`
+/// to `size` — the recipe of `scripts/harvest-fixtures.sh`, which the
+/// fixture corpus was harvested with and which survives on the `scala`
+/// branch. `Tree.scala` used a Java `Random`
 /// seeded from `String.hashCode`, which Rust cannot reproduce and nothing
 /// needs it to: the property that matters is determinism plus
 /// version-distinctness.

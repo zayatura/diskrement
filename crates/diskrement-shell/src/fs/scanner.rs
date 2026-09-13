@@ -12,7 +12,6 @@ use crate::progress::{phase, ProgressSink};
 
 /// Regular files under `root`, symlinks excluded, dotfiles included
 /// (`FileSystemLive.walk`). Order is directory order; `scan` sorts at the end.
-#[allow(dead_code)]
 pub(crate) fn walk(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
@@ -34,7 +33,7 @@ pub(crate) struct FileStat {
 }
 
 pub(crate) fn stat(path: &Path) -> std::io::Result<FileStat> {
-    let meta = std::fs::metadata(path)?; // nofollow: stats the link itself
+    let meta = std::fs::metadata(path)?; // follows links; `walk` already excludes them
     let ts: DateTime<Utc> = meta.modified()?.into();
     let mtime =
         ts - chrono::Duration::nanoseconds((ts.timestamp_subsec_nanos() % 1_000_000) as i64);

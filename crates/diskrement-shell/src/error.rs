@@ -5,8 +5,8 @@
 ///
 /// The Scala equivalent was a sealed `CatalogError` reached through
 /// `refineOrDie`: expected faults became typed errors and anything else killed
-/// the fiber. `Unexpected` is that second case — it stays a value here, and P6
-/// maps it to the same exit code an unexpected failure had (5).
+/// the fiber. `Unexpected` is that second case — it stays a value here, and
+/// maps to the same exit code an unexpected failure had (5).
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
     #[error("project already exists: {0}")]
@@ -55,8 +55,7 @@ pub(crate) fn is_unique_violation(e: &rusqlite::Error) -> bool {
     )
 }
 
-/// `PipelineError.scala` — the variants P3 can produce. Later phases append
-/// the plan/burn/verify variants; the exit ladder is the stable contract
+/// `PipelineError.scala`. The exit ladder is the stable contract
 /// (spec §3.2) and is pinned by the CLI's ExitMapping port.
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
@@ -95,7 +94,7 @@ pub enum PipelineError {
     /// `verify --disc`'s does, which is why that one stays signed.
     #[error("disc {0} is already marked dead")]
     DiscAlreadyDead(u32),
-    /// Surfaced by `plan` in its report and refused by `burn` (P5): the
+    /// Surfaced by `plan` in its report and refused by `burn`: the
     /// two-stage oversize check.
     #[error(
         "oversized files cannot be placed: {}",
@@ -184,7 +183,7 @@ mod tests {
     use diskrement_core::RelPath;
 
     #[test]
-    fn exit_codes_are_the_contract_for_the_p3_variants() {
+    fn exit_codes_are_the_contract_for_the_project_and_filesystem_variants() {
         assert_eq!(
             PipelineError::ProjectNotFound("photos".into()).exit_code(),
             2

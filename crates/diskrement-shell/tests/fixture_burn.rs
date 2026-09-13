@@ -1,6 +1,6 @@
 //! Replay a harvested burn through the real pipeline and diff everything it
 //! produced against what the Scala build produced at the same moment
-//! (spec §4, §9's P5 row).
+//! (spec §4).
 //!
 //! Every input comes out of `fixtures/`: the pre-burn catalog, the whole work
 //! dir (snapshot + staged scan + staged plan), and the `createdAt` the Scala

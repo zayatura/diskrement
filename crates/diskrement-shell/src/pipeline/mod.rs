@@ -1,6 +1,5 @@
 //! The pipeline (`Pipeline.scala`): returns reports, performs no path
-//! resolution, and — for scan — **writes no catalog rows**. P3 lands `init`,
-//! `scan` and `status`; later phases append the rest of the nine methods.
+//! resolution, and — for scan — **writes no catalog rows**.
 
 pub mod planning;
 pub mod reports;
@@ -169,7 +168,7 @@ impl<'a> Pipeline<'a> {
         }
         let _ = FingerprintCache::new(self.paths.scan_cache.clone()).put_all(&entries);
         // The snapshot is NOT released: burn re-derives `<work>/snapshot`;
-        // only `reset` (P6) removes it.
+        // only `reset` removes it.
         let ScanOutput { files, hashed } = out;
         Ok((files, hashed))
     }
@@ -1824,7 +1823,7 @@ mod mark_dead_tests {
     /// `create_project` rather than `Pipeline::init`, and a hand-built
     /// snapshot rather than `Pipeline::scan`: `init` probes the work dir for
     /// reflink support and `scan` clones the source tree, neither of which
-    /// this phase's behaviour depends on. Every cycle below drives the real
+    /// mark-dead.s behaviour depends on. Every cycle below drives the real
     /// `plan` and `burn`, which is where mark-dead's consequences show up.
     fn env() -> Env {
         let dir = tempfile::TempDir::new().unwrap();

@@ -130,7 +130,7 @@ A burned disc that is later lost, destroyed, or unreadable can be written off:
 diskrement disc mark-dead photos 1
 ```
 
-This records an append-only `MARKED_DEAD` event — disc rows are never rewritten — and
+This records an append-only `MARKED_DEAD` event — the disc row itself is left untouched — and
 prints a report of the casualties: versions that lived only on that disc and are no
 longer their path's current version are **permanently lost**; the ones still current are
 listed for re-burn, and the next `scan` / `plan` / `burn` writes them to fresh media.

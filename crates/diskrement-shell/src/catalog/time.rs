@@ -5,9 +5,9 @@
 //! `Z`-suffixed, with zero fractional digits when the instant is whole-second
 //! and otherwise 3, 6, or 9 — the shortest width that loses nothing.
 //! `SecondsFormat::AutoSi` has the same rule. `tests/timestamps.rs` holds it to
-//! that against every timestamp string in the P0 fixture corpus.
+//! that against every timestamp string in the fixture corpus.
 //!
-//! Both directions live here so a later phase's JSON and sidecar-cache writers
+//! Both directions live here so the JSON and sidecar-cache writers
 //! cannot quietly grow a second, differently-behaved formatter.
 
 use chrono::{DateTime, SecondsFormat, Utc};

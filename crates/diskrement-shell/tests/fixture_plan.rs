@@ -1,5 +1,5 @@
 //! Re-plan the harvested cycles from the corpus and diff the result against
-//! the plan the Scala build staged at the same moment (spec §4, §9's P4 row).
+//! the plan the Scala build staged at the same moment (spec §4).
 //!
 //! Every input comes out of `fixtures/`: the catalog state, the staged scan,
 //! the project's disc type and margin, and the harvest's capacity override.

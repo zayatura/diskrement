@@ -1,7 +1,7 @@
 //! Shared helpers for the fixture-compatibility tests.
 //!
-//! The corpus under `fixtures/` was harvested from the Scala build in P0 and is
-//! the reference for every compatibility test from P2 onward (spec §4). It is
+//! The corpus under `fixtures/` was harvested from the Scala build before any
+//! Rust was written and is the reference for every compatibility test (spec §4). It is
 //! read-only in the strongest sense available: see `open_fixture`.
 
 // The comparison helpers are re-exported from the library's `testutil` module.

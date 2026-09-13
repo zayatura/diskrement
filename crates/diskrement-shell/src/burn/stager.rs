@@ -1,7 +1,7 @@
 //! Stages one disc tree and re-hashes it (`Stager.scala`).
 //!
 //! `<staging>/data` is the payload and `<staging>/.diskrement` the metadata;
-//! for the real burner (P8) this staged tree is exactly what xorriso masters,
+//! for the real burner this staged tree is exactly what xorriso masters,
 //! so the simulated and real backends share it.
 //!
 //! The copy is `Stager.scala`'s `cp --reflink=always --parents -p` batches,
