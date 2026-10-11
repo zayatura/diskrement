@@ -146,8 +146,9 @@ fn run_inner(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     // the migration succeeds.
     conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
     let migrated = migrate(conn, current);
-    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-    migrated
+    let restored = conn.execute_batch("PRAGMA foreign_keys=ON;");
+    // The migration's error, if any, wins over a failure to restore.
+    migrated.and(restored)
 }
 
 fn migrate(conn: &mut Connection, current: i64) -> Result<(), rusqlite::Error> {

@@ -363,14 +363,26 @@ fn a_v2_catalog_migrates_to_v3_keeping_every_disc_id() {
         .unwrap();
     assert_eq!(dangling, 0);
 
-    // A disc inserted after the migration takes an id above every old one,
-    // so the AUTOINCREMENT sequence survived the rebuild.
+    // The rebuilt table's AUTOINCREMENT sequence is at least the highest old
+    // id, so a disc inserted after the migration can never reuse an id that
+    // a session or disc_event row might once have referenced.
+    let max_old = before.iter().map(|(i, _, _)| *i).max().unwrap();
+    let seq: i64 = conn
+        .query_row(
+            "select seq from sqlite_sequence where name = 'disc'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        seq >= max_old,
+        "disc sequence {seq} below old max id {max_old}"
+    );
     conn.execute(
         "insert into disc (project_id, ordinal, disc_type, usable_bytes, status, label, copy_set)
          values (1, 99, 'BD_R', 1, 'OPEN', 'x', 1)",
         [],
     )
     .unwrap();
-    let max_old = before.iter().map(|(i, _, _)| *i).max().unwrap();
     assert!(conn.last_insert_rowid() > max_old);
 }
