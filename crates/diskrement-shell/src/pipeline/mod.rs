@@ -387,6 +387,11 @@ impl<'a> Pipeline<'a> {
             .next_session_ordinal(p.id, key)
             .map_err(DiscFailure::Unwritten)?;
         if sess_ord == sp.session_ordinal + 1 {
+            // Committed by an earlier run that stopped before its cleanup or
+            // the plan rewrite; finish the cleanup it owed.
+            if !burner.retains_staging() {
+                discard_staging(&self.staging_dir(&disc_name));
+            }
             return Ok(None);
         }
         if sess_ord != sp.session_ordinal {
@@ -1564,6 +1569,41 @@ mod burn_tests {
         assert_eq!(err.exit_code(), 0);
         assert!(!env.work.join("staging").exists());
         assert_eq!(burned_sessions(&env), 0);
+    }
+
+    #[test]
+    fn resuming_a_real_burn_removes_a_committed_discs_leftover_tree() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        // A directory where the rewrite's temp file goes makes it fail, so
+        // the staged plan still lists 1A after 1A commits.
+        let tmp = env.work.join("staged/plan.json.tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let script = ScriptedExec::new().toc(&[BLANK]).identities(&[Some(ID_1A)]);
+        let err = run_real_burn(&mut env, &script, &ScriptedOperator::new(&[true])).unwrap_err();
+        assert_eq!(
+            partial_parts(&err),
+            (vec!["1A".to_string()], None, vec!["1B".to_string()])
+        );
+
+        // What a crash between 1A's commit and its cleanup leaves behind.
+        let leftover = env.work.join("staging/disc-1A/data");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("a.bin"), b"aaaa").unwrap();
+        std::fs::remove_dir(&tmp).unwrap();
+
+        let script = ScriptedExec::new().toc(&[BLANK]).identities(&[Some(ID_1B)]);
+        let report = run_real_burn(&mut env, &script, &ScriptedOperator::new(&[true])).unwrap();
+
+        assert_eq!(
+            report.discs.iter().map(|d| d.disc).collect::<Vec<_>>(),
+            vec![DiscKey::new(1, 1)],
+            "1A is not burned twice"
+        );
+        assert!(
+            !env.work.join("staging/disc-1A").exists(),
+            "the resume path cleans up 1A"
+        );
+        assert!(!env.work.join("staging/disc-1B").exists());
     }
 
     #[test]
