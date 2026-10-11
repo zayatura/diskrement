@@ -19,7 +19,7 @@ cargo build --release                        # -> target/release/diskrement
 
 Single test: `cargo test -p diskrement-shell catalog::store`. Warnings are failures via `.cargo/config.toml` — enforced, not merely by convention.
 
-The differential harness that used to compare against the Scala binary was deleted with the Scala tree at P10; `fixtures/` is now a frozen corpus that cannot be regenerated from `main`.
+The differential harness that used to compare against the Scala binary was deleted with the Scala tree at P10, and the byte/row comparisons against `fixtures/` were retired with multiple copies (schema V3). `fixtures/` is now a frozen corpus of V2 catalogs and staged discs, used only as input; it cannot be regenerated from `main`.
 
 ## What "verified" means
 

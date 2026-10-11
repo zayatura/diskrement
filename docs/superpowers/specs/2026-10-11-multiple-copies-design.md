@@ -45,6 +45,12 @@ missing copy.
   burned keep their embedded V2 catalog, which remains readable.
 - **The staged `plan.json` and on-disc `/.diskrement` JSON** change shape (§6.1, §7.5).
   Both were frozen by the same §3.1 contract, relaxed for the same reason.
+- **The Scala-comparison fixture tests are retired.** Seven tests compared Rust
+  output byte for byte or row for row against `fixtures/` (schema, manifest
+  hash, burn replay, catalog replay, mark-dead replay, plan replay, pointers);
+  V3 and the new JSON fields break each of them by design. The corpus stays as
+  input: V2 catalogs that must migrate and read, staged discs the verifier
+  must accept, and timestamp strings.
 
 ### 3.2 Invariants that hold
 

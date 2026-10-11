@@ -1,5 +1,13 @@
 # Golden fixture corpus (Rust rewrite)
 
+> **Status (2026-10-11):** the tests that compared Rust output against this
+> corpus byte for byte or row for row (schema, manifest hash, burn replay,
+> catalog replay, mark-dead replay, plan replay, pointers) were retired with
+> the multiple-copies change, which deliberately changed the schema (V3) and
+> the on-disc JSON. The corpus remains as **input**: V2 catalogs that must
+> still migrate and read (`fixture_catalog.rs`), staged discs the verifier
+> must accept (`fixture_verify.rs`), and timestamp strings (`timestamps.rs`).
+
 Harvested from the **Scala** implementation by `scripts/harvest-fixtures.sh`,
 which lived in this repository until P10 and survives only in its git history
 — the `scala` branch preserves the sbt tree it drove, but not the script,
