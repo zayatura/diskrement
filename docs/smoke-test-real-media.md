@@ -5,9 +5,19 @@ Run this with the Rust binary: `cargo build --release -p diskrement-cli`, then
 mount) are the two the automated image-backed suite cannot reach at all —
 `tests/xorriso_image.rs` covers osirrox extraction, but never a mount.
 
-Run on the dev machine (Pioneer BD-RW BDR-UD04, `/dev/sr1` as of 2026-09-11 —
-`/dev/sr0` is now the PiKVM virtual boot drive) with one expendable
+Run on the dev machine (Pioneer BD-RW BDR-UD04) with one expendable
 BD-R (or BD-RE for repeatable drills) before declaring cycle 2 done.
+The machine also has a PiKVM virtual boot drive, and the two swap `/dev/srN`
+numbers between boots (the Pioneer was `sr1` on 2026-09-11 and `sr0` on
+2026-10-11). Address the burner by its stable udev path, which `xorriso`, the
+`udisksctl` mount in `verify` and `diskrement` all accept:
+
+```
+export DISKREMENT_DEVICE=/dev/disk/by-id/usb-PIONEER_BD-RW_BDR-UD04_<serial>-0:0
+```
+
+`ls -l /dev/disk/by-id/ | grep sr` shows which `srN` it currently is. The run
+records below name the device as it was on the day.
 Prereq: `sudo usermod -aG optical $USER` + re-login (else expect the
 DevicePermissionDenied message — which is itself checklist item 0).
 Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
@@ -33,7 +43,7 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       `VERIFIED`.)
 - [x] 3. Add/modify a file, `scan`/`plan`/`burn` again to the SAME disc
       (top-off). Confirm the identity check accepted it and `-toc` (or
-      `xorriso -indev /dev/sr1 -toc`) shows 2 sessions.
+      `xorriso -outdev "$DISKREMENT_DEVICE" -toc`) shows 2 sessions.
       (Rust, 2026-09-11 — `appending to open disc 1` accepted;
       `xorriso -outdev /dev/sr1 -toc`: `Media status : is written , is appendable`,
       `Media summary: 2 sessions`, `ISO session 1` + `ISO session 2`, both
