@@ -1,6 +1,7 @@
 //! Scenario 14 (issue #9): at copies=2 a deletion-only cycle writes no disc
-//! in either set, so 1A/1B stay twins; the deletion is recorded by the next
-//! cycle that burns anyway, and both twins' manifests list it.
+//! in either set. 1A/1B are sealed first, so the old fallback would have
+//! opened an untwinned 2A; instead the deletion is recorded by the next cycle
+//! that burns anyway (discs 2A and 2B), and both twins' manifests list it.
 
 use crate::{disc, support};
 
@@ -23,7 +24,11 @@ fn a_deletion_only_cycle_writes_no_disc_and_the_next_burn_records_it() {
         "2",
     ]);
     assert_eq!(init.code, 0, "{}{}", init.stdout, init.stderr);
-    for step in [&["scan", "p"][..], &["plan", "p"], &["burn", "p", "--yes"]] {
+    for step in [
+        &["scan", "p"][..],
+        &["plan", "p", "--finalize"],
+        &["burn", "p", "--yes"],
+    ] {
         let r = cli.run(step);
         assert_eq!(r.code, 0, "{step:?}: {}{}", r.stdout, r.stderr);
     }
@@ -60,6 +65,8 @@ fn a_deletion_only_cycle_writes_no_disc_and_the_next_burn_records_it() {
     assert!(!s.disc_dir_named("2A").exists());
     assert!(!s.disc_dir_named("2B").exists());
     let h = cli.run(&["history", "p", "gone.txt"]);
+    assert_eq!(h.code, 0, "{}{}", h.stdout, h.stderr);
+    assert!(h.out_has("CURRENT"), "{}", h.stdout);
     assert!(!h.out_has("DELETED"), "not recorded yet: {}", h.stdout);
 
     // The next real cycle carries it on both twins and records it once.
@@ -74,11 +81,18 @@ fn a_deletion_only_cycle_writes_no_disc_and_the_next_burn_records_it() {
     assert_eq!(pl2.code, 0, "{}{}", pl2.stdout, pl2.stderr);
     let b2 = cli.run(&["burn", "p", "--yes"]);
     assert_eq!(b2.code, 0, "{}{}", b2.stdout, b2.stderr);
-    assert!(b2.out_has("Wrote disc 1A"), "{}", b2.stdout);
-    assert!(b2.out_has("Wrote disc 1B"), "{}", b2.stdout);
+    assert!(b2.out_has("Wrote disc 2A"), "{}", b2.stdout);
+    assert!(b2.out_has("Wrote disc 2B"), "{}", b2.stdout);
     for name in ["1A", "1B"] {
+        assert_eq!(
+            disc::manifest(&s.disc_dir_named(name)).session_ordinal,
+            1,
+            "{name} is untouched"
+        );
+    }
+    for name in ["2A", "2B"] {
         let m = disc::manifest(&s.disc_dir_named(name));
-        assert_eq!(m.session_ordinal, 2, "{name}");
+        assert_eq!(m.session_ordinal, 1, "{name}");
         assert_eq!(
             disc::manifest_deleted(&m),
             support::set(&["gone.txt"]),
