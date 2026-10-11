@@ -413,6 +413,31 @@ mod copies {
                 .code(1);
         }
     }
+
+    /// At copies=2 a bare `1` means 1A, and the prompt must say so before
+    /// anything irreversible happens. A child with no stdin declines.
+    #[test]
+    fn mark_dead_confirms_with_the_resolved_disc_name() {
+        let p = project();
+        base(&p)
+            .args(["init", "p", "--source"])
+            .arg(&p.source)
+            .arg("--work-dir")
+            .arg(&p.work)
+            .args(["--copies", "2"])
+            .assert()
+            .success();
+
+        base(&p)
+            .args(["disc", "mark-dead", "p", "1"])
+            .assert()
+            .success()
+            .stdout(contains(
+                "Mark disc 1A of p DEAD? Superseded versions held only on it are \
+                 lost forever; its live files will re-plan.",
+            ))
+            .stdout(contains("Aborted."));
+    }
 }
 
 mod burn {
@@ -856,8 +881,8 @@ mod mark_dead {
             .assert()
             .success()
             .stdout(
-                "Mark disc 1 of p DEAD? Superseded versions on it are lost forever; \
-                 its live files will re-plan. [y/N] Aborted.\n",
+                "Mark disc 1 of p DEAD? Superseded versions held only on it are lost \
+                 forever; its live files will re-plan. [y/N] Aborted.\n",
             );
 
         run(&f, &["status", "p"])

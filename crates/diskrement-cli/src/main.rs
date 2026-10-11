@@ -303,10 +303,17 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             let mut catalog = open_catalog(&resolved.catalog)?;
             let p = find_or_fail(&catalog, &name)?;
 
+            // Name the disc as it will be resolved (a bare `1` is 1A at
+            // copies>1). An argument that does not resolve is echoed as typed;
+            // the pipeline then reports the unknown disc.
+            let shown = disc
+                .resolve(p.copies)
+                .map(|k| k.name(p.copies))
+                .unwrap_or_else(|| disc.to_string());
             if !prompt::confirm(
                 &format!(
-                    "Mark disc {disc} of {name} DEAD? Superseded versions on it are \
-                     lost forever; its live files will re-plan."
+                    "Mark disc {shown} of {name} DEAD? Superseded versions held only \
+                     on it are lost forever; its live files will re-plan."
                 ),
                 yes,
             ) {

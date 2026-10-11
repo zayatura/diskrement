@@ -142,7 +142,11 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
         lines.extend(coverage_lines(&r.coverage));
     }
     lines.push(if r.remaining.more_discs == 0 {
-        "No more changes — the set is up to date.".to_string()
+        if copies > 1 {
+            "No more changes — every copy set is up to date.".to_string()
+        } else {
+            "No more changes — the set is up to date.".to_string()
+        }
     } else {
         format!(
             "~{} more discs of changes remain. Run: scan → plan → burn",
@@ -867,7 +871,7 @@ mod tests {
              ✔ Wrote disc 1B  —  label: \"p disc 1B\"\n\
              Status: left OPEN — may receive more sessions later.\n\
              Copies: set B is missing 3 files (2.0 GB).\n\
-             No more changes — the set is up to date."
+             No more changes — every copy set is up to date."
         );
     }
 
