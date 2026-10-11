@@ -22,7 +22,10 @@ mod testutil;
 
 pub use diff::ChangeSet;
 pub use manifest::{ManifestChangeKind, ManifestEntry, SessionManifest};
-pub use model::{Capacity, CatalogEntry, CatalogView, ContentHash, DiscType, RelPath, ScannedFile};
+pub use model::{
+    set_letter, Capacity, CatalogEntry, CatalogView, ContentHash, DiscArg, DiscKey, DiscType,
+    RelPath, ScannedFile, MAX_COPIES,
+};
 pub use planner::{BurnPlan, DiscState, DiscStatus, PlannedDisc};
 
 #[cfg(test)]
