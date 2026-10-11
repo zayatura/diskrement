@@ -74,6 +74,9 @@ pub struct DiscBurn {
     pub disc: DiscKey,
     pub label: String,
     pub finalized: bool,
+    /// Where this disc was staged. With the real backend the tree has already
+    /// been removed by the time the report is returned (issue #3); with the
+    /// simulated backend it stays, as the disc `verify` reads back.
     pub staging_dir: PathBuf,
     pub image_bytes: u64,
 }
