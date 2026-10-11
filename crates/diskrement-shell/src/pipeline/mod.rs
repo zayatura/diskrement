@@ -2407,7 +2407,7 @@ mod verify_tests {
     }
 
     fn run_verify(env: &mut Env, disc: Option<i64>) -> Result<Vec<VerifyReport>, PipelineError> {
-        let verifier = Verifier::Staging(StagingVerifier::new(env.work.join("staging")));
+        let verifier = Verifier::Staging(StagingVerifier::new(env.work.join("staging"), &NoopSink));
         let mut pipeline = Pipeline::new(
             &mut env.catalog,
             PipelinePaths {
@@ -2511,7 +2511,7 @@ mod verify_tests {
     #[test]
     fn verify_on_an_unknown_project_is_project_not_found() {
         let mut env = burned_env(&[("a.txt", b"aaa")], false);
-        let verifier = Verifier::Staging(StagingVerifier::new(env.work.join("staging")));
+        let verifier = Verifier::Staging(StagingVerifier::new(env.work.join("staging"), &NoopSink));
         let mut pipeline = Pipeline::new(
             &mut env.catalog,
             PipelinePaths {
@@ -2793,7 +2793,7 @@ mod mark_dead_tests {
     fn run_verify(env: &mut Env, disc: Option<&str>) -> Result<Vec<VerifyReport>, PipelineError> {
         let work = env.work.clone();
         let scan_cache = env.scan_cache.clone();
-        let verifier = Verifier::Staging(StagingVerifier::new(work.join("staging")));
+        let verifier = Verifier::Staging(StagingVerifier::new(work.join("staging"), &NoopSink));
         let mut pipeline = Pipeline::new(
             &mut env.catalog,
             PipelinePaths {
@@ -3097,7 +3097,7 @@ mod copies_tests {
     }
 
     fn staging_verifier(env: &Env) -> Verifier<'static> {
-        Verifier::Staging(StagingVerifier::new(env.work.join("staging")))
+        Verifier::Staging(StagingVerifier::new(env.work.join("staging"), &NoopSink))
     }
 
     #[test]

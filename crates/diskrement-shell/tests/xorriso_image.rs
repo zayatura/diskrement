@@ -210,6 +210,7 @@ fn two_tier_verification_passes_clean_mismatches_tampered_and_skips_declined() {
             session_ordinal: 1,
             rel_path: RelPath("a.txt".to_string()),
             content_hash: sha256("v1"),
+            size_bytes: 2,
         }],
     };
 
@@ -217,7 +218,7 @@ fn two_tier_verification_passes_clean_mismatches_tampered_and_skips_declined() {
     let device = BurnDevice::ImageFile(iso.clone());
 
     let accept = ScriptedOperator::new(&[true]);
-    let clean = DiscVerifier::new(device.clone(), &exec, &accept)
+    let clean = DiscVerifier::new(device.clone(), &exec, &accept, &NoopSink)
         .verify(&expectation)
         .expect("verification runs");
     assert_eq!(
@@ -237,9 +238,10 @@ fn two_tier_verification_passes_clean_mismatches_tampered_and_skips_declined() {
         session_ordinal: 1,
         rel_path: RelPath("a.txt".to_string()),
         content_hash: sha256("WRONG"),
+        size_bytes: 2,
     }];
     let accept = ScriptedOperator::new(&[true]);
-    let bad = DiscVerifier::new(device.clone(), &exec, &accept)
+    let bad = DiscVerifier::new(device.clone(), &exec, &accept, &NoopSink)
         .verify(&tampered)
         .expect("verification runs");
     assert_eq!(
@@ -249,7 +251,7 @@ fn two_tier_verification_passes_clean_mismatches_tampered_and_skips_declined() {
     );
 
     let decline = ScriptedOperator::new(&[false]);
-    let skipped = DiscVerifier::new(device, &exec, &decline)
+    let skipped = DiscVerifier::new(device, &exec, &decline, &NoopSink)
         .verify(&expectation)
         .expect("verification runs");
     assert_eq!(
@@ -275,7 +277,7 @@ fn a_file_missing_from_the_disc_is_a_mismatch() {
 
     let exec = SYSTEM_EXEC;
     let operator = ScriptedOperator::new(&[true]);
-    let outcome = DiscVerifier::new(BurnDevice::ImageFile(iso), &exec, &operator)
+    let outcome = DiscVerifier::new(BurnDevice::ImageFile(iso), &exec, &operator, &NoopSink)
         .verify(&DiscExpectation {
             project_name: "photos".to_string(),
             disc: DiscKey::new(1, 0),

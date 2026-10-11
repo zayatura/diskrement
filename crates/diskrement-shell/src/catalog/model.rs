@@ -213,6 +213,8 @@ pub struct SupersededVersion {
     pub session_ordinal: u32,
     pub rel_path: RelPath,
     pub content_hash: ContentHash,
+    /// The recorded size, which sizes the verify phase that extracts it.
+    pub size_bytes: u64,
 }
 
 /// Everything the catalog records as physically on one disc: the merged view a

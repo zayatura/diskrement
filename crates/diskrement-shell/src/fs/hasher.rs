@@ -8,6 +8,13 @@ use sha2::Digest;
 
 /// Stream `path` in 64 KiB chunks and return the lowercase-hex SHA-256.
 pub fn hash(path: &Path) -> std::io::Result<ContentHash> {
+    hash_with(path, &mut |_| {})
+}
+
+/// `hash`, calling `on_read` with the size of every chunk as it is read. A
+/// per-file progress bar stands still for minutes on one large file read from
+/// an optical drive; this lets the caller advance it during the read.
+pub fn hash_with(path: &Path, on_read: &mut dyn FnMut(u64)) -> std::io::Result<ContentHash> {
     let mut file = std::fs::File::open(path)?;
     let mut digest = sha2::Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -17,6 +24,7 @@ pub fn hash(path: &Path) -> std::io::Result<ContentHash> {
             break;
         }
         digest.update(&buf[..n]);
+        on_read(n as u64);
     }
     Ok(ContentHash(format!("{:x}", digest.finalize())))
 }
@@ -57,6 +65,25 @@ mod tests {
         one_shot.update(&data);
         let expected = ContentHash(format!("{:x}", one_shot.finalize()));
         assert_eq!(hash(&p).unwrap(), expected);
+    }
+
+    /// Reporting bytes as they are read: the callbacks add up to the file's
+    /// size, and the digest is the one `hash` returns. 300,000 bytes spans
+    /// five 64 KiB reads, the last one short.
+    #[test]
+    fn hash_with_reports_every_byte_read_and_agrees_with_hash() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for (name, len) in [("empty", 0usize), ("big", 300_000)] {
+            let p = dir.path().join(name);
+            let data: Vec<u8> = (0..len as u32).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&p, &data).unwrap();
+
+            let mut reads = Vec::new();
+            let digest = hash_with(&p, &mut |n| reads.push(n)).unwrap();
+            assert_eq!(reads.iter().sum::<u64>(), len as u64, "{name}");
+            assert!(reads.iter().all(|&n| n > 0), "{name}: {reads:?}");
+            assert_eq!(digest, hash(&p).unwrap(), "{name}");
+        }
     }
 
     #[test]

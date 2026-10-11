@@ -459,8 +459,9 @@ impl Catalog {
         let mut stmt = self
             .conn
             .prepare(
-                "select rp, ch, sess_ord, rn from (
+                "select rp, ch, sess_ord, rn, sz from (
                    select fv.rel_path as rp, fv.content_hash as ch, s.ordinal as sess_ord,
+                          fv.size_bytes as sz,
                           row_number() over (partition by fv.rel_path
                                              order by s.ordinal desc, p.id desc) as rn
                    from placement p
@@ -481,6 +482,7 @@ impl Catalog {
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
                     ))
                 },
             )
@@ -489,7 +491,8 @@ impl Catalog {
         let mut visible = BTreeMap::new();
         let mut superseded = Vec::new();
         for row in rows {
-            let (path, hash, session_ordinal, rank) = row.map_err(CatalogError::from_sqlite)?;
+            let (path, hash, session_ordinal, rank, size) =
+                row.map_err(CatalogError::from_sqlite)?;
             if rank == 1 {
                 visible.insert(RelPath(path), ContentHash(hash));
             } else {
@@ -497,6 +500,7 @@ impl Catalog {
                     session_ordinal: session_ordinal as u32,
                     rel_path: RelPath(path),
                     content_hash: ContentHash(hash),
+                    size_bytes: size as u64,
                 });
             }
         }
@@ -863,6 +867,7 @@ mod tests {
                 session_ordinal: 1,
                 rel_path: RelPath("a.txt".to_string()),
                 content_hash: ContentHash("aa".to_string()),
+                size_bytes: 10,
             }]
         );
     }

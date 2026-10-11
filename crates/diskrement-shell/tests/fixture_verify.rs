@@ -40,7 +40,7 @@ fn env(catalog_rel: &str, work_rel: &str) -> Env {
 }
 
 fn sweep(env: &mut Env, disc: Option<i64>) -> Result<Vec<VerifyReport>, PipelineError> {
-    let verifier = Verifier::Staging(StagingVerifier::new(env.work.join("staging")));
+    let verifier = Verifier::Staging(StagingVerifier::new(env.work.join("staging"), &NoopSink));
     let mut pipeline = Pipeline::new(
         &mut env.catalog,
         PipelinePaths {
