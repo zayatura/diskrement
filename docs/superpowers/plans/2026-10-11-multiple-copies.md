@@ -4546,6 +4546,6 @@ git push origin --delete feat/multiple-copies   # only if the branch was pushed
   - Copy coverage (`status`, `burn`) counts only versions that still have a live copy. A file whose every copy died reads as "complete" until the next scan re-adds it; `disc mark-dead` lists it under Re-burn.
   - `history` numbers one `vN` row per placement, so the copies of one version read as v1, v2, … .
   - Store-level internal error messages say "disc N (set S)" rather than `DiscKey::name` (internal errors, exit 5).
-  - A no-op or deletion-only cycle writes a set-A session only.
+  - ~~A no-op or deletion-only cycle writes a set-A session only.~~ Resolved by #9: such a cycle writes no disc (`docs/superpowers/specs/2026-10-11-deferred-deletions-design.md`).
   - The spec's "every current version has `copies` live copies after a full cycle" property has no dedicated test; the partition proptest plus the pipeline and `s13_copies` scenario tests cover it.
   - The review's one fix: `disc mark-dead` now confirms with the resolved disc name (`1` reads "1A" at copies=2; an argument that does not resolve is echoed as typed). The prompt says "Superseded versions held only on it are lost forever", which holds at any `copies`. At copies>1 the burn report's last line reads "No more changes — every copy set is up to date." (copies=1 unchanged).

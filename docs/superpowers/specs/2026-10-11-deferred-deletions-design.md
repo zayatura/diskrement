@@ -183,5 +183,5 @@ deletion record.
 
 **Scenarios (`DISKREMENT_SCENARIOS_REQUIRED=1`)**
 - s08: `burn` after a no-op plan writes no disc and exits 0.
-- s13: at copies=2, a deletion-only cycle creates no new disc in either set; the next
+- s14: at copies=2, a deletion-only cycle creates no new disc in either set; the next
   cycle with a new file records the deletion and both discs' manifests list it.

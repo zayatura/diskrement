@@ -148,9 +148,9 @@ set `k`, or after a set-`k` disc is marked dead.
 each set's full plan to the one disc that set writes this cycle (the existing rule: the
 first disc carrying files). A set with nothing to place produces no entry, unless
 `--finalize` is given, in which case each set's open disc is sealed. If no set has
-anything to place, the plan holds a single set-A entry, exactly today's no-op plan, so a
-deletion-only cycle still has a session to carry its tombstones. `--disc-type` applies
-to every set.
+anything to place, the plan holds no set and writes nothing; its deletions wait for the
+next burned disc. (Superseded by `2026-10-11-deferred-deletions-design.md`, issue #9: the
+original set-A fallback opened untwinned discs.) `--disc-type` applies to every set.
 
 The staged `plan.json` becomes:
 
