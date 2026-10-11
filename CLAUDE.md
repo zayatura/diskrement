@@ -41,14 +41,19 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   file must copy the mtime afterwards (`File::set_modified`), or the
   scanner's size+mtime fast path never hits and the fingerprint cache is
   useless. `fs::snapshot::reflink_tree` does this — keep it that way.
-- **`std::process` has no `redirectErrorStream`.** `burn::cmd::system` reads
-  stdout on the calling thread (live `UPDATE` progress) and drains stderr on a
-  second thread, then replays stderr's lines through `on_line` and appends
-  them after stdout's — this ports Scala's `redirectErrorStream(true)` +
-  `onLine`, where merged lines all reach the callback. Stdout-then-stderr is
-  enough for `tail` and `classify_failure`. Lines are decoded lossily: never
-  go back to `BufRead::lines`, which stops at the first non-UTF-8 line and
-  leaves the pipe undrained, so a chatty child blocks forever.
+- **xorriso writes everything to stderr, including its `UPDATE` progress.**
+  `std::process` has no `redirectErrorStream`, so `burn::cmd::system` gives
+  the child one `std::io::pipe()` for both stdout and stderr and reads it on
+  the calling thread: every line reaches `on_line` live, in the child's
+  order. Never split the streams again: deferring stderr is what left real
+  burns silent for ~25 minutes per disc (#14). Lines are decoded lossily:
+  never go back to `BufRead::lines`, which stops at the first non-UTF-8 line
+  and leaves the pipe undrained, so a chatty child blocks forever.
+- **Burn progress comes from `Writing:` percentages.** `parse::writing_per_mille`
+  reads them and the burner scales them to the staged image size for a
+  bytes-only `ProgressSink` phase. Writing ends at 100% or at libburn's
+  `Closing track/session` line; the close that follows prints no percentages
+  (about 11 s for a sealed BD-R), so the operator is told once.
 - **A real burn deletes each disc's staging tree right after its commit**
   (`Burner::retains_staging`, `discard_staging` in `pipeline/mod.rs`); the simulated
   backend keeps them because `StagingVerifier` reads them. This is safe only because
