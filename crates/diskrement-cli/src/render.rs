@@ -198,7 +198,7 @@ pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
         lines.push(format!(
             "  v{}  disc {} / session {}   {}  {}  {}",
             i + 1,
-            e.disc_ordinal,
+            e.disc.ordinal,
             e.session_ordinal,
             gb(e.size_bytes),
             e.content_hash,
@@ -703,7 +703,7 @@ mod p6_render_tests {
         FileHistoryEntry {
             content_hash: ContentHash(hash.to_string()),
             size_bytes: size,
-            disc_ordinal: disc,
+            disc: diskrement_core::DiscKey::new(disc, 0),
             session_ordinal: session,
             status,
         }
@@ -1098,7 +1098,7 @@ mod snapshots {
         FileHistoryEntry {
             content_hash: ContentHash(hash.to_string()),
             size_bytes: size,
-            disc_ordinal: d,
+            disc: diskrement_core::DiscKey::new(d, 0),
             session_ordinal: s,
             status,
         }

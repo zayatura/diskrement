@@ -229,6 +229,8 @@ pub struct ArchivePointerJson {
     pub content_hash: String,
     pub size_bytes: u64,
     pub disc_ordinal: u32,
+    #[serde(default)]
+    pub copy_set: u32,
     pub session_ordinal: u32,
     pub disc_path: String,
     pub kind: String,
@@ -241,6 +243,7 @@ impl ArchivePointerJson {
             content_hash: p.content_hash.0.clone(),
             size_bytes: p.size_bytes,
             disc_ordinal: p.disc_ordinal,
+            copy_set: p.copy_set,
             session_ordinal: p.session_ordinal,
             disc_path: p.disc_path.clone(),
             // `ManifestChangeKind.toString` — the frozen uppercase spelling
@@ -382,6 +385,7 @@ mod tests {
             content_hash: ContentHash("aa".to_string()),
             size_bytes: 4,
             disc_ordinal: 1,
+            copy_set: 0,
             session_ordinal: 2,
             disc_path: "/data/a.bin".to_string(),
             kind: ManifestChangeKind::Deleted,
@@ -392,6 +396,7 @@ mod tests {
             rendered.contains("\"discPath\" : \"/data/a.bin\""),
             "{rendered}"
         );
+        assert!(rendered.contains("\"copySet\" : 0"), "{rendered}");
     }
 
     #[test]

@@ -9,7 +9,7 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use diskrement_core::{ContentHash, DiscState, DiscStatus, ManifestChangeKind, RelPath};
+use diskrement_core::{ContentHash, DiscKey, DiscState, DiscStatus, ManifestChangeKind, RelPath};
 use diskrement_shell::catalog::model::{
     ArchivePointer, FileHistoryEntry, SessionState, VersionStatus,
 };
@@ -112,7 +112,7 @@ fn the_catalog_after_the_first_burn_reports_one_full_disc() {
         .sessions_by_state(project.id, SessionState::Burned)
         .expect("sessions");
     assert_eq!(burned.len(), 1);
-    assert_eq!((burned[0].disc_ordinal, burned[0].ordinal), (1, 1));
+    assert_eq!((burned[0].disc.ordinal, burned[0].ordinal), (1, 1));
     assert_eq!(
         burned[0].burned_at.map(|at| time::format(&at)).as_deref(),
         Some("2026-09-05T20:01:06.623959846Z")
@@ -212,21 +212,21 @@ fn file_history_reports_lost_per_physical_copy() {
             FileHistoryEntry {
                 content_hash: hash(A1),
                 size_bytes: 800,
-                disc_ordinal: 1,
+                disc: DiscKey::new(1, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Superseded,
             },
             FileHistoryEntry {
                 content_hash: hash(A2),
                 size_bytes: 800,
-                disc_ordinal: 3,
+                disc: DiscKey::new(3, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Lost,
             },
             FileHistoryEntry {
                 content_hash: hash(A2),
                 size_bytes: 800,
-                disc_ordinal: 4,
+                disc: DiscKey::new(4, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Current,
             },
@@ -239,7 +239,7 @@ fn file_history_reports_lost_per_physical_copy() {
         vec![FileHistoryEntry {
             content_hash: hash(B1),
             size_bytes: 800,
-            disc_ordinal: 2,
+            disc: DiscKey::new(2, 0),
             session_ordinal: 1,
             status: VersionStatus::Deleted,
         }]
@@ -262,6 +262,7 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
                 content_hash: hash(A1),
                 size_bytes: 800,
                 disc_ordinal: 1,
+                copy_set: 0,
                 session_ordinal: 1,
                 disc_path: "/data/a.bin".to_string(),
                 kind: ManifestChangeKind::Added,
@@ -271,6 +272,7 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
                 content_hash: hash(A2),
                 size_bytes: 800,
                 disc_ordinal: 3,
+                copy_set: 0,
                 session_ordinal: 1,
                 disc_path: "/data/a.bin".to_string(),
                 kind: ManifestChangeKind::Modified,
@@ -280,6 +282,7 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
                 content_hash: hash(B1),
                 size_bytes: 800,
                 disc_ordinal: 2,
+                copy_set: 0,
                 session_ordinal: 1,
                 disc_path: "/data/b.bin".to_string(),
                 kind: ManifestChangeKind::Deleted,
@@ -290,17 +293,19 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
     // Disc 4's last session is the `plan --finalize` seal, which placed no
     // files — so the per-session view is empty while the whole-disc view is not.
     assert!(cat
-        .placements_for_disc(project.id, 4)
+        .placements_for_disc(project.id, DiscKey::new(4, 0))
         .expect("placements")
         .is_empty());
     assert_eq!(
-        cat.disc_recorded_contents(project.id, 4)
+        cat.disc_recorded_contents(project.id, DiscKey::new(4, 0))
             .expect("contents")
             .visible,
         BTreeMap::from([(rel("a.bin"), hash(A2))])
     );
 
-    let disc3 = cat.disc_recorded_contents(project.id, 3).expect("contents");
+    let disc3 = cat
+        .disc_recorded_contents(project.id, DiscKey::new(3, 0))
+        .expect("contents");
     assert_eq!(disc3.visible, BTreeMap::from([(rel("a.bin"), hash(A2))]));
     assert!(disc3.superseded.is_empty());
 
@@ -308,7 +313,7 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
         .sessions_by_state(project.id, SessionState::Verified)
         .expect("sessions");
     assert_eq!(verified.len(), 1);
-    assert_eq!((verified[0].disc_ordinal, verified[0].ordinal), (1, 1));
+    assert_eq!((verified[0].disc.ordinal, verified[0].ordinal), (1, 1));
 }
 
 /// A V2 catalog the Scala build wrote migrates to V3 in place: every disc keeps

@@ -285,8 +285,8 @@ fn disc_id_by_ordinal(
 fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result<(), CatalogError> {
     let disc_id = if d.is_new {
         tx.execute(
-            "insert into disc (project_id, ordinal, disc_type, usable_bytes, status, label)
-             values (?1, ?2, ?3, ?4, ?5, ?6)",
+            "insert into disc (project_id, ordinal, disc_type, usable_bytes, status, label, copy_set)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 project.0,
                 d.ordinal as i64,
@@ -294,6 +294,7 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
                 d.usable_bytes as i64,
                 d.status.as_str(),
                 d.label,
+                d.copy_set as i64,
             ],
         )
         .map_err(CatalogError::from_sqlite)?;
@@ -590,6 +591,7 @@ mod tests {
         let mut bad = update(pid, 1, 1, vec![fw("a", "h-a", 10)], vec![], vec![]);
         bad.discs.push(DiscWrite {
             ordinal: 99,
+            copy_set: 0,
             is_new: false,
             disc_type: diskrement_core::DiscType::BdR,
             usable_bytes: 100,
@@ -681,7 +683,7 @@ mod tests {
             .sessions_by_state(pid, SessionState::Verified)
             .expect("query succeeds");
         assert_eq!(verified.len(), 1);
-        assert_eq!((verified[0].disc_ordinal, verified[0].ordinal), (1, 1));
+        assert_eq!((verified[0].disc.ordinal, verified[0].ordinal), (1, 1));
         assert!(cat
             .sessions_by_state(pid, SessionState::Burned)
             .expect("query succeeds")

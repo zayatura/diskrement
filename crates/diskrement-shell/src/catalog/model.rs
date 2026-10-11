@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use diskrement_core::{ContentHash, DiscStatus, DiscType, ManifestChangeKind, RelPath};
+use diskrement_core::{ContentHash, DiscKey, DiscStatus, DiscType, ManifestChangeKind, RelPath};
 
 /// Primary key of a project row (a SQLite rowid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +71,8 @@ pub struct SessionWrite {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscWrite {
     pub ordinal: u32,
+    /// The copy set of the disc (0 = `A`). Persisted only when `is_new`.
+    pub copy_set: u32,
     pub is_new: bool,
     pub disc_type: DiscType,
     pub usable_bytes: u64,
@@ -127,10 +129,10 @@ impl std::str::FromStr for SessionState {
     }
 }
 
-/// A persisted session row, joined to its disc's ordinal for convenience.
+/// A persisted session row, joined to its disc's key for convenience.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
-    pub disc_ordinal: u32,
+    pub disc: DiscKey,
     pub ordinal: u32,
     pub state: SessionState,
     pub burned_at: Option<DateTime<Utc>>,
@@ -156,6 +158,7 @@ pub struct ArchivePointer {
     pub content_hash: ContentHash,
     pub size_bytes: u64,
     pub disc_ordinal: u32,
+    pub copy_set: u32,
     pub session_ordinal: u32,
     pub disc_path: String,
     pub kind: ManifestChangeKind,
@@ -196,7 +199,7 @@ impl std::fmt::Display for VersionStatus {
 pub struct FileHistoryEntry {
     pub content_hash: ContentHash,
     pub size_bytes: u64,
-    pub disc_ordinal: u32,
+    pub disc: DiscKey,
     pub session_ordinal: u32,
     pub status: VersionStatus,
 }

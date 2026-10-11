@@ -74,6 +74,7 @@ pub(crate) fn update(
         finalize_disc_ordinals: Vec::new(),
         discs: vec![DiscWrite {
             ordinal: disc_ordinal,
+            copy_set: 0,
             is_new: session_ordinal == 1,
             disc_type: diskrement_core::DiscType::BdR,
             usable_bytes: 1_000_000,

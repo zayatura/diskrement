@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use diskrement_core::{
-    diff, manifest, Capacity, ChangeSet, DiscStatus, DiscType, RelPath, ScannedFile,
+    diff, manifest, Capacity, ChangeSet, DiscKey, DiscStatus, DiscType, RelPath, ScannedFile,
     SessionManifest,
 };
 
@@ -279,7 +279,7 @@ impl<'a> Pipeline<'a> {
 
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let change_set = diff::diff(&view, &scanned);
-        let sess_ord = self.next_session_ordinal(p.id, report.disc.ordinal)?;
+        let sess_ord = self.next_session_ordinal(p.id, report.disc.key())?;
         let contents = diskrement_core::replication::classify(&view, &report.disc.files);
         let manifest = manifest::build(
             name,
@@ -363,7 +363,7 @@ impl<'a> Pipeline<'a> {
     fn next_session_ordinal(
         &self,
         project: ProjectId,
-        disc_ordinal: u32,
+        disc: DiscKey,
     ) -> Result<u32, PipelineError> {
         let mut highest = 0u32;
         for state in [SessionState::Burned, SessionState::Verified] {
@@ -372,7 +372,7 @@ impl<'a> Pipeline<'a> {
                 .sessions_by_state(project, state)
                 .map_err(Self::failed)?
             {
-                if s.disc_ordinal == disc_ordinal {
+                if s.disc == disc {
                     highest = highest.max(s.ordinal);
                 }
             }
@@ -475,11 +475,11 @@ impl<'a> Pipeline<'a> {
     ) -> Result<VerifyReport, PipelineError> {
         let latest_session = self
             .catalog
-            .placements_for_disc(p.id, ordinal)
+            .placements_for_disc(p.id, DiscKey::new(ordinal, 0))
             .map_err(Self::failed)?;
         let recorded = self
             .catalog
-            .disc_recorded_contents(p.id, ordinal)
+            .disc_recorded_contents(p.id, DiscKey::new(ordinal, 0))
             .map_err(Self::failed)?;
         let expectation = DiscExpectation {
             project_name: p.name.clone(),
@@ -493,7 +493,7 @@ impl<'a> Pipeline<'a> {
         if !outcome.skipped && outcome.mismatches.is_empty() {
             if let Some(session) = sessions
                 .iter()
-                .filter(|s| s.disc_ordinal == ordinal)
+                .filter(|s| s.disc.ordinal == ordinal && s.disc.copy_set == 0)
                 .max_by_key(|s| s.ordinal)
             {
                 self.catalog
@@ -631,6 +631,7 @@ fn disc_write(
     };
     DiscWrite {
         ordinal: report.disc.ordinal,
+        copy_set: report.disc.copy_set,
         is_new: report.disc.is_new,
         disc_type: report.disc_type,
         usable_bytes: report.disc.usable_bytes,
@@ -1171,7 +1172,7 @@ mod burn_tests {
             .sessions_by_state(ProjectId(1), SessionState::Burned)
             .unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].disc_ordinal, 1);
+        assert_eq!(sessions[0].disc.ordinal, 1);
         assert_eq!(sessions[0].ordinal, 1);
     }
 
@@ -1439,7 +1440,7 @@ mod burn_tests {
             .unwrap();
         let mut ordinals: Vec<u32> = sessions
             .iter()
-            .filter(|s| s.disc_ordinal == 1)
+            .filter(|s| s.disc.ordinal == 1)
             .map(|s| s.ordinal)
             .collect();
         ordinals.sort_unstable();
@@ -1567,7 +1568,7 @@ mod verify_tests {
             .sessions_by_state(ProjectId(1), SessionState::Verified)
             .unwrap()
             .iter()
-            .map(|s| s.disc_ordinal)
+            .map(|s| s.disc.ordinal)
             .collect()
     }
 
@@ -1724,7 +1725,7 @@ mod verify_tests {
             .sessions_by_state(ProjectId(1), SessionState::Burned)
             .unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].disc_ordinal, 1);
+        assert_eq!(sessions[0].disc.ordinal, 1);
     }
 
     #[test]
@@ -1750,7 +1751,7 @@ mod verify_tests {
             .history("p", &RelPath("a.txt".to_string()))
             .unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].disc_ordinal, 1);
+        assert_eq!(entries[0].disc.ordinal, 1);
         assert_eq!(entries[0].session_ordinal, 1);
         assert_eq!(entries[0].size_bytes, 3);
         assert_eq!(
@@ -2141,7 +2142,7 @@ mod mark_dead_tests {
         assert_eq!(
             history
                 .iter()
-                .map(|h| (h.disc_ordinal, h.session_ordinal, h.status))
+                .map(|h| (h.disc.ordinal, h.session_ordinal, h.status))
                 .collect::<Vec<_>>(),
             vec![
                 (1, 1, VersionStatus::Lost),

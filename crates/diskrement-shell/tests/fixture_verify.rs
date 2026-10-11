@@ -56,7 +56,7 @@ fn discs_in(env: &Env, state: SessionState) -> Vec<u32> {
         .sessions_by_state(ProjectId(1), state)
         .expect("sessions")
         .iter()
-        .map(|s| s.disc_ordinal)
+        .map(|s| s.disc.ordinal)
         .collect()
 }
 
