@@ -2,9 +2,9 @@
 //!
 //! Two encodings live here and they are not interchangeable. The **compact**
 //! encoding is hashed into `session.manifest_hash`, so its field order and its
-//! whitespace are part of the catalog's content; the **pretty** encoding is
-//! what lands on the disc, and it reproduces zio-json's `toJsonPretty` exactly
-//! so the corpus's `manifest.json` and `pointers.json` stay byte oracles.
+//! whitespace are catalog content; the **pretty** encoding is what lands on
+//! the disc, in zio-json's `toJsonPretty` layout, kept so discs burned before
+//! and after the Rust rewrite read the same.
 
 use std::io;
 
@@ -170,9 +170,14 @@ impl ManifestEntryJson {
 pub struct ManifestJson {
     pub project_name: String,
     pub disc_ordinal: u32,
+    /// Absent on discs written before copy sets existed: those are set A.
+    #[serde(default)]
+    pub copy_set: u32,
     pub session_ordinal: u32,
     pub added: Vec<ManifestEntryJson>,
     pub modified: Vec<ManifestEntryJson>,
+    #[serde(default)]
+    pub copied: Vec<ManifestEntryJson>,
     pub deleted: Vec<String>,
 }
 
@@ -181,25 +186,26 @@ impl ManifestJson {
         ManifestJson {
             project_name: m.project_name.clone(),
             disc_ordinal: m.disc_ordinal,
+            copy_set: m.copy_set,
             session_ordinal: m.session_ordinal,
             added: m.added.iter().map(ManifestEntryJson::from).collect(),
             modified: m.modified.iter().map(ManifestEntryJson::from).collect(),
+            copied: m.copied.iter().map(ManifestEntryJson::from).collect(),
             deleted: m.deleted.iter().map(|p| p.0.clone()).collect(),
         }
     }
 
-    /// The inverse, for the corpus oracle and `DiscReader`.
+    /// The inverse, for `DiscReader` and the scenario oracle.
     pub fn to_manifest(&self) -> Result<SessionManifest, String> {
+        let entries = |v: &[ManifestEntryJson]| v.iter().map(ManifestEntryJson::to_entry).collect();
         Ok(SessionManifest {
             project_name: self.project_name.clone(),
             disc_ordinal: self.disc_ordinal,
+            copy_set: self.copy_set,
             session_ordinal: self.session_ordinal,
-            added: self.added.iter().map(ManifestEntryJson::to_entry).collect(),
-            modified: self
-                .modified
-                .iter()
-                .map(ManifestEntryJson::to_entry)
-                .collect(),
+            added: entries(&self.added),
+            modified: entries(&self.modified),
+            copied: entries(&self.copied),
             deleted: self.deleted.iter().map(|p| RelPath(p.clone())).collect(),
         })
     }
@@ -268,6 +274,7 @@ mod tests {
         SessionManifest {
             project_name: "p".to_string(),
             disc_ordinal: 3,
+            copy_set: 1,
             session_ordinal: 1,
             added: Vec::new(),
             modified: vec![ManifestEntry {
@@ -277,35 +284,52 @@ mod tests {
                 ),
                 size_bytes: 800,
             }],
+            copied: Vec::new(),
             deleted: vec![RelPath("b.bin".to_string())],
         }
     }
 
-    /// Byte-for-byte `fixtures/discs/disc-3/.diskrement/manifest.json`, which
-    /// is zio-json `toJsonPretty` output: two-space indent, `" : "` separator,
-    /// `[]` for an empty array, no trailing newline.
+    /// zio-json `toJsonPretty` layout: two-space indent, `" : "`, `[]` for an
+    /// empty array, no trailing newline. `copySet` follows `discOrdinal` and
+    /// `copied` follows `modified`.
     #[test]
-    fn pretty_output_matches_zio_json() {
+    fn pretty_output_has_the_disc_layout() {
         let expected = "{\n  \"projectName\" : \"p\",\n  \"discOrdinal\" : 3,\n  \
-             \"sessionOrdinal\" : 1,\n  \"added\" : [],\n  \"modified\" : [\n    {\n      \
+             \"copySet\" : 1,\n  \"sessionOrdinal\" : 1,\n  \"added\" : [],\n  \
+             \"modified\" : [\n    {\n      \
              \"relPath\" : \"a.bin\",\n      \"contentHash\" : \
              \"e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77\",\n      \
-             \"sizeBytes\" : 800\n    }\n  ],\n  \"deleted\" : [\n    \"b.bin\"\n  ]\n}";
+             \"sizeBytes\" : 800\n    }\n  ],\n  \"copied\" : [],\n  \"deleted\" : [\n    \
+             \"b.bin\"\n  ]\n}";
         assert_eq!(to_pretty(&ManifestJson::from(&manifest())), expected);
     }
 
     /// The compact encoding is what the manifest hash is taken over, so its
-    /// field order and its lack of whitespace are both contract.
+    /// field order and its lack of whitespace are both catalog content.
     #[test]
-    fn compact_output_has_scala_field_order_and_no_whitespace() {
+    fn compact_output_has_a_fixed_field_order_and_no_whitespace() {
         let compact = serde_json::to_string(&ManifestJson::from(&manifest())).unwrap();
         assert_eq!(
             compact,
-            "{\"projectName\":\"p\",\"discOrdinal\":3,\"sessionOrdinal\":1,\
+            "{\"projectName\":\"p\",\"discOrdinal\":3,\"copySet\":1,\"sessionOrdinal\":1,\
              \"added\":[],\"modified\":[{\"relPath\":\"a.bin\",\"contentHash\":\
              \"e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77\",\
-             \"sizeBytes\":800}],\"deleted\":[\"b.bin\"]}"
+             \"sizeBytes\":800}],\"copied\":[],\"deleted\":[\"b.bin\"]}"
         );
+    }
+
+    /// A manifest written before copy sets existed has neither field; it reads
+    /// as set A with no copies.
+    #[test]
+    fn a_manifest_without_copy_fields_reads_as_set_a() {
+        let old = "{\"projectName\":\"p\",\"discOrdinal\":3,\"sessionOrdinal\":1,\
+                   \"added\":[],\"modified\":[],\"deleted\":[]}";
+        let m = serde_json::from_str::<ManifestJson>(old)
+            .unwrap()
+            .to_manifest()
+            .unwrap();
+        assert_eq!(m.copy_set, 0);
+        assert!(m.copied.is_empty());
     }
 
     #[test]

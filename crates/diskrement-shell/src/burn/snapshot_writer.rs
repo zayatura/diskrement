@@ -59,9 +59,11 @@ mod tests {
             manifest: SessionManifest {
                 project_name: "p".to_string(),
                 disc_ordinal: 2,
+                copy_set: 0,
                 session_ordinal: 1,
                 added: Vec::new(),
                 modified: Vec::new(),
+                copied: Vec::new(),
                 deleted: Vec::new(),
             },
             catalog_snapshot,

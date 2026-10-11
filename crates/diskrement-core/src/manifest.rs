@@ -1,10 +1,8 @@
 //! The pure manifest data for one session burned onto one disc.
 
-use std::collections::HashSet;
-
-use crate::diff::ChangeSet;
 use crate::model::{ContentHash, RelPath, ScannedFile};
 use crate::planner::PlannedDisc;
+use crate::replication::DiscContents;
 
 /// One file's identity as recorded in a session manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,41 +55,41 @@ impl std::str::FromStr for ManifestChangeKind {
 
 /// The pure manifest data for one session burned onto one disc.
 ///
-/// Serialization to JSON is a shell concern and is not part of this crate.
+/// `copied` holds files this session placed as another copy of a version an
+/// earlier session — on any disc — already recorded. Serialization to JSON is
+/// a shell concern and is not part of this crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionManifest {
     pub project_name: String,
     pub disc_ordinal: u32,
+    pub copy_set: u32,
     pub session_ordinal: u32,
     pub added: Vec<ManifestEntry>,
     pub modified: Vec<ManifestEntry>,
+    pub copied: Vec<ManifestEntry>,
     pub deleted: Vec<RelPath>,
 }
 
-/// Build the manifest for `disc`, classifying its files via `changes` and
-/// attaching the given `tombstones` (typically only on the last, open disc).
+/// Build the manifest for `disc` from its commit-time classification.
 ///
-/// The partition preserves the disc's file order, which the planner already
-/// sorted by rel path.
+/// `tombstones` are the cycle's deletions. Every disc of the cycle lists them,
+/// so each disc describes the cycle on its own, even though the catalog
+/// records each deletion once.
 pub fn build(
     project_name: &str,
     session_ordinal: u32,
     disc: &PlannedDisc,
-    changes: &ChangeSet,
+    contents: &DiscContents,
     tombstones: Vec<RelPath>,
 ) -> SessionManifest {
-    let added_paths: HashSet<&RelPath> = changes.added.iter().map(|f| &f.rel_path).collect();
-    let (added_files, modified_files): (Vec<&ScannedFile>, Vec<&ScannedFile>) = disc
-        .files
-        .iter()
-        .partition(|f| added_paths.contains(&f.rel_path));
-
     SessionManifest {
         project_name: project_name.to_string(),
         disc_ordinal: disc.ordinal,
+        copy_set: disc.copy_set,
         session_ordinal,
-        added: added_files.into_iter().map(to_entry).collect(),
-        modified: modified_files.into_iter().map(to_entry).collect(),
+        added: contents.added.iter().map(to_entry).collect(),
+        modified: contents.modified.iter().map(to_entry).collect(),
+        copied: contents.copied.iter().map(to_entry).collect(),
         deleted: tombstones,
     }
 }
@@ -107,56 +105,50 @@ fn to_entry(f: &ScannedFile) -> ManifestEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::ChangeSet;
     use crate::model::{ContentHash, RelPath};
     use crate::planner::PlannedDisc;
+    use crate::replication::DiscContents;
     use crate::testutil::sf;
 
     #[test]
-    fn a_manifest_splits_a_discs_files_into_added_vs_modified_using_the_change_set() {
-        let added = vec![sf("new1", 10)];
-        let modified = vec![sf("edit1", 10)];
-        let cs = ChangeSet {
-            added: added.clone(),
-            modified: modified.clone(),
-            ..ChangeSet::empty()
+    fn a_manifest_records_added_modified_and_copied_files_and_its_set() {
+        let contents = DiscContents {
+            added: vec![sf("new1", 10)],
+            modified: vec![sf("edit1", 10)],
+            copied: vec![sf("copy1", 10)],
         };
         let disc = PlannedDisc {
             ordinal: 1,
-            copy_set: 0,
+            copy_set: 1,
             is_new: true,
             will_finalize: false,
-            files: [added, modified].concat(),
+            files: vec![sf("copy1", 10), sf("edit1", 10), sf("new1", 10)],
             prior_used_bytes: 0,
             usable_bytes: 100,
         };
-        let m = build("photos", 1, &disc, &cs, vec![RelPath("gone".to_string())]);
+        let m = build(
+            "photos",
+            1,
+            &disc,
+            &contents,
+            vec![RelPath("gone".to_string())],
+        );
         assert_eq!(m.project_name, "photos");
-        assert_eq!(m.disc_ordinal, 1);
-        assert_eq!(m.session_ordinal, 1);
-        assert_eq!(
-            m.added
-                .iter()
-                .map(|e| e.rel_path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["new1"]
-        );
-        assert_eq!(
-            m.modified
-                .iter()
-                .map(|e| e.rel_path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["edit1"]
-        );
+        assert_eq!((m.disc_ordinal, m.copy_set, m.session_ordinal), (1, 1, 1));
+        let names =
+            |v: &[ManifestEntry]| v.iter().map(|e| e.rel_path.0.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&m.added), vec!["new1"]);
+        assert_eq!(names(&m.modified), vec!["edit1"]);
+        assert_eq!(names(&m.copied), vec!["copy1"]);
         assert_eq!(m.deleted, vec![RelPath("gone".to_string())]);
     }
 
     #[test]
     fn a_manifest_entry_carries_hash_and_size() {
         let f = sf("a", 42);
-        let cs = ChangeSet {
+        let contents = DiscContents {
             added: vec![f.clone()],
-            ..ChangeSet::empty()
+            ..DiscContents::default()
         };
         let disc = PlannedDisc {
             ordinal: 1,
@@ -167,7 +159,7 @@ mod tests {
             prior_used_bytes: 0,
             usable_bytes: 100,
         };
-        let m = build("p", 1, &disc, &cs, vec![]);
+        let m = build("p", 1, &disc, &contents, vec![]);
         assert_eq!(
             m.added[0],
             ManifestEntry {

@@ -280,11 +280,12 @@ impl<'a> Pipeline<'a> {
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let change_set = diff::diff(&view, &scanned);
         let sess_ord = self.next_session_ordinal(p.id, report.disc.ordinal)?;
+        let contents = diskrement_core::replication::classify(&view, &report.disc.files);
         let manifest = manifest::build(
             name,
             sess_ord,
             &report.disc,
-            &change_set,
+            &contents,
             report.tombstones.clone(),
         );
         let label = format!("{name} disc {}", report.disc.ordinal);

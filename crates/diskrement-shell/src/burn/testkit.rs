@@ -128,9 +128,11 @@ pub fn image_of(
             manifest: SessionManifest {
                 project_name: "photos".to_string(),
                 disc_ordinal: 1,
+                copy_set: 0,
                 session_ordinal,
                 added: Vec::new(),
                 modified: Vec::new(),
+                copied: Vec::new(),
                 deleted: Vec::new(),
             },
             catalog_snapshot,
