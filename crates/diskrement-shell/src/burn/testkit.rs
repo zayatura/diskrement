@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::burn::cmd::CmdOutput;
 use crate::burn::{BurnError, BurnOperator, DiscIdentity, DiscImage, DiscMetadata};
+use crate::progress::ProgressSink;
 
 /// A `BurnOperator` with canned answers and a recorded transcript
 /// (`ScriptedOperator` in `XorrisoBurnerSpec.scala`). Running out of answers
@@ -52,6 +53,46 @@ impl BurnOperator for ScriptedOperator {
 
     fn progress(&self, line: &str) {
         self.log.borrow_mut().push(line.to_string());
+    }
+}
+
+/// A `ProgressSink` that records every call as a string, in order:
+/// `start label bytes files`, `start_bytes label bytes`, `advance bytes files`,
+/// `done`.
+#[derive(Default)]
+pub struct RecordingSink(std::sync::Mutex<Vec<String>>);
+
+impl RecordingSink {
+    pub fn events(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// The bytes of every `advance`, summed.
+    pub fn advanced_bytes(&self) -> u64 {
+        self.events()
+            .iter()
+            .filter_map(|e| e.strip_prefix("advance "))
+            .map(|rest| rest.split(' ').next().unwrap().parse::<u64>().unwrap())
+            .sum()
+    }
+
+    fn push(&self, event: String) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+impl ProgressSink for RecordingSink {
+    fn start(&self, label: &str, total_bytes: u64, total_files: usize) {
+        self.push(format!("start {label} {total_bytes} {total_files}"));
+    }
+    fn start_bytes(&self, label: &str, total_bytes: u64) {
+        self.push(format!("start_bytes {label} {total_bytes}"));
+    }
+    fn advance(&self, delta_bytes: u64, delta_files: usize) {
+        self.push(format!("advance {delta_bytes} {delta_files}"));
+    }
+    fn done(&self) {
+        self.push("done".to_string());
     }
 }
 
@@ -128,6 +169,12 @@ impl ScriptedExec {
 
     pub fn version(mut self, v: &str) -> Self {
         self.version = v.to_string();
+        self
+    }
+
+    /// What the burn command prints, in order, on a successful burn.
+    pub fn burn_lines(mut self, lines: &[&str]) -> Self {
+        self.burn_lines = lines.iter().map(|l| (*l).to_string()).collect();
         self
     }
 

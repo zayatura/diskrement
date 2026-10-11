@@ -37,6 +37,9 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       `UPDATE : Writing:` streamed, `✔ Wrote disc 1`, drive ejected,
       `status` showed `#1 OPEN`. First burn: single `y` answers the plan
       prompt only — the insert prompt is a second confirmation.)
+      (Correction, 2026-10-11: the `UPDATE` lines did not stream. xorriso
+      writes them to stderr, which the runner then replayed only after the
+      child exited; on a few-MB burn the two look the same. See item 10.)
 - [x] 2. `verify` — confirm the disc mounts via udisks, all files OK, session
       marked VERIFIED.
       (Rust, 2026-09-11 — `disc 1: 3 files OK ✓`; `session` row advanced to
@@ -86,6 +89,12 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       `Aborted.`, exit 0.)
 - [ ] 9. `verify` with the disc in another machine's drive or after remount —
       optional bit-rot drill. (Not performed 2026-09-11 — no second machine.)
+- [ ] 10. Burn progress on a full-size disc (≥ 1 GB staged, ideally a full
+      BD-R): a `burning disc <name> X/Y GB · R MB/s · ETA …` line on stderr
+      advances during the write, not only at the end; no raw
+      `xorriso : UPDATE` lines are printed; after 100% one `Writing done;
+      closing the session …` line appears, and the close (~11 s for a sealed
+      BD-R on 2026-10-11) passes without output. (#14)
 
 Run record: 2026-09-11, Rust binary @ commit b81b342 (release build), Pioneer
 BDR-UD04 at `/dev/sr1`, one CMC BD-R (POW caveat above did not apply — media

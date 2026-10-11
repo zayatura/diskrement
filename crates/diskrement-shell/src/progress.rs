@@ -8,6 +8,11 @@
 /// several phases in sequence.
 pub trait ProgressSink: Send + Sync {
     fn start(&self, label: &str, total_bytes: u64, total_files: usize);
+    /// A phase measured in bytes alone, such as a burn: it has no file count
+    /// to report.
+    fn start_bytes(&self, label: &str, total_bytes: u64) {
+        self.start(label, total_bytes, 0);
+    }
     fn advance(&self, delta_bytes: u64, delta_files: usize);
     fn done(&self);
 }

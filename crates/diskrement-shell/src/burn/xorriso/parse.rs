@@ -150,6 +150,25 @@ pub fn version(lines: &[String]) -> Option<(u32, u32, String)> {
     })
 }
 
+/// How far a burn is, in tenths of a percent, from one of xorriso's pacifier
+/// lines: `xorriso : UPDATE : Writing:  848140s   69.5%   fifo  99% …` → 695.
+/// `None` for every other line.
+///
+/// xorriso prints these on stderr, about once a second while writing.
+pub fn writing_per_mille(line: &str) -> Option<u32> {
+    let (_, rest) = line.split_once("UPDATE : Writing:")?;
+    let mut words = rest.split_whitespace();
+    let sectors = words.next()?.strip_suffix('s')?;
+    if sectors.is_empty() || !sectors.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let percent = words.next()?.strip_suffix('%')?;
+    let (whole, tenths) = percent.split_once('.').unwrap_or((percent, "0"));
+    let whole: u32 = whole.parse().ok()?;
+    let tenth = tenths.chars().next()?.to_digit(10)?;
+    Some((whole * 10 + tenth).min(1000))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +341,65 @@ mod tests {
             ])),
             Some((1, 5, "1.5.8.pl02".to_string()))
         );
+    }
+
+    /// Captured from xorriso 1.5.8.pl02 on 2026-10-11; these go to stderr.
+    #[test]
+    fn a_writing_line_yields_its_tenths_of_a_percent() {
+        assert_eq!(
+            writing_per_mille(
+                "xorriso : UPDATE : Writing:      57344s    4.7%   fifo 100%  buf  50%"
+            ),
+            Some(47)
+        );
+        assert_eq!(
+            writing_per_mille(
+                "xorriso : UPDATE : Writing:     848140s   69.5%   fifo  99%  buf  50%  902.2xD "
+            ),
+            Some(695)
+        );
+        assert_eq!(
+            writing_per_mille(
+                "xorriso : UPDATE : Writing:   12207040s  100.0%   fifo   0%  buf   0%  3.1xB"
+            ),
+            Some(1000)
+        );
+    }
+
+    /// From a real drive: disc 1A of a two-copy project burned on the Pioneer
+    /// BDR-UD04 on 2026-10-11 (BD-R, `-close on`).
+    #[test]
+    fn real_drive_writing_lines_parse() {
+        assert_eq!(
+            writing_per_mille(
+                "xorriso : UPDATE : Writing:    1784672s   14.9%   fifo 100%  buf 100%    3.4xB"
+            ),
+            Some(149)
+        );
+        assert_eq!(
+            writing_per_mille(
+                "xorriso : UPDATE : Writing:   11974920s  100.0%   fifo   0%  buf 100%    3.4xB"
+            ),
+            Some(1000)
+        );
+        assert_eq!(
+            writing_per_mille(
+                "xorriso : UPDATE : Closing track/session. Working since 1292 seconds"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn other_lines_are_not_writing_progress() {
+        for line in [
+            "xorriso : UPDATE :       1 files added in 1 seconds",
+            "ISO image produced: 1220727 sectors",
+            "xorriso : UPDATE : Writing: garbage",
+            "xorriso : UPDATE : Writing:      57344s    abc%",
+            "",
+        ] {
+            assert_eq!(writing_per_mille(line), None, "{line:?}");
+        }
     }
 }

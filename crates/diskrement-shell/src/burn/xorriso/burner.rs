@@ -47,7 +47,7 @@ impl<'a> XorrisoBurner<'a> {
         let free_bytes = self.await_correct_media(image)?;
         let staged = stager::stage(image, self.progress, self.parallelism)?;
         check_capacity(staged.image_bytes, free_bytes)?;
-        self.write(image)?;
+        self.write(image, staged.image_bytes)?;
         self.post_burn_check(&image.metadata.identity)?;
         self.eject();
         Ok(staged)
@@ -157,7 +157,7 @@ impl<'a> XorrisoBurner<'a> {
         })
     }
 
-    fn write(&self, image: &DiscImage) -> Result<(), BurnError> {
+    fn write(&self, image: &DiscImage, image_bytes: u64) -> Result<(), BurnError> {
         let id = &image.metadata.identity;
         let volid = args::volid(&id.project_name, &id.disc_name());
         let command = args::burn(
@@ -167,13 +167,31 @@ impl<'a> XorrisoBurner<'a> {
             image.close_disc,
             &volid,
         );
+        let closing_note = if image.close_disc {
+            format!(
+                "Writing done; closing the session and finalizing disc {}. This can take a minute.",
+                id.disc_name()
+            )
+        } else {
+            format!(
+                "Writing done; closing the session on disc {}.",
+                id.disc_name()
+            )
+        };
+        self.progress
+            .start_bytes(&format!("burning disc {}", id.disc_name()), image_bytes);
+        let mut writing = WriteProgress::Before;
         let result = self.exec.run(&command, &mut |line| {
-            // xorriso's percentage lines; everything else is noise the
-            // operator does not need mid-burn.
-            if line.contains("UPDATE") {
-                self.operator.progress(line);
-            }
-        })?;
+            // Only the `Writing:` percentages and the end of writing reach the
+            // operator; the rest of xorriso's chatter stays in `result.lines`.
+            writing.observe(line, image_bytes, self.progress, || {
+                self.operator.progress(&closing_note)
+            });
+        });
+        if writing != WriteProgress::Ended {
+            self.progress.done();
+        }
+        let result = result?;
         if result.exit_code != 0 {
             return Err(BurnError::BurnFailed {
                 exit_code: result.exit_code,
@@ -220,6 +238,74 @@ impl<'a> XorrisoBurner<'a> {
     }
 }
 
+/// Where a burn is, as read from xorriso's output line by line.
+///
+/// Writing ends at 100% or at libburn's closing/fixating message, whichever
+/// comes first; after that, xorriso closes the session (and the disc, when
+/// sealing) without printing percentages, which is the pause the operator is
+/// told about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteProgress {
+    Before,
+    /// `reported` bytes have been passed to the sink so far.
+    Writing {
+        reported: u64,
+    },
+    Ended,
+}
+
+impl WriteProgress {
+    fn observe(
+        &mut self,
+        line: &str,
+        image_bytes: u64,
+        sink: &dyn ProgressSink,
+        announce_closing: impl FnOnce(),
+    ) {
+        if *self == WriteProgress::Ended {
+            return;
+        }
+        let reported = match *self {
+            WriteProgress::Writing { reported } => reported,
+            _ => 0,
+        };
+        if let Some(per_mille) = parse::writing_per_mille(line) {
+            let target = image_bytes * u64::from(per_mille) / 1000;
+            if target > reported {
+                sink.advance(target - reported, 0);
+            }
+            *self = WriteProgress::Writing {
+                reported: target.max(reported),
+            };
+            if per_mille == 1000 {
+                self.end(image_bytes, sink, announce_closing);
+            }
+        } else if matches!(self, WriteProgress::Writing { .. }) && is_closing(line) {
+            self.end(image_bytes, sink, announce_closing);
+        }
+    }
+
+    /// Fill the bar (the data is all written), close the phase, say why the
+    /// output is about to go quiet.
+    fn end(&mut self, image_bytes: u64, sink: &dyn ProgressSink, announce_closing: impl FnOnce()) {
+        if let WriteProgress::Writing { reported } = *self {
+            if image_bytes > reported {
+                sink.advance(image_bytes - reported, 0);
+            }
+        }
+        sink.done();
+        announce_closing();
+        *self = WriteProgress::Ended;
+    }
+}
+
+/// libburn's pacifier while it closes a track or session, or fixates a disc.
+/// The exact wording varies by medium and version, so this matches loosely.
+fn is_closing(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    line.contains("closing") || line.contains("fixating")
+}
+
 /// One percent of slack plus the fixed overhead — the Scala arithmetic,
 /// unchanged.
 fn check_capacity(staged_bytes: u64, free_bytes: u64) -> Result<(), BurnError> {
@@ -238,7 +324,7 @@ fn check_capacity(staged_bytes: u64, free_bytes: u64) -> Result<(), BurnError> {
 mod tests {
     use super::*;
     use crate::burn::testkit::{
-        image_of, ScriptedExec as Script, ScriptedOperator, APPENDABLE, BLANK,
+        image_of, RecordingSink, ScriptedExec as Script, ScriptedOperator, APPENDABLE, BLANK,
     };
     use crate::progress::NoopSink;
 
@@ -565,5 +651,124 @@ mod tests {
         .burn(&image_of(dir.path(), 1, &[("a.txt", "hello")], false))
         .expect("the burn succeeds");
         assert!(!script.ran("-eject"));
+    }
+
+    const FILES_ADDED: &str = "xorriso : UPDATE :       1 files added in 1 seconds";
+    const AT_0: &str = "xorriso : UPDATE : Writing:          0s    0.0%   fifo   0%  buf   0%";
+    const AT_50: &str =
+        "xorriso : UPDATE : Writing:     848140s   50.0%   fifo  99%  buf  50%  3.1xB ";
+    const AT_100: &str =
+        "xorriso : UPDATE : Writing:    1696280s  100.0%   fifo   0%  buf   0%  3.1xB ";
+
+    /// Burn the one-file test image with `lines` as xorriso's output.
+    fn burn_printing(lines: &[&str], close_disc: bool) -> (RecordingSink, ScriptedOperator, u64) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = Script::new()
+            .toc(&[BLANK])
+            .identities(&[Some(IDENTITY_1)])
+            .burn_lines(lines);
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+        let op = ScriptedOperator::new(&[true]);
+        let sink = RecordingSink::default();
+        let result = XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            &op,
+            &sink,
+            2,
+        )
+        .burn(&image_of(dir.path(), 1, &[("a.txt", "hello")], close_disc))
+        .expect("the burn succeeds");
+        (sink, op, result.image_bytes)
+    }
+
+    /// The burn's own phase follows staging's: sized to the staged image, fed
+    /// by xorriso's `Writing:` percentages, and closed.
+    #[test]
+    fn writing_lines_drive_a_bytes_phase_sized_to_the_image() {
+        let (sink, op, image_bytes) = burn_printing(&[FILES_ADDED, AT_0, AT_50, AT_100], false);
+        let events = sink.events();
+        let burn: Vec<&String> = events
+            .iter()
+            .skip_while(|e| !e.starts_with("start_bytes"))
+            .collect();
+        assert_eq!(
+            burn.first().map(|e| e.as_str()),
+            Some(format!("start_bytes burning disc 1 {image_bytes}").as_str())
+        );
+        assert_eq!(burn.last().map(|e| e.as_str()), Some("done"));
+        assert_eq!(
+            burn.iter().filter(|e| e.starts_with("advance")).count(),
+            2,
+            "0% advances nothing; 50% and 100% do"
+        );
+        let staged: u64 = events
+            .iter()
+            .take_while(|e| !e.starts_with("start_bytes"))
+            .filter_map(|e| e.strip_prefix("advance "))
+            .map(|r| r.split(' ').next().unwrap().parse::<u64>().unwrap())
+            .sum();
+        assert_eq!(
+            sink.advanced_bytes() - staged,
+            image_bytes,
+            "100% is the whole image"
+        );
+        assert!(
+            !op.said("UPDATE"),
+            "raw xorriso lines are not echoed: {:?}",
+            op.log()
+        );
+    }
+
+    /// After 100% xorriso closes the session (and the disc, when sealing),
+    /// which prints no percentages; the operator is told once. The closing
+    /// line is the real drive's (Pioneer BDR-UD04, BD-R, 2026-10-11), which
+    /// repeats it about once a second for the ~11 s the close took.
+    #[test]
+    fn the_closing_pause_is_announced_once() {
+        let closing = "xorriso : UPDATE : Closing track/session. Working since 1292 seconds";
+        let (_, op, _) = burn_printing(&[AT_50, AT_100, closing, closing], true);
+        let notes: Vec<String> = op
+            .log()
+            .into_iter()
+            .filter(|l| l.contains("closing the session"))
+            .collect();
+        assert_eq!(
+            notes,
+            vec![
+                "Writing done; closing the session and finalizing disc 1. This can take a minute."
+            ]
+        );
+    }
+
+    /// A closing message ends the phase even if the last percentage seen was
+    /// below 100, and later `Writing:` lines do not reopen it.
+    #[test]
+    fn a_closing_message_before_100_percent_still_ends_the_phase_once() {
+        let closing = "xorriso : UPDATE : Closing track/session. Working since 0 seconds";
+        let (sink, op, _) = burn_printing(&[AT_50, closing, AT_100], false);
+        let events = sink.events();
+        let burn: Vec<&String> = events
+            .iter()
+            .skip_while(|e| !e.starts_with("start_bytes"))
+            .collect();
+        assert_eq!(burn.iter().filter(|e| e.as_str() == "done").count(), 1);
+        assert_eq!(burn.last().map(|e| e.as_str()), Some("done"));
+        assert!(op.said("Writing done; closing the session on disc 1."));
+    }
+
+    /// A burn whose output never reaches 100% (or never prints a percentage)
+    /// still closes its phase, and says nothing about closing.
+    #[test]
+    fn a_burn_without_100_percent_still_closes_the_phase_quietly() {
+        let (sink, op, _) = burn_printing(&[FILES_ADDED, AT_50], false);
+        let events = sink.events();
+        let burn: Vec<&String> = events
+            .iter()
+            .skip_while(|e| !e.starts_with("start_bytes"))
+            .collect();
+        assert!(!burn.is_empty(), "the burn opened its phase: {events:?}");
+        assert_eq!(burn.last().map(|e| e.as_str()), Some("done"));
+        assert!(!op.said("closing the session"));
     }
 }
