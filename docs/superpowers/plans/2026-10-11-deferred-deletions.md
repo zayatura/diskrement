@@ -975,3 +975,7 @@ gh issue close 9 --comment "Fixed in <merge-sha> (https://github.com/zayatura/di
 ```
 
 Replace `<merge-sha>` with `git rev-parse --short HEAD` on `main`.
+
+## Execution deviations
+
+- `pipeline::verify_tests::a_sealed_disc_with_no_files_verifies_clean_with_zero_checked` relied on the removed set-A fallback: `burned_env(&[], true)` planned a sealed empty disc 1 from an empty scan. It was rebuilt to produce a file-less seal session the operator way (burn `a.txt`, restore the snapshot and staged scan, `plan --finalize`, burn, verify), keeping its assertions.
