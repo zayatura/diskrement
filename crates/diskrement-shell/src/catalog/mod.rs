@@ -62,10 +62,9 @@ impl Catalog {
     }
 
     /// Direct access to the underlying connection, for tests that need raw
-    /// SQL: schema comparison, logical row dumps, and the extra placements a
-    /// copies>1 scenario needs but no public method can yet express. Not part
-    /// of the operational API — every caller in `src/` goes through a named
-    /// method.
+    /// SQL: schema assertions, row counts, and the occasional placement a test
+    /// inserts by hand. Not part of the operational API — every caller in
+    /// `src/` goes through a named method.
     #[doc(hidden)]
     pub fn raw_connection_for_tests(&self) -> &Connection {
         &self.conn

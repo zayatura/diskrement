@@ -297,3 +297,53 @@ its disc. Status precedence is unchanged.
 - **Docs:** CLAUDE.md's "one disc per cycle" invariant and the "`copies>1` degrades
   silently" debt entry are updated; the stale comments at `pipeline/mod.rs` (`disc_write`)
   and `catalog/store.rs` (`dead_disc_versions`) are rewritten.
+
+## 10. Deviations recorded during planning
+
+- **`placement.copy_index` is enforced by construction, not checked.**
+  `FileWrite` has no `copy_index`; the store writes the disc's `copy_set`, so a
+  mismatch cannot be expressed (§5.3).
+- **The staged plan carries counts, not per-file tags.** Each set entry holds
+  `catchUp` (how many of its files are catch-up copies) and `sessionOrdinal`
+  (the session the burn writes, used to skip a disc committed before the plan
+  was rewritten). Files are classified at commit time anyway (§7.2), so a tag
+  would never be read (§6.1).
+- **`pointers.json` gains `copySet`.** A pointer naming only an ordinal is
+  ambiguous between twins; this narrows D5 without touching the known
+  dead-flag debt.
+- **`planner::plan` remains** as the single-set wrapper over `plan_set`, so the
+  ported planner tests and properties keep their meaning.
+- **`-1B` is refused by `DiscArg` parsing everywhere**, and a bare `-1` still
+  reaches the domain for `verify --disc` (exit 2).
+
+## 11. Deviations recorded during execution
+
+Detail and rationale are in the plan's "Execution deviations" section
+(`docs/superpowers/plans/2026-10-11-multiple-copies.md`).
+
+- **Degraded is per set.** A current version counts as degraded only when no
+  live copy is left in the dying disc's own copy set; one still covered within
+  its set is in no group. §8.1 already reads this way (clarified during
+  Task 10).
+- **`status` per-set block is thinner than §8.2.** Each set reads only
+  `set A: complete` or `set B: N files (X GB) missing`. The open disc is marked
+  inline in the disc list and the disc count is derivable from it, so neither
+  is repeated in the block.
+- **Mark-dead's degraded group** prints
+  `Short of a copy — restored on next scan/plan/burn (N):` followed by one line
+  per file, not §8.1's "N files now at 1 of 2 copies" summary.
+- **Partial-burn wording differs from §7.3's single message.** The tail is
+  `1A committed; 1B not written (re-run burn)`, and the advice follows the
+  cause: "re-run plan, then burn" for a stale plan, "re-run scan --force, then
+  plan and burn" for a missing snapshot, "nothing is left to write" when only
+  cleanup failed. A disc the burner wrote but the catalog did not record reads
+  "written but not recorded"; one a failed burner may have touched reads "may
+  have been written but was not recorded". No advice says "reset".
+- **`plan` output differs from §8.3's example.** Each set prints
+  `Plan: disc 1A (…) — N files (x new, y catch-up)`, and at `copies > 1` the
+  no-remainder line reads `Nothing more for set L after this disc.`
+  (`copies = 1` output is unchanged).
+- **Staged files are written atomically.** `plan.json` and `scan.json` are
+  written to a temp file, fsynced and renamed over the target (then the
+  directory is fsynced), because `burn` rewrites `plan.json` inside the crash
+  window §7.3 describes.

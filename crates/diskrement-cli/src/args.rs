@@ -109,10 +109,8 @@ pub enum Command {
 pub enum DiscCommand {
     /// Mark a disc dead (destroyed/unreadable); its live files re-plan.
     ///
-    /// `allow_negative_numbers` so that `-1` reaches `disc_name` and is
-    /// refused with the same sentence the Scala parser used, rather than
-    /// clap's "unexpected argument". Both exit 1; matching the wording costs
-    /// one attribute.
+    /// `allow_negative_numbers` so that `-1` reaches `disc_name` and gets the
+    /// same message as `0`, rather than clap's "unexpected argument".
     #[command(allow_negative_numbers = true)]
     MarkDead {
         name: String,

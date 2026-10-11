@@ -61,6 +61,7 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
 - **The real backend prompts before it opens the device.** That is what lets
   `tests/binary.rs` exercise it with no drive: a child with no stdin declines,
   and the burn aborts (exit 0) before anything is touched.
+- **Disc names depend on `copies`.** `DiscKey::name(copies)` is `3` in a single-copy project and `3B` otherwise; labels, staging dirs (`staging/disc-3B`), volids, prompts and reports all go through it. Never format a disc ordinal by hand.
 
 ## Environment
 
@@ -75,14 +76,15 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
 - **The catalog history is append-only.** `file_version`, `placement`, `change_record`, `disc_event` and `lost_version` rows are never updated or deleted; the `file_version`-only-grows proptest in `crates/diskrement-shell/src/catalog/store.rs` pins it. The only in-place writes are two forward-only status transitions, each guarded in its `where` clause: `disc.status` OPEN→FINALIZED and `session.state` BURNED→VERIFIED. There are no triggers — the schema bounds the values (check constraints), not the mutations; don't add a third kind of update.
 - **`DEAD` is derived, never stored.** `disc.status` keeps its `check (status in ('OPEN','FINALIZED'))` constraint; dead-ness is computed from `disc_event`. A test asserting only the derived value would pass against an illegal update-in-place, so also assert the row itself is unchanged.
 - **Commit after success.** No `PLANNED` rows are persisted; the staged plan in the work dir is the recovery unit. A crash before commit leaves the catalog untouched.
-- **One disc per cycle.** Each scan→plan→burn writes exactly one disc/session; `plan --finalize` seals a non-full disc.
+- **One disc per copy set per cycle.** Each scan→plan→burn writes at most one disc/session per copy set (`copies` sets, shown as letters: 1A/1B). `burn` writes the sets in order and commits each disc as soon as it is burned; the staged plan is rewritten (atomically) to what is left after every commit, so a failure after the first commit is a `PartialBurn` naming the committed, unrecorded and unwritten discs. Its advice follows the cause (`error::partial_burn_tail`): usually "re-run burn", which resumes; "re-run plan, then burn" for a stale plan; "re-run scan --force, then plan and burn" for a missing snapshot; never "reset". `plan --finalize` seals every set's open disc.
 - **The embedded `catalog.sqlite` reflects post-burn state** (built via `apply_update_to` on a work copy) so each disc is self-describing. The earlier pre-burn approach was deliberately reversed; never file-swap the SQLite file under a live connection.
 - **`LOST` is per physical copy, not per content hash.** After a recovery burn, two versions sharing a hash can legitimately read `LOST` and `CURRENT`.
+- **A copy placement has no version of its own.** A disc that holds another copy of a current version records one `placement` (its `copy_index` is its disc's `copy_set`) and no `file_version` or `change_record`. Classification is done per disc at commit time against the live catalog, so 1B's files become copies of what 1A just recorded. A version with no live copy anywhere is still re-added as a new version (REBURN).
 - **`StalePlan` advice is always "re-run plan", never "run reset"** — `reset` destroys staging that `StagingVerifier` needs. The `s07_reset` scenario asserts the message does not contain "reset".
 - **`Pipeline` returns data and does no I/O**; the CLI resolves paths and renders.
 - **Exit codes are a stable contract** (`crates/diskrement-shell/src/error.rs`, `PipelineError::exit_code`): 2 = state/lookup, 3 = environment/oversize (including source names that are not UTF-8), 4 = verify mismatch, 5 = unexpected, 6 = media/burner; an aborted burn exits 0. Pinned by that file's tests and `crates/diskrement-cli/tests/binary.rs`.
 
-Known deferred debt, documented on purpose — don't casually "fix" it: `archive_pointers` has no dead flag and is already baked onto burned discs; `write_disc` doesn't refuse a dead disc; the fingerprint cache never prunes deleted paths; `copies>1` redundancy degrades silently.
+Known deferred debt, documented on purpose — don't casually "fix" it: `archive_pointers` has no dead flag and is already baked onto burned discs; `write_disc` doesn't refuse a dead disc; the fingerprint cache never prunes deleted paths.
 
 ## Repo etiquette
 
