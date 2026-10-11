@@ -149,9 +149,11 @@ impl Catalog {
     /// Append a MARKED_DEAD event for `disc` and report what it cost. A
     /// version whose only live copy was on this disc becomes REBURN (current;
     /// the next cycle re-writes it from source) or LOST (superseded or
-    /// deleted; gone). A version with another live copy is reported as
-    /// degraded (current; the next cycle restores the copy) or counted as a
-    /// superseded survivor; neither is written to `lost_version`.
+    /// deleted; gone). A version with another live copy is not written to
+    /// `lost_version`: if current and no live copy remains in `disc`'s copy
+    /// set, it is reported as degraded (the next cycle restores that set's
+    /// copy); a current version still covered within its own set is not
+    /// reported at all; a non-current one is counted as a superseded survivor.
     ///
     /// The `disc` row itself is never touched: dead-ness is derived from
     /// `disc_event` at read time.
@@ -221,7 +223,7 @@ impl Catalog {
                     .collect(),
                 degraded: versions
                     .iter()
-                    .filter(|v| v.has_other_live_copy && v.is_current)
+                    .filter(|v| v.is_current && v.has_other_live_copy && !v.has_other_live_same_set)
                     .map(live_entry)
                     .collect(),
                 superseded_survivors: versions
@@ -328,8 +330,8 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
                 .map_err(CatalogError::from_sqlite)?;
             if updated == 0 {
                 return Err(CatalogError::IllegalStatusTransition(format!(
-                    "disc {} is not OPEN",
-                    d.ordinal
+                    "disc {} (set {}) is not OPEN",
+                    d.ordinal, d.copy_set
                 )));
             }
         }
@@ -529,10 +531,14 @@ struct DiscVersion {
     is_current: bool,
     /// Another disc that is not dead also holds this version.
     has_other_live_copy: bool,
+    /// Such a disc is in the dying disc's own copy set, so that set still
+    /// covers the version and nothing needs restoring.
+    has_other_live_same_set: bool,
 }
 
 /// Every version placed on the dying disc, flagged with whether it is its
-/// path's current version and whether a live copy survives elsewhere.
+/// path's current version, whether a live copy survives elsewhere, and
+/// whether one survives in the dying disc's own copy set.
 ///
 /// Grouped by version: a version with several placements on this disc (a
 /// later session re-placing it) is one row, because `lost_version` is
@@ -554,7 +560,16 @@ fn disc_versions(
                       where p2.file_version_id = fv.id and d2.id <> ?2
                         and not exists (select 1 from disc_event e
                                         where e.disc_id = d2.id and e.kind = 'MARKED_DEAD')
-                    ) as other_live
+                    ) as other_live,
+                    exists (
+                      select 1 from placement p2
+                      join session s2 on s2.id = p2.session_id
+                      join disc d2 on d2.id = s2.disc_id
+                      where p2.file_version_id = fv.id and d2.id <> ?2
+                        and d2.copy_set = (select copy_set from disc where id = ?2)
+                        and not exists (select 1 from disc_event e
+                                        where e.disc_id = d2.id and e.kind = 'MARKED_DEAD')
+                    ) as other_live_same_set
              from placement p
              join session s on s.id = p.session_id
              join file_version fv on fv.id = p.file_version_id
@@ -584,6 +599,7 @@ fn disc_versions(
                 session_ordinal: row.get::<_, i64>(4)? as u32,
                 is_current: row.get::<_, i64>(5)? == 1,
                 has_other_live_copy: row.get::<_, i64>(6)? == 1,
+                has_other_live_same_set: row.get::<_, i64>(7)? == 1,
             })
         })
         .map_err(CatalogError::from_sqlite)?;
@@ -812,9 +828,9 @@ mod tests {
         pid
     }
 
-    /// Put a's version on disc 2 as well, with a raw extra placement — exactly
-    /// what copies>1 will eventually do for real. No public method can express
-    /// this yet, so the test writes the row itself.
+    /// Put a's version on disc 2 (set 0) as well, with a raw extra placement:
+    /// a second live copy in the *same* copy set as disc 1. `copy_index` is
+    /// the disc's copy set, so 0.
     fn also_place_a_on_disc_2(cat: &crate::catalog::Catalog) {
         cat.raw_connection_for_tests()
             .execute(
@@ -822,7 +838,7 @@ mod tests {
                  select (select id from file_version where rel_path = 'a'),
                         (select s.id from session s join disc d on d.id = s.disc_id
                          where d.ordinal = 2),
-                        '/data/a', 1",
+                        '/data/a', 0",
                 [],
             )
             .expect("the extra placement inserts");
@@ -952,6 +968,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b"]
         );
+        // a's other copy is on 2A, in the same set: still covered, not degraded.
+        assert!(report.degraded.is_empty());
         // Nothing was recorded against a: its bytes still exist on live disc 2.
         assert_eq!(
             fates(&cat),
@@ -1066,7 +1084,7 @@ mod tests {
                  select (select max(id) from file_version where rel_path = 'b'),
                         (select s.id from session s join disc d on d.id = s.disc_id
                          where d.ordinal = 1 and s.ordinal = 1),
-                        '/data/b', 1",
+                        '/data/b', 0",
                 [],
             )
             .expect("the extra placement inserts");
@@ -1508,16 +1526,17 @@ mod tests {
     }
 
     #[test]
-    fn a_current_version_with_another_live_copy_is_degraded_not_reburned() {
+    fn a_current_version_whose_set_lost_its_last_copy_is_degraded_not_reburned() {
         let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
         let p = seed(&mut cat);
-        cat.apply_update(&update(p, 2, 1, vec![fw("c", "c1", 5)], vec![], vec![]))
-            .expect("disc 2 exists");
-        also_place_a_on_disc_2(&cat);
-        // `a` is current (a@a1, never modified) and now also lives on disc 2.
+        // 1B holds a copy of a@a1, written through the copy-placement path.
+        cat.apply_update(&copy_update(p, 1, 1, 1, vec![fw("a", "a1", 10)]))
+            .expect("1B is burned");
+        // `a` is current (a@a1, never modified) and lives in sets 0 and 1.
         let before = cat.read_view(p).unwrap();
         let a = &before.current[&RelPath("a".into())];
         assert_eq!(a.content_hash.as_str(), "a1");
+        assert_eq!(a.live_sets, std::collections::BTreeSet::from([0, 1]));
 
         let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
         assert_eq!(report.disc, DiscKey::new(1, 0));
@@ -1537,19 +1556,38 @@ mod tests {
     }
 
     #[test]
+    fn a_current_version_still_covered_in_its_own_set_is_not_degraded() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = seed(&mut cat);
+        cat.apply_update(&update(p, 2, 1, vec![fw("c", "c1", 5)], vec![], vec![]))
+            .expect("disc 2 exists");
+        also_place_a_on_disc_2(&cat);
+
+        let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
+        // Set 0 still holds a@a1 on 2A: nothing to restore, nothing lost.
+        assert!(report.degraded.is_empty());
+        assert!(report.reburn.iter().all(|r| r.rel_path.as_str() != "a"));
+        assert!(report.lost.iter().all(|l| l.rel_path.as_str() != "a"));
+        assert_eq!(report.superseded_survivors, 0);
+        assert!(fates(&cat).iter().all(|(path, _)| path != "a"));
+    }
+
+    #[test]
     fn a_superseded_version_with_another_live_copy_is_a_survivor_not_lost() {
         let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
         let p = seed(&mut cat);
         cat.apply_update(&update(p, 2, 1, vec![fw("c", "c1", 5)], vec![], vec![]))
             .expect("disc 2 exists");
-        // b@b1 is superseded by b@b2; give it a copy on live disc 2.
+        // b@b1 is superseded by b@b2; give it a copy on live disc 2A (set 0,
+        // so copy_index 0). The copy path refuses a non-current hash, so the
+        // row is written raw.
         cat.raw_connection_for_tests()
             .execute(
                 "insert into placement (file_version_id, session_id, disc_path, copy_index)
                  select (select min(id) from file_version where rel_path = 'b'),
                         (select s.id from session s join disc d on d.id = s.disc_id
                          where d.ordinal = 2),
-                        '/data/b', 1",
+                        '/data/b', 0",
                 [],
             )
             .expect("the extra placement inserts");

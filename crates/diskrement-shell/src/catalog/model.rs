@@ -252,8 +252,8 @@ pub struct LostReport {
     pub disc: DiscKey,
     pub lost: Vec<LostVersionEntry>,
     pub reburn: Vec<ReburnEntry>,
-    /// Current versions that still have a live copy on another disc. The next
-    /// cycle restores the missing copy.
+    /// Current versions that still have a live copy on another disc, but none
+    /// in the dying disc's copy set. The next cycle restores that set's copy.
     pub degraded: Vec<ReburnEntry>,
     /// Superseded or deleted versions that still have a live copy elsewhere.
     /// They are not lost, and not restored either: the source moved past them.

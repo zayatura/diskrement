@@ -247,8 +247,9 @@ The report has three groups:
 
 - **Lost:** a non-current version with no other live copy. Unchanged.
 - **Re-burn:** a current version with no other live copy. Unchanged.
-- **Degraded (new):** a current version that still has a live copy elsewhere. Reported
-  as e.g. "212 files now at 1 of 2 copies; restored on the next burn".
+- **Degraded (new):** a current version that still has a live copy on another disc, but
+  none in the dying disc's copy set (the next cycle restores that set's copy). A current
+  version still covered within its own set is not reported. Reported as e.g. "212 files now at 1 of 2 copies; restored on the next burn".
 
 A non-current version that still has a live copy elsewhere is neither lost nor restored
 (the source has moved past it); the report prints its count on its own line. The
