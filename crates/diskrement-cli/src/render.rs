@@ -181,25 +181,45 @@ fn coverage_lines(coverage: &[SetCoverage]) -> Vec<String> {
 
 pub fn status_report(p: &Project, r: &StatusReport) -> String {
     // Two spaces after the project name; margin is %.1f plus a literal %.
+    let copies = if p.copies > 1 {
+        format!(", {} copies", p.copies)
+    } else {
+        String::new()
+    };
     let mut out = format!(
-        "Project {}  (source {}, {}, margin {:.1}%)\n",
+        "Project {}  (source {}, {}, margin {:.1}%{copies})\n",
         p.name, p.source_root, p.default_disc_type, p.margin_percent
     );
     out.push_str("Discs:\n");
     for d in &r.discs {
-        let open = if r.open_disc_ordinal == Some(d.ordinal) {
+        let open = if r.open_discs.contains(&d.key()) {
             "  <- open"
         } else {
             ""
         };
         out.push_str(&format!(
             "  #{:<3} {:<10} {} / {}{}\n",
-            d.ordinal,
+            d.key().name(p.copies),
             d.status.as_str(),
             gb(d.used_bytes),
             gb(d.usable_bytes),
             open
         ));
+    }
+    if p.copies > 1 {
+        out.push_str("Copies:\n");
+        for (set, c) in r.coverage.iter().enumerate() {
+            let letter = set_letter(set as u32);
+            if c.missing_files == 0 {
+                out.push_str(&format!("  set {letter}: complete\n"));
+            } else {
+                out.push_str(&format!(
+                    "  set {letter}: {} files ({}) missing\n",
+                    c.missing_files,
+                    gb(c.missing_bytes)
+                ));
+            }
+        }
     }
     let last = r
         .last_burn_at
@@ -217,7 +237,7 @@ pub fn status_report(p: &Project, r: &StatusReport) -> String {
 
 /// `Render.verify`. One block per disc, in sweep order; an empty sweep is a
 /// sentence rather than a blank line.
-pub fn verify_report(reports: &[VerifyReport]) -> String {
+pub fn verify_report(reports: &[VerifyReport], copies: u32) -> String {
     if reports.is_empty() {
         return "Nothing to verify: no burned discs.".to_string();
     }
@@ -225,11 +245,15 @@ pub fn verify_report(reports: &[VerifyReport]) -> String {
         .iter()
         .map(|v| {
             if v.skipped {
-                format!("disc {}: skipped (not checked)", v.disc_ordinal)
+                format!("disc {}: skipped (not checked)", v.disc.name(copies))
             } else if v.mismatches.is_empty() {
                 // "files" is not pluralised in the Scala original, and
                 // run-manifest step 21 prints "disc 4: 0 files OK".
-                format!("disc {}: {} files OK ✓", v.disc_ordinal, v.files_checked)
+                format!(
+                    "disc {}: {} files OK ✓",
+                    v.disc.name(copies),
+                    v.files_checked
+                )
             } else {
                 let listed = v
                     .mismatches
@@ -239,7 +263,7 @@ pub fn verify_report(reports: &[VerifyReport]) -> String {
                     .join("\n");
                 format!(
                     "disc {}: {} checked, {} MISMATCH:\n{listed}",
-                    v.disc_ordinal,
+                    v.disc.name(copies),
                     v.files_checked,
                     v.mismatches.len()
                 )
@@ -264,7 +288,7 @@ pub fn verify_exit(reports: &[VerifyReport]) -> u8 {
 ///
 /// The column spacing is contract: two spaces after `v<n>`, **three** after the
 /// session, two around the hash.
-pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
+pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry], copies: u32) -> String {
     if entries.is_empty() {
         return format!("No history for {}.", rel_path.as_str());
     }
@@ -273,7 +297,7 @@ pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
         lines.push(format!(
             "  v{}  disc {} / session {}   {}  {}  {}",
             i + 1,
-            e.disc.ordinal,
+            e.disc.name(copies),
             e.session_ordinal,
             gb(e.size_bytes),
             e.content_hash,
@@ -291,8 +315,8 @@ pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
 /// destroyed a disc deserves to be told explicitly that it cost nothing. The
 /// two-space indent and the double-space column gaps are contract
 /// (`run-manifest.txt` step 12).
-pub fn mark_dead(r: &LostReport) -> String {
-    let mut lines = vec![format!("Disc {} marked DEAD.", r.disc.ordinal)];
+pub fn mark_dead(r: &LostReport, copies: u32) -> String {
+    let mut lines = vec![format!("Disc {} marked DEAD.", r.disc.name(copies))];
 
     if r.lost.is_empty() {
         lines.push("No versions permanently lost.".to_string());
@@ -323,6 +347,24 @@ pub fn mark_dead(r: &LostReport) -> String {
                 .iter()
                 .map(|e| format!("  {}", e.rel_path.as_str())),
         );
+    }
+
+    if !r.degraded.is_empty() {
+        lines.push(format!(
+            "Short of a copy — restored on next scan/plan/burn ({}):",
+            r.degraded.len()
+        ));
+        lines.extend(
+            r.degraded
+                .iter()
+                .map(|e| format!("  {}", e.rel_path.as_str())),
+        );
+    }
+    if r.superseded_survivors > 0 {
+        lines.push(format!(
+            "Superseded versions still held on another disc: {}",
+            r.superseded_survivors
+        ));
     }
 
     lines.join("\n")
@@ -403,10 +445,48 @@ mod tests {
                     used_bytes: 3_200_000_000,
                 },
             ],
-            open_disc_ordinal: Some(2),
+            open_discs: vec![diskrement_core::DiscKey::new(2, 0)],
+            coverage: vec![SetCoverage::default()],
             total_current_files: 556,
             last_burn_at: Some(ts(2026, 6, 21)),
         }
+    }
+
+    #[test]
+    fn a_two_copy_status_names_discs_by_set_and_shows_coverage() {
+        let mut p = project();
+        p.copies = 2;
+        let d = |ordinal, copy_set, status| DiscState {
+            ordinal,
+            copy_set,
+            status,
+            usable_bytes: 25_000_000_000,
+            used_bytes: 1_000_000_000,
+        };
+        let r = StatusReport {
+            discs: vec![d(1, 0, DiscStatus::Open), d(1, 1, DiscStatus::Dead)],
+            open_discs: vec![diskrement_core::DiscKey::new(1, 0)],
+            total_current_files: 2,
+            last_burn_at: None,
+            coverage: vec![
+                SetCoverage::default(),
+                SetCoverage {
+                    missing_files: 2,
+                    missing_bytes: 300_000_000,
+                },
+            ],
+        };
+        assert_eq!(
+            status_report(&p, &r),
+            "Project photos  (source /srv/photos, BD_R, margin 2.0%, 2 copies)\n\
+             Discs:\n  \
+             #1A  OPEN       1.0 GB / 25.0 GB  <- open\n  \
+             #1B  DEAD       1.0 GB / 25.0 GB\n\
+             Copies:\n  \
+             set A: complete\n  \
+             set B: 2 files (0.3 GB) missing\n\
+             Current files: 2      Last burn: never"
+        );
     }
 
     #[test]
@@ -893,7 +973,7 @@ mod p6_render_tests {
 
     fn report(ordinal: u32, checked: usize, mismatches: &[&str], skipped: bool) -> VerifyReport {
         VerifyReport {
-            disc_ordinal: ordinal,
+            disc: diskrement_core::DiscKey::new(ordinal, 0),
             files_checked: checked,
             mismatches: mismatches
                 .iter()
@@ -921,14 +1001,14 @@ mod p6_render_tests {
 
     #[test]
     fn an_empty_verify_says_there_is_nothing_to_check() {
-        assert_eq!(verify_report(&[]), "Nothing to verify: no burned discs.");
+        assert_eq!(verify_report(&[], 1), "Nothing to verify: no burned discs.");
     }
 
     /// `fixtures/run-manifest.txt` step 05, byte for byte.
     #[test]
     fn a_clean_disc_matches_the_render_oracle() {
         assert_eq!(
-            verify_report(&[report(1, 1, &[], false)]),
+            verify_report(&[report(1, 1, &[], false)], 1),
             "disc 1: 1 files OK ✓"
         );
     }
@@ -938,11 +1018,14 @@ mod p6_render_tests {
     #[test]
     fn a_three_disc_sweep_matches_the_render_oracle() {
         assert_eq!(
-            verify_report(&[
-                report(1, 1, &[], false),
-                report(2, 1, &[], false),
-                report(4, 0, &[], false),
-            ]),
+            verify_report(
+                &[
+                    report(1, 1, &[], false),
+                    report(2, 1, &[], false),
+                    report(4, 0, &[], false),
+                ],
+                1
+            ),
             "disc 1: 1 files OK ✓\n\
              disc 2: 1 files OK ✓\n\
              disc 4: 0 files OK ✓"
@@ -952,7 +1035,7 @@ mod p6_render_tests {
     #[test]
     fn a_skipped_disc_is_reported_as_not_checked() {
         assert_eq!(
-            verify_report(&[report(3, 0, &[], true)]),
+            verify_report(&[report(3, 0, &[], true)], 1),
             "disc 3: skipped (not checked)"
         );
     }
@@ -961,11 +1044,11 @@ mod p6_render_tests {
     #[test]
     fn mismatches_are_listed_under_their_disc() {
         assert_eq!(
-            verify_report(&[report(1, 2, &["a.bin"], false)]),
+            verify_report(&[report(1, 2, &["a.bin"], false)], 1),
             "disc 1: 2 checked, 1 MISMATCH:\n  a.bin"
         );
         assert_eq!(
-            verify_report(&[report(2, 5, &["bad/file.jpg", "other.raw"], false)]),
+            verify_report(&[report(2, 5, &["bad/file.jpg", "other.raw"], false)], 1),
             "disc 2: 5 checked, 2 MISMATCH:\n  bad/file.jpg\n  other.raw"
         );
     }
@@ -973,11 +1056,14 @@ mod p6_render_tests {
     #[test]
     fn a_mixed_sweep_puts_one_disc_per_block_in_order() {
         assert_eq!(
-            verify_report(&[
-                report(1, 1, &[], false),
-                report(2, 0, &[], true),
-                report(3, 2, &["gone.bin"], false),
-            ]),
+            verify_report(
+                &[
+                    report(1, 1, &[], false),
+                    report(2, 0, &[], true),
+                    report(3, 2, &["gone.bin"], false),
+                ],
+                1
+            ),
             "disc 1: 1 files OK ✓\n\
              disc 2: skipped (not checked)\n\
              disc 3: 2 checked, 1 MISMATCH:\n  gone.bin"
@@ -1000,7 +1086,7 @@ mod p6_render_tests {
     #[test]
     fn an_empty_history_names_the_path() {
         assert_eq!(
-            history(&RelPath("nope.bin".to_string()), &[]),
+            history(&RelPath("nope.bin".to_string()), &[], 1),
             "No history for nope.bin."
         );
     }
@@ -1018,7 +1104,8 @@ mod p6_render_tests {
                     entry(a1, 800, 1, 1, VersionStatus::Superseded),
                     entry(a2, 800, 3, 1, VersionStatus::Lost),
                     entry(a2, 800, 4, 1, VersionStatus::Current),
-                ]
+                ],
+                1
             ),
             format!(
                 "a.bin\n\
@@ -1036,7 +1123,8 @@ mod p6_render_tests {
         assert_eq!(
             history(
                 &RelPath("b.bin".to_string()),
-                &[entry(b1, 800, 2, 1, VersionStatus::Deleted)]
+                &[entry(b1, 800, 2, 1, VersionStatus::Deleted)],
+                1
             ),
             format!("b.bin\n\x20 v1  disc 2 / session 1   0.0 GB  {b1}  DELETED")
         );
@@ -1053,7 +1141,8 @@ mod p6_render_tests {
                     7,
                     2,
                     VersionStatus::Current
-                )]
+                )],
+                1
             ),
             "big/movie.mkv\n\x20 v1  disc 7 / session 2   12.3 GB  a1b2c3  CURRENT"
         );
@@ -1088,13 +1177,16 @@ mod p6_render_tests {
     fn the_mark_dead_render_matches_the_oracle_for_step_12() {
         let a2 = "e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77";
         assert_eq!(
-            mark_dead(&LostReport {
-                disc: diskrement_core::DiscKey::new(3, 0),
-                degraded: vec![],
-                superseded_survivors: 0,
-                lost: vec![],
-                reburn: vec![reburn("a.bin", 800, a2)],
-            }),
+            mark_dead(
+                &LostReport {
+                    disc: diskrement_core::DiscKey::new(3, 0),
+                    degraded: vec![],
+                    superseded_survivors: 0,
+                    lost: vec![],
+                    reburn: vec![reburn("a.bin", 800, a2)],
+                },
+                1
+            ),
             "Disc 3 marked DEAD.\n\
              No versions permanently lost.\n\
              Re-burn on next scan/plan/burn (1):\n\
@@ -1111,13 +1203,16 @@ mod p6_render_tests {
         let b2 = "49a7906775663af7970f00f946d1d540822233477e75f5b2912ca497780a01bc";
         let a1 = "0868513521f77faae1cf5200d9ff9603007fa04e0caef9f81183b44d46cbba86";
         assert_eq!(
-            mark_dead(&LostReport {
-                disc: diskrement_core::DiscKey::new(1, 0),
-                degraded: vec![],
-                superseded_survivors: 0,
-                lost: vec![lost("b.bin", 800, b1, 1)],
-                reburn: vec![reburn("a.bin", 800, a1), reburn("b.bin", 800, b2)],
-            }),
+            mark_dead(
+                &LostReport {
+                    disc: diskrement_core::DiscKey::new(1, 0),
+                    degraded: vec![],
+                    superseded_survivors: 0,
+                    lost: vec![lost("b.bin", 800, b1, 1)],
+                    reburn: vec![reburn("a.bin", 800, a1), reburn("b.bin", 800, b2)],
+                },
+                1
+            ),
             format!(
                 "Disc 1 marked DEAD.\n\
                  Permanently lost (1):\n\
@@ -1134,16 +1229,43 @@ mod p6_render_tests {
     #[test]
     fn a_disc_that_cost_nothing_says_so_twice() {
         assert_eq!(
-            mark_dead(&LostReport {
-                disc: diskrement_core::DiscKey::new(2, 0),
-                degraded: vec![],
-                superseded_survivors: 0,
-                lost: vec![],
-                reburn: vec![],
-            }),
+            mark_dead(
+                &LostReport {
+                    disc: diskrement_core::DiscKey::new(2, 0),
+                    degraded: vec![],
+                    superseded_survivors: 0,
+                    lost: vec![],
+                    reburn: vec![],
+                },
+                1
+            ),
             "Disc 2 marked DEAD.\n\
              No versions permanently lost.\n\
              No live files to re-burn."
+        );
+    }
+
+    #[test]
+    fn mark_dead_reports_degraded_files_and_surviving_superseded_versions() {
+        let r = LostReport {
+            disc: diskrement_core::DiscKey::new(1, 1),
+            lost: vec![],
+            reburn: vec![],
+            degraded: vec![ReburnEntry {
+                rel_path: RelPath("a.bin".into()),
+                content_hash: ContentHash("aa".into()),
+                size_bytes: 4,
+            }],
+            superseded_survivors: 1,
+        };
+        assert_eq!(
+            mark_dead(&r, 2),
+            "Disc 1B marked DEAD.\n\
+             No versions permanently lost.\n\
+             No live files to re-burn.\n\
+             Short of a copy — restored on next scan/plan/burn (1):\n  \
+             a.bin\n\
+             Superseded versions still held on another disc: 1"
         );
     }
 
@@ -1151,13 +1273,16 @@ mod p6_render_tests {
     #[test]
     fn the_lost_line_uses_the_shared_gb_format() {
         assert_eq!(
-            mark_dead(&LostReport {
-                disc: diskrement_core::DiscKey::new(9, 0),
-                degraded: vec![],
-                superseded_survivors: 0,
-                lost: vec![lost("big/movie.mkv", 12_300_000_000, "a1b2c3", 4)],
-                reburn: vec![],
-            }),
+            mark_dead(
+                &LostReport {
+                    disc: diskrement_core::DiscKey::new(9, 0),
+                    degraded: vec![],
+                    superseded_survivors: 0,
+                    lost: vec![lost("big/movie.mkv", 12_300_000_000, "a1b2c3", 4)],
+                    reburn: vec![],
+                },
+                1
+            ),
             "Disc 9 marked DEAD.\n\
              Permanently lost (1):\n\
              \x20 big/movie.mkv  12.3 GB  a1b2c3  (was session 4)\n\
@@ -1309,7 +1434,7 @@ mod snapshots {
 
     fn verify_of(ordinal: u32, checked: usize, mismatches: &[&str], skipped: bool) -> VerifyReport {
         VerifyReport {
-            disc_ordinal: ordinal,
+            disc: diskrement_core::DiscKey::new(ordinal, 0),
             files_checked: checked,
             mismatches: mismatches
                 .iter()
@@ -1479,13 +1604,15 @@ mod snapshots {
                 disc(1, DiscStatus::Finalized, 24_800_000_000, 25_000_000_000),
                 disc(2, DiscStatus::Open, 3_200_000_000, 25_000_000_000),
             ],
-            open_disc_ordinal: Some(2),
+            open_discs: vec![diskrement_core::DiscKey::new(2, 0)],
+            coverage: vec![SetCoverage::default()],
             total_current_files: 556,
             last_burn_at: Some(ts(2026, 6, 21, 14, 3, 0)),
         };
         let fresh = StatusReport {
             discs: vec![],
-            open_disc_ordinal: None,
+            open_discs: vec![],
+            coverage: vec![SetCoverage::default()],
             total_current_files: 0,
             last_burn_at: None,
         };
@@ -1496,7 +1623,8 @@ mod snapshots {
                 disc(3, DiscStatus::Dead, 0, 0),
                 disc(4, DiscStatus::Finalized, 0, 0),
             ],
-            open_disc_ordinal: Some(2),
+            open_discs: vec![diskrement_core::DiscKey::new(2, 0)],
+            coverage: vec![SetCoverage::default()],
             total_current_files: 1,
             last_burn_at: Some(ts(2026, 9, 5, 20, 1, 3)),
         };
@@ -1541,30 +1669,36 @@ mod snapshots {
         check(
             "verify",
             gallery(&[
-                ("nothing burned", verify_report(&[])),
+                ("nothing burned", verify_report(&[], 1)),
                 (
                     "a clean sweep (run-manifest step 21)",
-                    verify_report(&[
-                        verify_of(1, 1, &[], false),
-                        verify_of(2, 1, &[], false),
-                        verify_of(4, 0, &[], false),
-                    ]),
+                    verify_report(
+                        &[
+                            verify_of(1, 1, &[], false),
+                            verify_of(2, 1, &[], false),
+                            verify_of(4, 0, &[], false),
+                        ],
+                        1,
+                    ),
                 ),
                 (
                     "a skipped disc",
-                    verify_report(&[verify_of(3, 0, &[], true)]),
+                    verify_report(&[verify_of(3, 0, &[], true)], 1),
                 ),
                 (
                     "mismatches",
-                    verify_report(&[verify_of(2, 5, &["bad/file.jpg", "other.raw"], false)]),
+                    verify_report(&[verify_of(2, 5, &["bad/file.jpg", "other.raw"], false)], 1),
                 ),
                 (
                     "a mixed sweep",
-                    verify_report(&[
-                        verify_of(1, 1, &[], false),
-                        verify_of(2, 0, &[], true),
-                        verify_of(3, 2, &["gone.bin"], false),
-                    ]),
+                    verify_report(
+                        &[
+                            verify_of(1, 1, &[], false),
+                            verify_of(2, 0, &[], true),
+                            verify_of(3, 2, &["gone.bin"], false),
+                        ],
+                        1,
+                    ),
                 ),
             ]),
         );
@@ -1578,7 +1712,10 @@ mod snapshots {
         check(
             "history",
             gallery(&[
-                ("no history", history(&RelPath("nope.bin".to_string()), &[])),
+                (
+                    "no history",
+                    history(&RelPath("nope.bin".to_string()), &[], 1),
+                ),
                 (
                     "three versions, one lost (run-manifest step 16)",
                     history(
@@ -1588,6 +1725,7 @@ mod snapshots {
                             version(a2, 800, 3, 1, VersionStatus::Lost),
                             version(a2, 800, 4, 1, VersionStatus::Current),
                         ],
+                        1,
                     ),
                 ),
                 (
@@ -1595,6 +1733,7 @@ mod snapshots {
                     history(
                         &RelPath("b.bin".to_string()),
                         &[version(b1, 800, 2, 1, VersionStatus::Deleted)],
+                        1,
                     ),
                 ),
                 (
@@ -1608,6 +1747,7 @@ mod snapshots {
                             2,
                             VersionStatus::Current,
                         )],
+                        1,
                     ),
                 ),
             ]),
@@ -1652,49 +1792,61 @@ mod snapshots {
             gallery(&[
                 (
                     "nothing lost, nothing to re-burn",
-                    mark_dead(&LostReport {
-                        disc: diskrement_core::DiscKey::new(2, 0),
-                        degraded: vec![],
-                        superseded_survivors: 0,
-                        lost: vec![],
-                        reburn: vec![],
-                    }),
+                    mark_dead(
+                        &LostReport {
+                            disc: diskrement_core::DiscKey::new(2, 0),
+                            degraded: vec![],
+                            superseded_survivors: 0,
+                            lost: vec![],
+                            reburn: vec![],
+                        },
+                        1,
+                    ),
                 ),
                 (
                     "one live file re-queued (run-manifest step 12)",
-                    mark_dead(&LostReport {
-                        disc: diskrement_core::DiscKey::new(3, 0),
-                        degraded: vec![],
-                        superseded_survivors: 0,
-                        lost: vec![],
-                        reburn: vec![reburn_entry("a.bin", 800, a2)],
-                    }),
+                    mark_dead(
+                        &LostReport {
+                            disc: diskrement_core::DiscKey::new(3, 0),
+                            degraded: vec![],
+                            superseded_survivors: 0,
+                            lost: vec![],
+                            reburn: vec![reburn_entry("a.bin", 800, a2)],
+                        },
+                        1,
+                    ),
                 ),
                 (
                     "a superseded version gone forever",
-                    mark_dead(&LostReport {
-                        disc: diskrement_core::DiscKey::new(1, 0),
-                        degraded: vec![],
-                        superseded_survivors: 0,
-                        lost: vec![lost_entry("b.bin", 800, b1, 1)],
-                        reburn: vec![],
-                    }),
+                    mark_dead(
+                        &LostReport {
+                            disc: diskrement_core::DiscKey::new(1, 0),
+                            degraded: vec![],
+                            superseded_survivors: 0,
+                            lost: vec![lost_entry("b.bin", 800, b1, 1)],
+                            reburn: vec![],
+                        },
+                        1,
+                    ),
                 ),
                 (
                     "both halves, with the GB column",
-                    mark_dead(&LostReport {
-                        disc: diskrement_core::DiscKey::new(4, 0),
-                        degraded: vec![],
-                        superseded_survivors: 0,
-                        lost: vec![
-                            lost_entry("b.bin", 800, b1, 1),
-                            lost_entry("big/movie.mkv", 12_300_000_000, "a1b2c3", 2),
-                        ],
-                        reburn: vec![
-                            reburn_entry("a.bin", 800, a1),
-                            reburn_entry("nested/c.bin", 100, "c0ffee"),
-                        ],
-                    }),
+                    mark_dead(
+                        &LostReport {
+                            disc: diskrement_core::DiscKey::new(4, 0),
+                            degraded: vec![],
+                            superseded_survivors: 0,
+                            lost: vec![
+                                lost_entry("b.bin", 800, b1, 1),
+                                lost_entry("big/movie.mkv", 12_300_000_000, "a1b2c3", 2),
+                            ],
+                            reburn: vec![
+                                reburn_entry("a.bin", 800, a1),
+                                reburn_entry("nested/c.bin", 100, "c0ffee"),
+                            ],
+                        },
+                        1,
+                    ),
                 ),
             ]),
         );

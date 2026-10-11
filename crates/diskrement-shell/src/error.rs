@@ -73,27 +73,22 @@ pub enum PipelineError {
     /// verifier's evidence.
     #[error("staged plan is stale: {0} (re-run plan)")]
     StalePlan(String),
-    /// A `--disc` ordinal that names no disc in this project.
-    ///
-    /// The ordinal is `i64` because zio-cli let a negative value through to
-    /// the domain, and the exit ladder — not clap's argument parser — is the
-    /// contract for what happens next.
+    /// A `--disc` or `mark-dead` argument that names no disc in this project.
+    /// Carries the argument as typed (normalised to an upper-case letter), so
+    /// `-1` and `9C` are echoed back. A negative `--disc` reaches the domain
+    /// (zio-cli let it through), and the exit ladder — not clap's argument
+    /// parser — is the contract for what happens next.
     #[error("no disc with ordinal {0}")]
-    UnknownDisc(i64),
-    /// A `--disc` ordinal that names a disc marked dead. A *sweep* skips dead
-    /// discs quietly; naming one is an assertion of intent, and answering it
-    /// with a reassuring exit 0 would be a lie.
+    UnknownDisc(String),
+    /// A `--disc` naming a disc marked dead. A *sweep* skips dead discs
+    /// quietly; naming one is an assertion of intent, and answering it with a
+    /// reassuring exit 0 would be a lie. Carries the disc's name (`3`, `3B`).
     #[error("disc {0} is marked dead")]
-    DiscIsDead(i64),
+    DiscIsDead(String),
     /// A `disc mark-dead` naming a disc that already carries a `MARKED_DEAD`
-    /// event.
-    ///
-    /// The ordinal is `u32`, not the `i64` `UnknownDisc` and `DiscIsDead`
-    /// carry: `disc mark-dead`'s ordinal is validated in the *parser*
-    /// (`Commands.scala`), so a non-positive value never reaches the domain.
-    /// `verify --disc`'s does, which is why that one stays signed.
+    /// event. Carries the disc's name (`3`, `3B`).
     #[error("disc {0} is already marked dead")]
-    DiscAlreadyDead(u32),
+    DiscAlreadyDead(String),
     /// Surfaced by `plan` in its report and refused by `burn`: the
     /// two-stage oversize check.
     #[error(
@@ -568,14 +563,14 @@ mod tests {
 
     #[test]
     fn disc_state_errors_are_exit_2_with_their_messages() {
-        assert_eq!(PipelineError::UnknownDisc(9).exit_code(), 2);
-        assert_eq!(PipelineError::DiscIsDead(3).exit_code(), 2);
+        assert_eq!(PipelineError::UnknownDisc("9".into()).exit_code(), 2);
+        assert_eq!(PipelineError::DiscIsDead("3".into()).exit_code(), 2);
         assert_eq!(
-            PipelineError::UnknownDisc(99).to_string(),
+            PipelineError::UnknownDisc("99".into()).to_string(),
             "no disc with ordinal 99"
         );
         assert_eq!(
-            PipelineError::DiscIsDead(3).to_string(),
+            PipelineError::DiscIsDead("3".into()).to_string(),
             "disc 3 is marked dead"
         );
     }
@@ -585,7 +580,7 @@ mod tests {
     /// Verified against the staged Scala launcher.
     #[test]
     fn a_negative_ordinal_is_a_lookup_failure_not_an_argument_error() {
-        let e = PipelineError::UnknownDisc(-1);
+        let e = PipelineError::UnknownDisc("-1".into());
         assert_eq!(e.to_string(), "no disc with ordinal -1");
         assert_eq!(e.exit_code(), 2);
     }
@@ -596,9 +591,9 @@ mod tests {
     /// raises this instead.
     #[test]
     fn marking_a_dead_disc_again_is_exit_2_with_its_own_message() {
-        assert_eq!(PipelineError::DiscAlreadyDead(1).exit_code(), 2);
+        assert_eq!(PipelineError::DiscAlreadyDead("1".into()).exit_code(), 2);
         assert_eq!(
-            PipelineError::DiscAlreadyDead(1).to_string(),
+            PipelineError::DiscAlreadyDead("1".into()).to_string(),
             "disc 1 is already marked dead"
         );
     }
@@ -610,9 +605,9 @@ mod tests {
     #[test]
     fn the_three_disc_errors_read_differently_at_the_same_exit_code() {
         let messages = [
-            PipelineError::UnknownDisc(3).to_string(),
-            PipelineError::DiscIsDead(3).to_string(),
-            PipelineError::DiscAlreadyDead(3).to_string(),
+            PipelineError::UnknownDisc("3".into()).to_string(),
+            PipelineError::DiscIsDead("3".into()).to_string(),
+            PipelineError::DiscAlreadyDead("3".into()).to_string(),
         ];
         assert_eq!(
             messages,
@@ -623,9 +618,9 @@ mod tests {
             ]
         );
         assert!([
-            PipelineError::UnknownDisc(3).exit_code(),
-            PipelineError::DiscIsDead(3).exit_code(),
-            PipelineError::DiscAlreadyDead(3).exit_code(),
+            PipelineError::UnknownDisc("3".into()).exit_code(),
+            PipelineError::DiscIsDead("3".into()).exit_code(),
+            PipelineError::DiscAlreadyDead("3".into()).exit_code(),
         ]
         .iter()
         .all(|c| *c == 2));

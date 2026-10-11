@@ -20,13 +20,15 @@ pub struct ScanReport {
     pub scanned_files: usize,
 }
 
-/// `StatusReport`.
+/// `StatusReport`. `open_discs` holds each copy set's open disc, if it has
+/// one; `coverage` is indexed by copy set.
 #[derive(Debug)]
 pub struct StatusReport {
     pub discs: Vec<DiscState>,
-    pub open_disc_ordinal: Option<u32>,
+    pub open_discs: Vec<DiscKey>,
     pub total_current_files: usize,
     pub last_burn_at: Option<DateTime<Utc>>,
+    pub coverage: Vec<SetCoverage>,
 }
 
 /// How much outstanding change did NOT fit on the disc planned this cycle
@@ -95,7 +97,7 @@ pub struct BurnReport {
 /// with no staged data at all was never looked at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyReport {
-    pub disc_ordinal: u32,
+    pub disc: DiscKey,
     pub files_checked: usize,
     pub mismatches: Vec<diskrement_core::RelPath>,
     pub skipped: bool,

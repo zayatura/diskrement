@@ -272,8 +272,15 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 },
                 &NoopSink,
             );
-            let reports = pipeline.verify(&name, disc, &verifier)?;
-            say(&render::verify_report(&reports));
+            let reports = pipeline.verify(
+                &name,
+                disc.map(|o| diskrement_core::DiscArg {
+                    ordinal: o,
+                    copy_set: None,
+                }),
+                &verifier,
+            )?;
+            say(&render::verify_report(&reports, p.copies));
             // Result-driven: corruption found is a successful run with a bad
             // outcome, so it does not travel the error ladder.
             Ok(render::verify_exit(&reports))
@@ -291,7 +298,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             );
             let rel = diskrement_core::RelPath(rel_path);
             let entries = pipeline.history(&name, &rel)?;
-            say(&render::history(&rel, &entries));
+            say(&render::history(&rel, &entries, p.copies));
             Ok(0)
         }
         Command::Disc {
@@ -322,8 +329,15 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 },
                 &NoopSink,
             );
-            let report = pipeline.mark_dead(&name, ordinal, chrono::Utc::now())?;
-            say(&render::mark_dead(&report));
+            let report = pipeline.mark_dead(
+                &name,
+                diskrement_core::DiscArg {
+                    ordinal: i64::from(ordinal),
+                    copy_set: None,
+                },
+                chrono::Utc::now(),
+            )?;
+            say(&render::mark_dead(&report, p.copies));
             Ok(0)
         }
     }
