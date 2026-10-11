@@ -28,6 +28,11 @@ impl Scratch {
         self.work.join(format!("staging/disc-{ordinal}"))
     }
 
+    /// `<work>/staging/disc-<name>`, for a multi-copy project's `1A`, `1B`, …
+    pub fn disc_dir_named(&self, name: &str) -> PathBuf {
+        self.work.join(format!("staging/disc-{name}"))
+    }
+
     /// A runner with the project's default capacity.
     pub fn cli(&self) -> Cli {
         Cli {

@@ -395,6 +395,26 @@ fn burned_project() -> Fixture {
     }
 }
 
+mod copies {
+    use super::*;
+
+    #[test]
+    fn copies_outside_one_to_twenty_six_is_a_usage_error() {
+        for n in ["0", "27"] {
+            let p = project();
+            base(&p)
+                .args(["init", "p", "--source"])
+                .arg(&p.source)
+                .arg("--work-dir")
+                .arg(&p.work)
+                .args(["--copies", n])
+                .assert()
+                .failure()
+                .code(1);
+        }
+    }
+}
+
 mod burn {
     use super::*;
 
@@ -565,6 +585,15 @@ mod verify_history_reset {
             .failure()
             .code(2)
             .stderr(contains("no disc with ordinal 99"));
+    }
+
+    #[test]
+    fn a_set_letter_past_the_projects_copies_is_an_unknown_disc() {
+        let f = burned_project();
+        run(&f, &["verify", "p", "--disc", "1B"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal 1B"));
     }
 
     /// The parser must not turn a negative ordinal into an argument error:
