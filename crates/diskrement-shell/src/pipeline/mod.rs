@@ -279,6 +279,10 @@ impl<'a> Pipeline<'a> {
                     .collect(),
             ));
         }
+        // A plan with no disc is a finished cycle with nothing to write: the
+        // loop below does not run, and the tail ends the cycle as usual. Its
+        // deletions wait for the next burned disc (issue #9).
+        let deferred_deletions = report.sets.is_empty().then_some(report.tombstones.len());
 
         let mut done: Vec<DiscKey> = Vec::new();
         let mut written: Vec<DiscBurn> = Vec::new();
@@ -355,6 +359,7 @@ impl<'a> Pipeline<'a> {
             discs: written,
             remaining,
             coverage: replication::coverage(&view, p.copies),
+            deferred_deletions,
         })
     }
 
@@ -2162,6 +2167,101 @@ mod burn_tests {
         );
         assert_eq!(manifest_deleted(&env, "1A"), vec!["gone.bin"]);
         assert_eq!(manifest_deleted(&env, "1B"), vec!["gone.bin"]);
+    }
+
+    fn row_counts(env: &Env) -> Vec<(String, i64)> {
+        let conn = env.catalog.raw_connection_for_tests();
+        [
+            "disc",
+            "session",
+            "file_version",
+            "placement",
+            "change_record",
+            "disc_event",
+            "lost_version",
+        ]
+        .iter()
+        .map(|t| {
+            let n: i64 = conn
+                .query_row(&format!("select count(*) from {t}"), [], |r| r.get(0))
+                .unwrap();
+            (t.to_string(), n)
+        })
+        .collect()
+    }
+
+    /// (a) Issue #9: a deletion-only cycle at copies=2 writes no disc, in
+    /// either set, and touches no catalog table; it still ends the cycle.
+    #[test]
+    fn a_deletion_only_cycle_burns_nothing_and_ends_the_cycle() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa"), ("gone.bin", b"gggg")], false, 2);
+        run_burn(&mut env).unwrap();
+        let before = row_counts(&env);
+
+        let plan = restage(&mut env, &[("a.bin", b"aaaa")]);
+        assert!(plan.sets.is_empty());
+        assert_eq!(plan.tombstones, vec![RelPath("gone.bin".into())]);
+        let report = run_burn(&mut env).unwrap();
+
+        assert!(report.discs.is_empty());
+        assert_eq!(report.deferred_deletions, Some(1));
+        assert_eq!(row_counts(&env), before, "nothing reached the catalog");
+        assert!(deletions_of(&env, "gone.bin").is_empty());
+        assert!(!env.work.join("staging/disc-2A").exists());
+        assert!(staged::read_plan(&env.work).unwrap().is_none());
+        assert!(staged::read_scan(&env.work).unwrap().is_none());
+    }
+
+    /// (b) The deferred deletion rides the next disc that is burned anyway:
+    /// recorded once, on 1A, listed by both twins' manifests.
+    #[test]
+    fn a_deferred_deletion_is_recorded_by_the_next_burned_disc() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa"), ("gone.bin", b"gggg")], false, 2);
+        run_burn(&mut env).unwrap();
+        restage(&mut env, &[("a.bin", b"aaaa")]);
+        run_burn(&mut env).unwrap();
+
+        let plan = restage(&mut env, &[("a.bin", b"aaaa"), ("b.bin", b"bbbb")]);
+        assert_eq!(plan.sets.len(), 2);
+        assert_eq!(plan.tombstones, vec![RelPath("gone.bin".into())]);
+        let report = run_burn(&mut env).unwrap();
+
+        assert_eq!(report.deferred_deletions, None);
+        assert_eq!(deletions_of(&env, "gone.bin"), vec![(0, 2)]);
+        assert_eq!(manifest_deleted(&env, "1A"), vec!["gone.bin"]);
+        assert_eq!(manifest_deleted(&env, "1B"), vec!["gone.bin"]);
+    }
+
+    /// (c) A deletion deferred while its only disc dies drops out of the live
+    /// view, but is still a tombstone, so the scan counts it and the next
+    /// burned disc records it.
+    #[test]
+    fn a_deletion_deferred_past_its_discs_death_is_still_recorded() {
+        let mut env = staged_env(&[("a.bin", b"aaaa"), ("gone.bin", b"gggg")], false);
+        run_burn(&mut env).unwrap();
+        restage(&mut env, &[("a.bin", b"aaaa")]);
+        run_burn(&mut env).unwrap();
+        env.catalog
+            .mark_dead(ProjectId(1), DiscKey::new(1, 0), &now())
+            .unwrap();
+
+        let plan = restage(&mut env, &[("a.bin", b"aaaa"), ("b.bin", b"bbbb")]);
+        assert_eq!(plan.tombstones, vec![RelPath("gone.bin".into())]);
+        let sink = NoopSink;
+        let scan = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &sink,
+        )
+        .scan("p", false, false)
+        .unwrap();
+        assert_eq!(scan.deleted, 1, "the scan agrees with the plan");
+
+        run_burn(&mut env).unwrap();
+        assert_eq!(deletions_of(&env, "gone.bin"), vec![(0, 1)], "on disc 2");
     }
 
     /// A tombstoned path whose current version lost its last live copy

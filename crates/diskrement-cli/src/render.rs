@@ -863,6 +863,7 @@ mod tests {
                     missing_bytes: 2_000_000_000,
                 },
             ],
+            deferred_deletions: None,
         };
         assert_eq!(
             burn_report(&r, 2),
@@ -885,6 +886,7 @@ mod tests {
                 more_bytes: 0,
             },
             coverage: vec![],
+            deferred_deletions: None,
         };
         let out = burn_report(&r, 2);
         assert!(!out.contains("Copies:"), "{out}");
@@ -928,6 +930,7 @@ mod burn_render_tests {
                 more_bytes: 800,
             },
             coverage: vec![SetCoverage::default()],
+            deferred_deletions: None,
         }
     }
 
@@ -1433,6 +1436,7 @@ mod snapshots {
                 more_bytes: 800,
             },
             coverage: vec![SetCoverage::default()],
+            deferred_deletions: None,
         }
     }
 
