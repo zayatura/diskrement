@@ -36,6 +36,33 @@ pub fn format(
     total_files: usize,
     elapsed: Duration,
 ) -> String {
+    let (rate, eta) = rate_and_eta(done_bytes, total_bytes, elapsed);
+    format!(
+        "{label} {:.1}/{:.1} GB · {}/{} files · {:.0} MB/s · {}",
+        done_bytes as f64 / 1.0e9,
+        total_bytes as f64 / 1.0e9,
+        done_files,
+        total_files,
+        rate / 1.0e6,
+        eta
+    )
+}
+
+/// `format` without the files segment, for a phase measured in bytes alone:
+/// `label X.X/Y.Y GB · R MB/s · ETA …`.
+pub fn format_bytes(label: &str, done_bytes: u64, total_bytes: u64, elapsed: Duration) -> String {
+    let (rate, eta) = rate_and_eta(done_bytes, total_bytes, elapsed);
+    format!(
+        "{label} {:.1}/{:.1} GB · {:.0} MB/s · {}",
+        done_bytes as f64 / 1.0e9,
+        total_bytes as f64 / 1.0e9,
+        rate / 1.0e6,
+        eta
+    )
+}
+
+/// Bytes per second so far, and the ETA text that rate implies.
+fn rate_and_eta(done_bytes: u64, total_bytes: u64, elapsed: Duration) -> (f64, String) {
     let seconds = elapsed.as_secs_f64();
     let rate = if seconds > 0.0 {
         done_bytes as f64 / seconds
@@ -53,21 +80,15 @@ pub fn format(
         let s = eta_seconds as i64;
         format!("ETA {}m{:02}s", s / 60, s % 60)
     };
-    format!(
-        "{label} {:.1}/{:.1} GB · {}/{} files · {:.0} MB/s · {}",
-        done_bytes as f64 / 1.0e9,
-        total_bytes as f64 / 1.0e9,
-        done_files,
-        total_files,
-        rate / 1.0e6,
-        eta
-    )
+    (rate, eta)
 }
 
 pub struct ConsoleProgress {
     label: Mutex<String>,
     total_bytes: AtomicU64,
     total_files: AtomicU64,
+    /// False for a `start_bytes` phase, which has no files segment.
+    counts_files: AtomicBool,
     done_bytes: AtomicU64,
     done_files: AtomicU64,
     started: Mutex<Option<Instant>>,
@@ -83,6 +104,7 @@ impl ConsoleProgress {
             label: Mutex::new(String::new()),
             total_bytes: AtomicU64::new(0),
             total_files: AtomicU64::new(0),
+            counts_files: AtomicBool::new(true),
             done_bytes: AtomicU64::new(0),
             done_files: AtomicU64::new(0),
             started: Mutex::new(None),
@@ -100,19 +122,30 @@ impl ConsoleProgress {
         }
     }
 
+    /// The current phase's line; `None` before any phase has started.
+    fn line(&self) -> Option<String> {
+        let started = (*self.started.lock().unwrap())?;
+        let label = self.label.lock().unwrap();
+        let done_bytes = self.done_bytes.load(Ordering::Relaxed);
+        let total_bytes = self.total_bytes.load(Ordering::Relaxed);
+        Some(if self.counts_files.load(Ordering::Relaxed) {
+            format(
+                &label,
+                done_bytes,
+                total_bytes,
+                self.done_files.load(Ordering::Relaxed) as usize,
+                self.total_files.load(Ordering::Relaxed) as usize,
+                started.elapsed(),
+            )
+        } else {
+            format_bytes(&label, done_bytes, total_bytes, started.elapsed())
+        })
+    }
+
     fn emit(&self) {
-        let started = match *self.started.lock().unwrap() {
-            Some(t) => t,
-            None => return,
+        let Some(line) = self.line() else {
+            return;
         };
-        let line = format(
-            &self.label.lock().unwrap(),
-            self.done_bytes.load(Ordering::Relaxed),
-            self.total_bytes.load(Ordering::Relaxed),
-            self.done_files.load(Ordering::Relaxed) as usize,
-            self.total_files.load(Ordering::Relaxed) as usize,
-            started.elapsed(),
-        );
         let mut err = std::io::stderr().lock();
         if self.tty {
             let _ = write!(err, "\r{line}\x1b[K");
@@ -153,6 +186,12 @@ impl ProgressSink for ConsoleProgress {
         *self.started.lock().unwrap() = Some(Instant::now());
         *self.last_emit.lock().unwrap() = None;
         self.emitted.store(false, Ordering::Relaxed);
+        self.counts_files.store(true, Ordering::Relaxed);
+    }
+
+    fn start_bytes(&self, label: &str, total_bytes: u64) {
+        self.start(label, total_bytes, 0);
+        self.counts_files.store(false, Ordering::Relaxed);
     }
 
     fn advance(&self, delta_bytes: u64, delta_files: usize) {
@@ -198,6 +237,34 @@ mod tests {
             ),
             "hashing 12.3/413.6 GB · 3021/75618 files · 840 MB/s · ETA 7m57s"
         );
+    }
+
+    /// A burn advances by bytes only, so its line drops the files segment.
+    #[test]
+    fn a_bytes_only_line_has_no_files_segment() {
+        assert_eq!(
+            format_bytes(
+                "burning disc 1A",
+                12_300_000_000,
+                413_600_000_000,
+                Duration::from_nanos(14_642_857_142)
+            ),
+            "burning disc 1A 12.3/413.6 GB · 840 MB/s · ETA 7m57s"
+        );
+    }
+
+    #[test]
+    fn a_bytes_phase_renders_without_files_and_a_later_phase_with_them() {
+        let p = ConsoleProgress::new();
+        p.start_bytes("burning disc 1A", 1_000);
+        p.advance(10, 0);
+        let line = p.line().expect("a started phase renders");
+        assert!(line.starts_with("burning disc 1A "), "{line}");
+        assert!(!line.contains("files"), "{line}");
+
+        p.start("staging", 1_000, 3);
+        let line = p.line().expect("a started phase renders");
+        assert!(line.contains("0/3 files"), "{line}");
     }
 
     #[test]
