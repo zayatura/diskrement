@@ -4500,3 +4500,27 @@ git push origin --delete feat/multiple-copies   # only if the branch was pushed
 - **Task 10 (review fix):** `degraded` counts a current version only when no live copy remains in the dying disc's copy set (`disc_versions` gains an `other_live_same_set` column). The plan's "another live copy anywhere" promised a restore the planner never makes when the surviving copy is in the same set, which could happen even at copies=1. A current version still covered within its own set goes in no bucket. The `lost_version` LOST/REBURN split and `superseded_survivors` still key on any other live copy. Raw test inserts now use a `copy_index` equal to their disc's copy set, and the degraded test writes its 1B copy through the `copied` path. Spec §8.1 is clarified to match. Separately, from the Task 9 review, `write_disc`'s "is not OPEN" error now names the set.
 - **Task 11 hardening:** `DiscIdentity::disc_name()` no longer panics on identities read off media: when `copies > 1` and `copy_set >= MAX_COPIES` (a corrupt `project.json`) it renders `<ordinal>?<copy set>` (e.g. `3?26`), so the burner describes and re-prompts instead of exiting 5; `DiscKey::name`/`set_letter` are unchanged. `volid` now truncates only the project-name part, so the `_DISC_<name>` suffix always survives the 32-character cap and twins of a long-named project keep distinct volume ids; short-name volids are unchanged.
 - **Task 12:** three existing planning tests (`finalize_of_an_unchanged_tree_seals_the_open_disc_with_no_files`, `a_file_that_cannot_top_off_the_open_disc_opens_a_fresh_one_this_cycle`, `a_no_op_scan_plans_an_empty_disc_rather_than_panicking`) built their "already burned" view with `CatalogView::from_scanned`, whose `live_sets` are empty, so `shortfall` now (correctly) re-placed every unchanged file as a set-A catch-up copy. They build the view with the task's own `live_in(files, &[0])` helper instead, which is what they always meant: the files are live on a set-A disc. Their assertions are unchanged. The staged plan's field-spelling test now asserts the v2 paths (`copies`, `sets[0].disc.copySet`, `sets[0].catchUp`, `sets[0].sessionOrdinal`, `sets[0].remaining.*`) rather than the v1 top-level `disc`/`remaining`. `disc_write`'s body uses the `disc_type` shorthand (clippy `redundant_field_names`).
+- **Task 12 (review fixes):**
+  - **Atomic staged files.** `staged::write_json` (shared by `scan.json` and `plan.json`) writes `<file>.tmp`, calls `sync_all`, renames it over the target and fsyncs `staged/`. `burn` rewrites `plan.json` right after each commit, exactly in the crash window, and a truncated plan would have exited 5 on re-run. `clear` also removes a leftover `*.tmp`, so a crash before the rename cannot make `clear` trip over a non-empty `staged/`.
+  - **`PartialBurn` gains `unrecorded: Option<String>`.** This is a disc that was physically written but whose `apply_update` failed (`burn_disc` now returns a private `DiscFailure::{Unwritten, Unrecorded}`). It is reported as "1B written but not recorded", never as "not written".
+  - **Advice follows the cause** (`error::partial_burn_advice`):
+    - `StalePlan` → "(re-run plan, then burn)".
+    - `SnapshotMissing` → "(re-run scan --force, then plan and burn)". The coordinator suggested plain `plan` here, but `plan` cannot recreate the snapshot; only a fresh scan does.
+    - Anything else → "(re-run burn)".
+    - If every disc committed and only the cleanup failed → "(nothing is left to write)", and the "not written" part is left out because nothing is pending.
+    - No advice ever says "reset".
+  - **`burn` wraps late failures in `PartialBurn`.** A failed plan rewrite after a commit, and a failed `clear`/`read_view` after the last commit, now carry the committed discs instead of a bare `Failed`. A failure before any commit is still the raw error.
+  - **The CLI shares the summary.** The Aborted arm in `error_line` now uses `partial_burn_summary`.
+  - **The tombstone filter uses `Catalog::fingerprints`** ("latest change is not DELETED", not filtered by dead discs) instead of `read_view`. A tombstone whose version lost its last live copy between `plan` and `burn` is now recorded, as the manifest says it is. At copies=1 this is the pre-Task-12 behaviour.
+  - **`coverage_lines` on an empty coverage prints nothing**, instead of claiming "0 copies".
+  - **New tests:**
+    - Atomic replace: a new inode and no `.tmp` left behind.
+    - `clear` removes `.tmp` files.
+    - Three new error tests for the cause-based advice, `unrecorded`, and the empty pending list.
+    - A copies=2 deletion records exactly one DELETED, on 1A's session 2, and both manifests list it. A `|_| true` filter now fails this test.
+    - A tombstone survives its version's last copy dying.
+    - A plan-rewrite failure is a `PartialBurn` that resumes without re-burning 1A.
+    - A cleanup failure names both discs and says nothing about "not written".
+    - A commit failure, forced with a temp trigger on the live connection, reports 1B as unrecorded.
+    - Render: an empty coverage prints no "Copies:" line.
+    - The crash-window test now also asserts that the disc written is 1B.

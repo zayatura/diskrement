@@ -147,7 +147,11 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
 }
 
 /// One line when every set is complete, otherwise one line per lagging set.
+/// Nothing at all for an empty coverage, rather than "0 copies".
 fn coverage_lines(coverage: &[SetCoverage]) -> Vec<String> {
+    if coverage.is_empty() {
+        return Vec::new();
+    }
     if coverage.iter().all(|c| c.missing_files == 0) {
         return vec![format!(
             "Copies: every current file has {} copies.",
@@ -335,6 +339,7 @@ pub fn error_line(err: &PipelineError) -> String {
         PipelineError::Burn(diskrement_shell::burn::BurnError::Aborted) => "Aborted.".to_string(),
         PipelineError::PartialBurn {
             committed,
+            unrecorded,
             pending,
             cause,
         } if matches!(
@@ -343,9 +348,8 @@ pub fn error_line(err: &PipelineError) -> String {
         ) =>
         {
             format!(
-                "Aborted. {} committed; {} not written (re-run burn).",
-                committed.join(", "),
-                pending.join(", ")
+                "Aborted. {} (re-run burn).",
+                diskrement_shell::error::partial_burn_summary(committed, unrecorded, pending)
             )
         }
         other => other.to_string(),
@@ -782,9 +786,25 @@ mod tests {
     }
 
     #[test]
+    fn a_burn_with_no_coverage_rows_claims_no_copy_count() {
+        let r = BurnReport {
+            discs: vec![],
+            remaining: RemainingEstimate {
+                more_discs: 0,
+                more_files: 0,
+                more_bytes: 0,
+            },
+            coverage: vec![],
+        };
+        let out = burn_report(&r, 2);
+        assert!(!out.contains("Copies:"), "{out}");
+    }
+
+    #[test]
     fn an_aborted_second_disc_names_what_was_committed() {
         let err = PipelineError::PartialBurn {
             committed: vec!["1A".into()],
+            unrecorded: None,
             pending: vec!["1B".into()],
             cause: Box::new(PipelineError::Burn(
                 diskrement_shell::burn::BurnError::Aborted,

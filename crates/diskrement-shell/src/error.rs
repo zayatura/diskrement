@@ -124,14 +124,18 @@ pub enum PipelineError {
     #[error(transparent)]
     Burn(#[from] crate::burn::BurnError),
     /// A multi-disc burn that committed some discs and then failed. The cause
-    /// decides the exit code — an aborted prompt still exits 0 — and the
-    /// message says what to do next.
-    #[error(
-        "{} — {} committed; {} not written (re-run burn)",
-        .cause, .committed.join(", "), .pending.join(", ")
-    )]
+    /// decides the exit code — an aborted prompt still exits 0 — and also the
+    /// advice: a stale plan needs a re-plan (never `reset`, which deletes the
+    /// staging the verifier needs), anything else a re-run of `burn`.
+    ///
+    /// `unrecorded` is a disc that was physically written but whose commit
+    /// failed, so the catalog does not know it; it is neither committed nor
+    /// "not written". `pending` is empty when the failure came after every
+    /// disc had committed.
+    #[error("{}", partial_burn_message(.committed, .unrecorded, .pending, .cause))]
     PartialBurn {
         committed: Vec<String>,
+        unrecorded: Option<String>,
         pending: Vec<String>,
         cause: Box<PipelineError>,
     },
@@ -139,6 +143,54 @@ pub enum PipelineError {
     /// `internal error: <detail> (this is a bug)`, exit 5.
     #[error("internal error: {0} (this is a bug)")]
     Failed(String),
+}
+
+/// What to do after a `PartialBurn`, decided by its cause.
+pub fn partial_burn_advice(cause: &PipelineError) -> &'static str {
+    match cause {
+        // The staged plan no longer holds; a re-plan turns the committed
+        // discs' files into catch-up copies for the lagging sets.
+        PipelineError::StalePlan(_) => "re-run plan, then burn",
+        // `plan` cannot recreate the snapshot; only a fresh scan does.
+        PipelineError::SnapshotMissing(_) => "re-run scan --force, then plan and burn",
+        _ => "re-run burn",
+    }
+}
+
+/// `"1A committed; 1B written but not recorded; 1C not written"`, leaving out
+/// the parts that are empty. No trailing advice.
+pub fn partial_burn_summary(
+    committed: &[String],
+    unrecorded: &Option<String>,
+    pending: &[String],
+) -> String {
+    let mut parts = vec![format!("{} committed", committed.join(", "))];
+    if let Some(disc) = unrecorded {
+        parts.push(format!("{disc} written but not recorded"));
+    }
+    if !pending.is_empty() {
+        parts.push(format!("{} not written", pending.join(", ")));
+    }
+    parts.join("; ")
+}
+
+fn partial_burn_message(
+    committed: &[String],
+    unrecorded: &Option<String>,
+    pending: &[String],
+    cause: &PipelineError,
+) -> String {
+    // After every disc committed, only the work-dir cleanup failed: there is
+    // nothing to re-burn, and "re-run burn" would only find no staged plan.
+    let advice = if pending.is_empty() && unrecorded.is_none() {
+        "nothing is left to write"
+    } else {
+        partial_burn_advice(cause)
+    };
+    format!(
+        "{cause} — {} ({advice})",
+        partial_burn_summary(committed, unrecorded, pending)
+    )
 }
 
 /// `e`'s message followed by each of its causes, joined with `": "`.
@@ -248,13 +300,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_partial_burn_carries_its_causes_exit_code_and_names_both_halves() {
-        let partial = |cause| PipelineError::PartialBurn {
+    fn partial(cause: PipelineError) -> PipelineError {
+        PipelineError::PartialBurn {
             committed: vec!["1A".into()],
+            unrecorded: None,
             pending: vec!["1B".into()],
             cause: Box::new(cause),
-        };
+        }
+    }
+
+    #[test]
+    fn a_partial_burn_carries_its_causes_exit_code_and_names_both_halves() {
         let media = partial(PipelineError::Burn(crate::burn::BurnError::NoMedia(
             "/dev/sr0".into(),
         )));
@@ -266,6 +322,54 @@ mod tests {
         assert_eq!(
             partial(PipelineError::Burn(crate::burn::BurnError::Aborted)).exit_code(),
             0
+        );
+    }
+
+    #[test]
+    fn a_partial_burn_on_a_stale_plan_advises_re_planning_never_reset() {
+        let stale = partial(PipelineError::StalePlan("disc 1B was marked dead".into()));
+        assert_eq!(stale.exit_code(), 2);
+        let text = stale.to_string();
+        assert!(
+            text.ends_with("1A committed; 1B not written (re-run plan, then burn)"),
+            "{text}"
+        );
+        assert!(!text.contains("reset"), "{text}");
+        let missing = partial(PipelineError::SnapshotMissing("p".into())).to_string();
+        assert!(
+            missing.ends_with("(re-run scan --force, then plan and burn)"),
+            "{missing}"
+        );
+        assert!(!missing.contains("reset"), "{missing}");
+    }
+
+    #[test]
+    fn a_disc_written_but_not_recorded_is_not_called_unwritten() {
+        let err = PipelineError::PartialBurn {
+            committed: vec!["1A".into()],
+            unrecorded: Some("1B".into()),
+            pending: vec!["1C".into()],
+            cause: Box::new(PipelineError::Failed("disk full".into())),
+        };
+        assert_eq!(err.exit_code(), 5);
+        assert_eq!(
+            err.to_string(),
+            "internal error: disk full (this is a bug) — 1A committed; \
+             1B written but not recorded; 1C not written (re-run burn)"
+        );
+    }
+
+    #[test]
+    fn a_failure_after_every_disc_committed_lists_nothing_as_unwritten() {
+        let err = PipelineError::PartialBurn {
+            committed: vec!["1A".into(), "1B".into()],
+            unrecorded: None,
+            pending: vec![],
+            cause: Box::new(PipelineError::Failed("cannot clear".into())),
+        };
+        assert_eq!(
+            err.to_string(),
+            "internal error: cannot clear (this is a bug) — 1A, 1B committed (nothing is left to write)"
         );
     }
 

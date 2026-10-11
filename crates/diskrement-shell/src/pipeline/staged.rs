@@ -113,11 +113,25 @@ pub fn plan_path(work_dir: &Path) -> PathBuf {
     work_dir.join("staged").join("plan.json")
 }
 
-/// Compact JSON, like zio-json's `.toJson`.
+/// Compact JSON, like zio-json's `.toJson`, written atomically.
+///
+/// `burn` rewrites `plan.json` right after each disc commits — exactly the
+/// window a crash is most likely to hit — so the file must never be seen half
+/// written: write `<file>.tmp`, flush it to disk, rename it over the target,
+/// then flush the directory so the rename itself survives a power loss.
 fn write_json(file: &Path, json: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(file.parent().expect("staged has a parent"))?;
-    let mut out = std::fs::File::create(file)?;
-    out.write_all(json.as_bytes())
+    let dir = file.parent().expect("staged has a parent");
+    std::fs::create_dir_all(dir)?;
+    let mut tmp_name = file.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    {
+        let mut out = std::fs::File::create(&tmp)?;
+        out.write_all(json.as_bytes())?;
+        out.sync_all()?;
+    }
+    std::fs::rename(&tmp, file)?;
+    std::fs::File::open(dir)?.sync_all()
 }
 
 /// `Ok(None)` when the file does not exist.
@@ -241,7 +255,8 @@ pub fn is_legacy_plan(work_dir: &Path) -> bool {
         .is_some_and(|v| v.get("disc").is_some() && v.get("sets").is_none())
 }
 
-/// Discard both staged files and the `staged/` directory
+/// Discard both staged files, any temp file an interrupted `write_json` left,
+/// and the `staged/` directory
 /// (`StagedStoreLive.clear`). Absent files are not an error.
 ///
 /// A non-empty `staged/` *is* an error, and deliberately so: the Scala
@@ -249,8 +264,13 @@ pub fn is_legacy_plan(work_dir: &Path) -> bool {
 /// that case, and something unexpected living in the recovery unit is worth
 /// surfacing rather than stepping around.
 pub fn clear(work_dir: &Path) -> std::io::Result<()> {
-    remove_if_present(&scan_path(work_dir))?;
-    remove_if_present(&plan_path(work_dir))?;
+    for file in [scan_path(work_dir), plan_path(work_dir)] {
+        remove_if_present(&file)?;
+        // `write_json`'s temp file, if a crash stopped it before the rename.
+        let mut tmp = file.into_os_string();
+        tmp.push(".tmp");
+        remove_if_present(Path::new(&tmp))?;
+    }
     match std::fs::remove_dir(work_dir.join("staged")) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -490,5 +510,42 @@ mod tests {
         )
         .unwrap();
         assert!(is_legacy_plan(dir.path()));
+    }
+
+    #[test]
+    fn a_staged_write_replaces_the_file_whole_and_leaves_no_temp_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = plan_path(dir.path());
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "x".repeat(4096)).unwrap();
+        use std::os::unix::fs::MetadataExt as _;
+        let before = std::fs::metadata(&target).unwrap().ino();
+
+        write_json(&target, "{}").unwrap();
+
+        // A new inode: the file was renamed into place, not truncated and
+        // rewritten, so a crash mid-write can never leave half a plan.
+        assert_ne!(std::fs::metadata(&target).unwrap().ino(), before);
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
+        let names: Vec<String> = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["plan.json".to_string()],
+            "no temp file left behind"
+        );
+    }
+
+    #[test]
+    fn clear_also_removes_a_temp_file_a_crash_left_behind() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_plan(dir.path(), &plan_report()).unwrap();
+        std::fs::write(dir.path().join("staged/plan.json.tmp"), "{\"half").unwrap();
+        std::fs::write(dir.path().join("staged/scan.json.tmp"), "[").unwrap();
+        clear(dir.path()).unwrap();
+        assert!(!dir.path().join("staged").exists());
     }
 }
