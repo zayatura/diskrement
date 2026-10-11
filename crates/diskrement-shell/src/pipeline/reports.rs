@@ -55,9 +55,11 @@ pub struct SetPlan {
 }
 
 /// The discs this cycle writes — one per copy set with something to do — in
-/// set order.
+/// set order. `sets` may be empty (nothing to place); the tombstones are then
+/// deferred to the next disc that is burned anyway (issue #9).
 ///
-/// `tombstones` are the whole scan's deletions. Every disc's manifest lists
+/// `tombstones` are the whole scan's deletions, computed against the catalog
+/// history (`diff::tombstones`), not the live view. Every disc's manifest lists
 /// them; the catalog records each one once, on the first disc to commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanReport {
@@ -84,13 +86,18 @@ pub struct DiscBurn {
 /// The result of one burn cycle: every disc written this run, the largest
 /// remaining estimate among their sets, and each set's coverage afterwards.
 ///
-/// `discs` can be empty when every planned disc had already been committed by
-/// an earlier, interrupted run.
+/// `discs` can be empty for two reasons. Either every planned disc had already
+/// been committed by an earlier, interrupted run (`deferred_deletions` is
+/// `None`), or the plan had no disc at all (`deferred_deletions` is `Some`,
+/// holding the number of deletions left for the next burned disc, issue #9).
+/// A zero-set `plan.json` can only come from `plan`: `burn` rewrites the plan
+/// only while discs remain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BurnReport {
     pub discs: Vec<DiscBurn>,
     pub remaining: RemainingEstimate,
     pub coverage: Vec<SetCoverage>,
+    pub deferred_deletions: Option<usize>,
 }
 
 /// One disc's verification result (`Pipeline.scala`'s `VerifyReport`).

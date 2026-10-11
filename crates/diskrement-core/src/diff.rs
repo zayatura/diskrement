@@ -11,6 +11,8 @@ use crate::model::{CatalogView, RelPath, ScannedFile};
 pub struct ChangeSet {
     pub added: Vec<ScannedFile>,
     pub modified: Vec<ScannedFile>,
+    /// Computed against the live view. This is not the cycle's deletions:
+    /// those are `tombstones` over the catalog history.
     pub deleted: Vec<RelPath>,
     pub unchanged: Vec<ScannedFile>,
 }
@@ -44,25 +46,39 @@ pub fn diff(catalog: &CatalogView, scanned: &[ScannedFile]) -> ChangeSet {
         }
     }
 
-    let scanned_paths: HashSet<&RelPath> = scanned.iter().map(|f| &f.rel_path).collect();
-    let mut deleted: Vec<RelPath> = catalog
-        .current
-        .keys()
-        .filter(|p| !scanned_paths.contains(*p))
-        .cloned()
-        .collect();
+    let deleted = tombstones(catalog.current.keys(), scanned);
 
     added.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     modified.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     unchanged.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    deleted.sort();
-
     ChangeSet {
         added,
         modified,
         deleted,
         unchanged,
     }
+}
+
+/// The cycle's deletions: every path the catalog still holds as not deleted
+/// that is absent from the scan, sorted.
+///
+/// `recorded` is the catalog's history (latest change not `DELETED`), **not**
+/// the live view: a version whose every copy died is gone from the view but
+/// still current in the history, and its deletion must still be recorded.
+/// Deletions are deferred to the next burned disc (issue #9), so this set is
+/// re-derived on every scan until a commit records it.
+pub fn tombstones<'a>(
+    recorded: impl IntoIterator<Item = &'a RelPath>,
+    scanned: &[ScannedFile],
+) -> Vec<RelPath> {
+    let scanned_paths: HashSet<&RelPath> = scanned.iter().map(|f| &f.rel_path).collect();
+    let mut out: Vec<RelPath> = recorded
+        .into_iter()
+        .filter(|p| !scanned_paths.contains(p))
+        .cloned()
+        .collect();
+    out.sort();
+    out
 }
 
 #[cfg(test)]
@@ -196,5 +212,24 @@ mod tests {
             prop_assert!(cs.is_empty());
             prop_assert_eq!(cs.unchanged.len(), files.len());
         }
+    }
+
+    // --- tombstones ---
+
+    fn rp(s: &str) -> RelPath {
+        RelPath(s.to_string())
+    }
+
+    #[test]
+    fn a_recorded_path_absent_from_the_scan_is_a_tombstone_and_output_is_sorted() {
+        let recorded = [rp("z"), rp("keep"), rp("a")];
+        let t = tombstones(recorded.iter(), &[sf_hash("keep", "h")]);
+        assert_eq!(t, vec![rp("a"), rp("z")]);
+    }
+
+    #[test]
+    fn a_scanned_path_that_was_never_recorded_is_not_a_tombstone() {
+        let t = tombstones([rp("a")].iter(), &[sf_hash("a", "h"), sf_hash("new", "h")]);
+        assert!(t.is_empty());
     }
 }

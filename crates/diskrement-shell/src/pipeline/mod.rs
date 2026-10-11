@@ -99,7 +99,9 @@ impl<'a> Pipeline<'a> {
 
     /// `scan`: reuse a staged scan unless `--force`/`--verify`; otherwise
     /// snapshot → hash → stage → cache, and diff against the catalog view
-    /// (`PipelineLive.scan`). `hashed` is `None` on the reuse path.
+    /// (`PipelineLive.scan`). Added/modified/unchanged come from that view;
+    /// the deleted count comes from the catalog history, like the plan's
+    /// tombstones. `hashed` is `None` on the reuse path.
     pub fn scan(
         &mut self,
         name: &str,
@@ -184,10 +186,13 @@ impl<'a> Pipeline<'a> {
     ) -> Result<ScanReport, PipelineError> {
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let cs = diff::diff(&view, files);
+        // Deletions come from the history, like `plan`'s tombstones, so the
+        // scan never reports a different count from the plan that follows it.
+        let recorded = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
         Ok(ScanReport {
             added: cs.added.len(),
             modified: cs.modified.len(),
-            deleted: cs.deleted.len(),
+            deleted: diff::tombstones(recorded.keys(), files).len(),
             unchanged: cs.unchanged.len(),
             hashed,
             scanned_files: files.len(),
@@ -210,6 +215,8 @@ impl<'a> Pipeline<'a> {
             .ok_or_else(|| PipelineError::NoStagedScan(name.to_string()))?;
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
+        let recorded = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
+        let tombstones = diff::tombstones(recorded.keys(), &scanned);
         let disc_type = disc_type_override.unwrap_or(p.default_disc_type);
         let cap = planning::effective_capacity(
             Capacity::from_disc_type(disc_type, p.margin_percent),
@@ -219,6 +226,7 @@ impl<'a> Pipeline<'a> {
         let report = planning::plan_from(
             &view,
             &scanned,
+            tombstones,
             &states,
             disc_type,
             cap,
@@ -271,6 +279,10 @@ impl<'a> Pipeline<'a> {
                     .collect(),
             ));
         }
+        // A plan with no disc is a finished cycle with nothing to write: the
+        // loop below does not run, and the tail ends the cycle as usual. Its
+        // deletions wait for the next burned disc (issue #9).
+        let deferred_deletions = report.sets.is_empty().then_some(report.tombstones.len());
 
         let mut done: Vec<DiscKey> = Vec::new();
         let mut written: Vec<DiscBurn> = Vec::new();
@@ -347,6 +359,7 @@ impl<'a> Pipeline<'a> {
             discs: written,
             remaining,
             coverage: replication::coverage(&view, p.copies),
+            deferred_deletions,
         })
     }
 
@@ -398,6 +411,17 @@ impl<'a> Pipeline<'a> {
             return Err(DiscFailure::Unwritten(PipelineError::StalePlan(format!(
                 "disc {disc_name} would get session {sess_ord}, but this plan was staged for session {}",
                 sp.session_ordinal
+            ))));
+        }
+
+        // `plan_from` no longer emits a disc with nothing to write (issue #9),
+        // but a plan staged by the build before it may still carry one: its
+        // old set-A fallback: either an open disc with nothing added, or, with
+        // `--finalize`, a fresh disc sealed empty. A seal of an existing disc
+        // (`!is_new && will_finalize`) is the one valid empty disc.
+        if disc.files.is_empty() && (disc.is_new || !disc.will_finalize) {
+            return Err(DiscFailure::Unwritten(PipelineError::StalePlan(format!(
+                "disc {disc_name} has nothing to write; it was planned by an older version of diskrement"
             ))));
         }
 
@@ -1388,6 +1412,7 @@ mod burn_tests {
         let report = crate::pipeline::planning::plan_from(
             &diskrement_core::CatalogView::empty(),
             &scanned,
+            Vec::new(),
             &[],
             DiscType::BdR,
             diskrement_core::Capacity::new(1_000_000),
@@ -1814,6 +1839,7 @@ mod burn_tests {
         let mut report = crate::pipeline::planning::plan_from(
             &diskrement_core::CatalogView::empty(),
             &scanned,
+            Vec::new(),
             &[],
             DiscType::BdR,
             diskrement_core::Capacity::new(1_000_000),
@@ -2154,6 +2180,198 @@ mod burn_tests {
         assert_eq!(manifest_deleted(&env, "1B"), vec!["gone.bin"]);
     }
 
+    /// Everything `burn` could change in place: the status of every disc and
+    /// the state of every session.
+    fn status_rows(env: &Env) -> Vec<String> {
+        let conn = env.catalog.raw_connection_for_tests();
+        let mut out = Vec::new();
+        for q in [
+            "select id, status from disc order by id",
+            "select id, state from session order by id",
+        ] {
+            let mut stmt = conn.prepare(q).unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(format!(
+                        "{}={}",
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?
+                    ))
+                })
+                .unwrap();
+            out.extend(rows.map(Result::unwrap));
+        }
+        out
+    }
+
+    fn row_counts(env: &Env) -> Vec<(String, i64)> {
+        let conn = env.catalog.raw_connection_for_tests();
+        [
+            "disc",
+            "session",
+            "file_version",
+            "placement",
+            "change_record",
+            "disc_event",
+            "lost_version",
+        ]
+        .iter()
+        .map(|t| {
+            let n: i64 = conn
+                .query_row(&format!("select count(*) from {t}"), [], |r| r.get(0))
+                .unwrap();
+            (t.to_string(), n)
+        })
+        .collect()
+    }
+
+    /// (a) Issue #9: a deletion-only cycle at copies=2 writes no disc, in
+    /// either set, and touches no catalog table; it still ends the cycle.
+    /// Both twins are sealed first, so the old set-A fallback would have
+    /// opened disc 2A: the bug itself.
+    #[test]
+    fn a_deletion_only_cycle_burns_nothing_and_ends_the_cycle() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa"), ("gone.bin", b"gggg")], true, 2);
+        run_burn(&mut env).unwrap();
+        let before = (row_counts(&env), status_rows(&env));
+
+        let plan = restage(&mut env, &[("a.bin", b"aaaa")]);
+        assert!(plan.sets.is_empty());
+        assert_eq!(plan.tombstones, vec![RelPath("gone.bin".into())]);
+        let report = run_burn(&mut env).unwrap();
+
+        assert!(report.discs.is_empty());
+        assert_eq!(report.deferred_deletions, Some(1));
+        assert_eq!(
+            (row_counts(&env), status_rows(&env)),
+            before,
+            "nothing reached the catalog"
+        );
+        assert!(deletions_of(&env, "gone.bin").is_empty());
+        assert!(!env.work.join("staging/disc-2A").exists());
+        assert!(!env.work.join("staging/disc-2B").exists());
+        assert!(!env.work.join("snapshot").exists(), "snapshot released");
+        assert!(staged::read_plan(&env.work).unwrap().is_none());
+        assert!(staged::read_scan(&env.work).unwrap().is_none());
+    }
+
+    /// (b) The deferred deletion rides the next disc that is burned anyway:
+    /// recorded once, on 1A, listed by both twins' manifests.
+    #[test]
+    fn a_deferred_deletion_is_recorded_by_the_next_burned_disc() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa"), ("gone.bin", b"gggg")], false, 2);
+        run_burn(&mut env).unwrap();
+        restage(&mut env, &[("a.bin", b"aaaa")]);
+        run_burn(&mut env).unwrap();
+
+        let plan = restage(&mut env, &[("a.bin", b"aaaa"), ("b.bin", b"bbbb")]);
+        assert_eq!(plan.sets.len(), 2);
+        assert_eq!(plan.tombstones, vec![RelPath("gone.bin".into())]);
+        let report = run_burn(&mut env).unwrap();
+
+        assert_eq!(report.deferred_deletions, None);
+        assert_eq!(deletions_of(&env, "gone.bin"), vec![(0, 2)]);
+        assert_eq!(manifest_deleted(&env, "1A"), vec!["gone.bin"]);
+        assert_eq!(manifest_deleted(&env, "1B"), vec!["gone.bin"]);
+    }
+
+    /// (c) A deletion deferred while its only disc dies drops out of the live
+    /// view, but is still a tombstone, so the scan counts it and the next
+    /// burned disc records it.
+    #[test]
+    fn a_deletion_deferred_past_its_discs_death_is_still_recorded() {
+        let mut env = staged_env(&[("a.bin", b"aaaa"), ("gone.bin", b"gggg")], false);
+        run_burn(&mut env).unwrap();
+        restage(&mut env, &[("a.bin", b"aaaa")]);
+        run_burn(&mut env).unwrap();
+        env.catalog
+            .mark_dead(ProjectId(1), DiscKey::new(1, 0), &now())
+            .unwrap();
+
+        let plan = restage(&mut env, &[("a.bin", b"aaaa"), ("b.bin", b"bbbb")]);
+        assert_eq!(plan.tombstones, vec![RelPath("gone.bin".into())]);
+        let sink = NoopSink;
+        let scan = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &sink,
+        )
+        .scan("p", false, false)
+        .unwrap();
+        assert_eq!(scan.deleted, 1, "the scan agrees with the plan");
+
+        run_burn(&mut env).unwrap();
+        assert_eq!(deletions_of(&env, "gone.bin"), vec![(0, 1)], "on disc 2");
+    }
+
+    /// A plan staged by the build before #9 can hold its set-A fallback: a
+    /// planned disc with nothing to write (two shapes, this is the open one). Burning it must be refused with
+    /// "re-run plan" advice, writing nothing.
+    #[test]
+    fn a_pre_upgrade_plan_with_an_empty_fallback_disc_is_stale() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        let mut plan = staged::read_plan(&env.work).unwrap().unwrap();
+        plan.sets[0].disc.files.clear();
+        staged::write_plan(&env.work, &plan).unwrap();
+        let before = (row_counts(&env), status_rows(&env));
+
+        let err = run_burn(&mut env).unwrap_err();
+
+        match &err {
+            PipelineError::StalePlan(detail) => {
+                assert!(detail.contains("nothing to write"), "{detail}");
+                assert!(!detail.contains("reset"), "{detail}");
+            }
+            other => panic!("expected StalePlan, got {other}"),
+        }
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!((row_counts(&env), status_rows(&env)), before);
+    }
+
+    /// The other fallback shape: with `--finalize` and no open disc, the old
+    /// planner fell back to a fresh set-A disc sealed empty.
+    #[test]
+    fn a_pre_upgrade_plan_with_an_empty_fresh_seal_disc_is_stale() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], true);
+        let mut plan = staged::read_plan(&env.work).unwrap().unwrap();
+        let disc = &mut plan.sets[0].disc;
+        disc.files.clear();
+        assert!(disc.is_new && disc.will_finalize);
+        staged::write_plan(&env.work, &plan).unwrap();
+        let before = (row_counts(&env), status_rows(&env));
+
+        let err = run_burn(&mut env).unwrap_err();
+
+        match &err {
+            PipelineError::StalePlan(detail) => {
+                assert!(detail.contains("nothing to write"), "{detail}");
+            }
+            other => panic!("expected StalePlan, got {other}"),
+        }
+        assert_eq!((row_counts(&env), status_rows(&env)), before);
+    }
+
+    /// Burning a zero-set plan with the real backend never touches the
+    /// drive: no xorriso command, no insert prompt.
+    #[test]
+    fn a_real_burn_of_a_plan_with_no_disc_runs_no_command_and_asks_nothing() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa"), ("gone.bin", b"gggg")], true, 2);
+        run_burn(&mut env).unwrap();
+        restage(&mut env, &[("a.bin", b"aaaa")]);
+        let script = ScriptedExec::new();
+        let op = ScriptedOperator::new(&[]);
+
+        let report = run_real_burn(&mut env, &script, &op).unwrap();
+
+        assert_eq!(report.deferred_deletions, Some(1));
+        assert!(report.discs.is_empty());
+        assert!(!script.ran(""), "no command was executed");
+        assert!(op.log().is_empty(), "{:?}", op.log());
+    }
+
     /// A tombstoned path whose current version lost its last live copy
     /// between `plan` and `burn` is still current in the catalog: the
     /// deletion must be recorded, as the disc's manifest says it is.
@@ -2375,6 +2593,7 @@ mod verify_tests {
         let report = crate::pipeline::planning::plan_from(
             &diskrement_core::CatalogView::empty(),
             &scanned,
+            Vec::new(),
             &[],
             DiscType::BdR,
             diskrement_core::Capacity::new(1_000_000),
@@ -2528,7 +2747,35 @@ mod verify_tests {
     /// files checked — the `disc 4: 0 files OK` line in run-manifest step 21.
     #[test]
     fn a_sealed_disc_with_no_files_verifies_clean_with_zero_checked() {
-        let mut env = burned_env(&[], true);
+        // A fresh project with nothing to place plans no disc (issue #9), so the
+        // seal session is produced the way an operator does: burn a disc, then
+        // `plan --finalize` an unchanged tree and burn the file-less seal.
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        // The burn removed the snapshot and the staged scan; put them back.
+        std::fs::create_dir_all(env.work.join("snapshot")).unwrap();
+        std::fs::write(env.work.join("snapshot/a.txt"), b"aaa").unwrap();
+        let again = vec![ScannedFile {
+            rel_path: RelPath("a.txt".to_string()),
+            content_hash: crate::fs::hasher::hash(&env.work.join("snapshot/a.txt")).unwrap(),
+            size_bytes: 3,
+            mtime: Utc.timestamp_opt(1_757_000_000, 0).unwrap(),
+        }];
+        staged::write_scan(&env.work, &again).unwrap();
+        {
+            let sink = NoopSink;
+            let burner = Burner::Simulated(SimulatedBurner::new(&sink, 2));
+            let mut pipeline = Pipeline::new(
+                &mut env.catalog,
+                PipelinePaths {
+                    work_dir: env.work.clone(),
+                    scan_cache: env.scan_cache.clone(),
+                },
+                &sink,
+            );
+            let plan = pipeline.plan("p", None, true).unwrap();
+            assert!(plan.sets[0].disc.files.is_empty());
+            pipeline.burn("p", now(), &burner).unwrap();
+        }
         let reports = run_verify(&mut env, None).unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].files_checked, 0);
