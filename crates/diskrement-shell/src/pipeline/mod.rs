@@ -416,8 +416,10 @@ impl<'a> Pipeline<'a> {
 
         // `plan_from` no longer emits a disc with nothing to write (issue #9),
         // but a plan staged by the build before it may still carry one: its
-        // old set-A fallback. Burning it would commit a session of nothing.
-        if disc.files.is_empty() && !disc.will_finalize {
+        // old set-A fallback: either an open disc with nothing added, or, with
+        // `--finalize`, a fresh disc sealed empty. A seal of an existing disc
+        // (`!is_new && will_finalize`) is the one valid empty disc.
+        if disc.files.is_empty() && (disc.is_new || !disc.will_finalize) {
             return Err(DiscFailure::Unwritten(PipelineError::StalePlan(format!(
                 "disc {disc_name} has nothing to write; it was planned by an older version of diskrement"
             ))));
@@ -2248,6 +2250,7 @@ mod burn_tests {
         assert!(deletions_of(&env, "gone.bin").is_empty());
         assert!(!env.work.join("staging/disc-2A").exists());
         assert!(!env.work.join("staging/disc-2B").exists());
+        assert!(!env.work.join("snapshot").exists(), "snapshot released");
         assert!(staged::read_plan(&env.work).unwrap().is_none());
         assert!(staged::read_scan(&env.work).unwrap().is_none());
     }
@@ -2305,7 +2308,7 @@ mod burn_tests {
     }
 
     /// A plan staged by the build before #9 can hold its set-A fallback: a
-    /// planned disc with nothing to write. Burning it must be refused with
+    /// planned disc with nothing to write (two shapes, this is the open one). Burning it must be refused with
     /// "re-run plan" advice, writing nothing.
     #[test]
     fn a_pre_upgrade_plan_with_an_empty_fallback_disc_is_stale() {
@@ -2325,6 +2328,29 @@ mod burn_tests {
             other => panic!("expected StalePlan, got {other}"),
         }
         assert_eq!(err.exit_code(), 2);
+        assert_eq!((row_counts(&env), status_rows(&env)), before);
+    }
+
+    /// The other fallback shape: with `--finalize` and no open disc, the old
+    /// planner fell back to a fresh set-A disc sealed empty.
+    #[test]
+    fn a_pre_upgrade_plan_with_an_empty_fresh_seal_disc_is_stale() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], true);
+        let mut plan = staged::read_plan(&env.work).unwrap().unwrap();
+        let disc = &mut plan.sets[0].disc;
+        disc.files.clear();
+        assert!(disc.is_new && disc.will_finalize);
+        staged::write_plan(&env.work, &plan).unwrap();
+        let before = (row_counts(&env), status_rows(&env));
+
+        let err = run_burn(&mut env).unwrap_err();
+
+        match &err {
+            PipelineError::StalePlan(detail) => {
+                assert!(detail.contains("nothing to write"), "{detail}");
+            }
+            other => panic!("expected StalePlan, got {other}"),
+        }
         assert_eq!((row_counts(&env), status_rows(&env)), before);
     }
 
