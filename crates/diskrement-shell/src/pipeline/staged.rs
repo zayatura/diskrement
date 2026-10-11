@@ -185,6 +185,7 @@ pub fn read_plan(work_dir: &Path) -> Result<Option<PlanReport>, serde_json::Erro
     Ok(Some(PlanReport {
         disc: PlannedDisc {
             ordinal: j.disc.ordinal,
+            copy_set: 0, // copy_set read from plan.json v2 in the per-set plan.
             is_new: j.disc.is_new,
             will_finalize: j.disc.will_finalize,
             files,
@@ -283,6 +284,7 @@ mod tests {
         PlanReport {
             disc: PlannedDisc {
                 ordinal: 1,
+                copy_set: 0,
                 is_new: true,
                 will_finalize: false,
                 files: vec![sf("a.txt"), sf("sub/b.txt")],

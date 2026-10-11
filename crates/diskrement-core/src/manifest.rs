@@ -123,6 +123,7 @@ mod tests {
         };
         let disc = PlannedDisc {
             ordinal: 1,
+            copy_set: 0,
             is_new: true,
             will_finalize: false,
             files: [added, modified].concat(),
@@ -159,6 +160,7 @@ mod tests {
         };
         let disc = PlannedDisc {
             ordinal: 1,
+            copy_set: 0,
             is_new: true,
             will_finalize: false,
             files: vec![f],

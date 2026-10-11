@@ -436,6 +436,7 @@ mod tests {
         let report = plan_of(
             PlannedDisc {
                 ordinal: 1,
+                copy_set: 0,
                 is_new: true,
                 will_finalize: true,
                 files: vec![scanned("a.bin", 800)],
@@ -459,6 +460,7 @@ mod tests {
         let report = plan_of(
             PlannedDisc {
                 ordinal: 3,
+                copy_set: 0,
                 is_new: true,
                 will_finalize: false,
                 files: vec![scanned("a.bin", 800)],
@@ -484,6 +486,7 @@ mod tests {
         let report = plan_of(
             PlannedDisc {
                 ordinal: 4,
+                copy_set: 0,
                 is_new: false,
                 will_finalize: true,
                 files: vec![],
@@ -505,6 +508,7 @@ mod tests {
         let report = plan_of(
             PlannedDisc {
                 ordinal: 1,
+                copy_set: 0,
                 is_new: false,
                 will_finalize: false,
                 files: vec![],
@@ -523,6 +527,7 @@ mod tests {
         let report = plan_of(
             PlannedDisc {
                 ordinal: 2,
+                copy_set: 0,
                 is_new: false,
                 will_finalize: false,
                 files: vec![scanned("a.bin", 3_200_000_000)],
@@ -545,6 +550,7 @@ mod tests {
         let report = plan_of(
             PlannedDisc {
                 ordinal: 1,
+                copy_set: 0,
                 is_new: true,
                 will_finalize: false,
                 files: vec![scanned("small.bin", 10)],
@@ -571,6 +577,7 @@ mod tests {
         let report = plan_of(
             PlannedDisc {
                 ordinal: 1,
+                copy_set: 0,
                 is_new: true,
                 will_finalize: false,
                 files: vec![],
@@ -1139,6 +1146,7 @@ mod snapshots {
                     plan_report(&plan_of(
                         PlannedDisc {
                             ordinal: 1,
+                            copy_set: 0,
                             is_new: false,
                             will_finalize: false,
                             files: vec![],
@@ -1155,6 +1163,7 @@ mod snapshots {
                     plan_report(&plan_of(
                         PlannedDisc {
                             ordinal: 4,
+                            copy_set: 0,
                             is_new: false,
                             will_finalize: true,
                             files: vec![],
@@ -1171,6 +1180,7 @@ mod snapshots {
                     plan_report(&plan_of(
                         PlannedDisc {
                             ordinal: 1,
+                            copy_set: 0,
                             is_new: true,
                             will_finalize: true,
                             files: vec![scanned("a.bin", 800)],
@@ -1187,6 +1197,7 @@ mod snapshots {
                     plan_report(&plan_of(
                         PlannedDisc {
                             ordinal: 2,
+                            copy_set: 0,
                             is_new: false,
                             will_finalize: false,
                             files: vec![scanned("a.bin", 3_200_000_000)],
@@ -1203,6 +1214,7 @@ mod snapshots {
                     plan_report(&plan_of(
                         PlannedDisc {
                             ordinal: 3,
+                            copy_set: 0,
                             is_new: true,
                             will_finalize: false,
                             files: vec![scanned("a.bin", 800)],
@@ -1219,6 +1231,7 @@ mod snapshots {
                     plan_report(&plan_of(
                         PlannedDisc {
                             ordinal: 1,
+                            copy_set: 0,
                             is_new: true,
                             will_finalize: false,
                             files: vec![scanned("small.bin", 10)],
