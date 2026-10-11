@@ -210,6 +210,7 @@ fn two_tier_verification_passes_clean_mismatches_tampered_and_skips_declined() {
             session_ordinal: 1,
             rel_path: RelPath("a.txt".to_string()),
             content_hash: sha256("v1"),
+            size_bytes: 2,
         }],
     };
 
@@ -237,6 +238,7 @@ fn two_tier_verification_passes_clean_mismatches_tampered_and_skips_declined() {
         session_ordinal: 1,
         rel_path: RelPath("a.txt".to_string()),
         content_hash: sha256("WRONG"),
+        size_bytes: 2,
     }];
     let accept = ScriptedOperator::new(&[true]);
     let bad = DiscVerifier::new(device.clone(), &exec, &accept)
