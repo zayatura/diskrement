@@ -310,3 +310,62 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
     assert_eq!(verified.len(), 1);
     assert_eq!((verified[0].disc_ordinal, verified[0].ordinal), (1, 1));
 }
+
+/// A V2 catalog the Scala build wrote migrates to V3 in place: every disc keeps
+/// its id, ordinal and status, lands in set A, and nothing dangles.
+#[test]
+fn a_v2_catalog_migrates_to_v3_keeping_every_disc_id() {
+    let before: Vec<(i64, i64, String)> = {
+        let conn = support::open_fixture("catalog/11-after-finalize.sqlite");
+        let mut stmt = conn
+            .prepare("select id, ordinal, status from disc order by id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert!(!before.is_empty(), "the fixture has discs");
+
+    let (_dir, cat) = open("catalog/11-after-finalize.sqlite");
+    let conn = cat.raw_connection_for_tests();
+    let after: Vec<(i64, i64, String, i64)> = {
+        let mut stmt = conn
+            .prepare("select id, ordinal, status, copy_set from disc order by id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(
+        after
+            .iter()
+            .map(|(i, o, s, _)| (*i, *o, s.clone()))
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert!(after.iter().all(|(_, _, _, set)| *set == 0));
+
+    let version: i64 = conn
+        .query_row("select version from schema_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    let dangling: i64 = conn
+        .query_row("select count(*) from pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(dangling, 0);
+
+    // A disc inserted after the migration takes an id above every old one,
+    // so the AUTOINCREMENT sequence survived the rebuild.
+    conn.execute(
+        "insert into disc (project_id, ordinal, disc_type, usable_bytes, status, label, copy_set)
+         values (1, 99, 'BD_R', 1, 'OPEN', 'x', 1)",
+        [],
+    )
+    .unwrap();
+    let max_old = before.iter().map(|(i, _, _)| *i).max().unwrap();
+    assert!(conn.last_insert_rowid() > max_old);
+}

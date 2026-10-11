@@ -1,11 +1,10 @@
 //! The catalog schema, transcribed from the Scala `Migrations` object.
 //!
-//! Frozen by the data-compatibility contract (spec §3.1). The two `check`
+//! V1 and V2 are the schema the Scala build wrote, transcribed verbatim. V3
+//! adds copy sets (multiple-copies spec §5.2). The two `check`
 //! constraints are load-bearing, not decoration: `status in ('OPEN','FINALIZED')`
 //! is what makes the derived-`DEAD` invariant enforceable by the database, and
 //! `kind in ('MARKED_DEAD')` is what keeps `disc_event` a closed vocabulary.
-//! `tests/fixture_schema.rs` compares what this produces against a catalog the
-//! Scala build wrote.
 //!
 //! Migrations run forward only, all pending versions in one transaction.
 
@@ -95,7 +94,33 @@ const V2: &[&str] = &[
     "create index if not exists idx_placement_fv on placement(file_version_id)",
 ];
 
-const MIGRATIONS: &[(i64, &[&str])] = &[(1, V1), (2, V2)];
+// Copy sets. `disc` is rebuilt rather than altered: SQLite cannot change a
+// table constraint in place, and the unique key moves from
+// (project_id, ordinal) to (project_id, copy_set, ordinal) so 1A and 1B can
+// coexist. Ids are copied verbatim, so `session.disc_id` and
+// `disc_event.disc_id` stay valid; `run_inner` switches foreign keys off around
+// the transaction, as SQLite's table-rebuild procedure requires, and checks
+// them before committing. `copy_set` goes last so every pre-existing column
+// keeps its position.
+const V3: &[&str] = &[
+    "create table disc_v3 (
+       id           integer primary key autoincrement,
+       project_id   integer not null references project(id),
+       ordinal      integer not null,
+       disc_type    text    not null,
+       usable_bytes integer not null,
+       status       text    not null check (status in ('OPEN','FINALIZED')),
+       label        text    not null,
+       copy_set     integer not null default 0 check (copy_set >= 0),
+       unique (project_id, copy_set, ordinal)
+     )",
+    "insert into disc_v3 (id, project_id, ordinal, disc_type, usable_bytes, status, label, copy_set)
+     select id, project_id, ordinal, disc_type, usable_bytes, status, label, 0 from disc",
+    "drop table disc",
+    "alter table disc_v3 rename to disc",
+];
+
+const MIGRATIONS: &[(i64, &[&str])] = &[(1, V1), (2, V2), (3, V3)];
 
 /// Apply every migration whose version exceeds the stored one, in order.
 pub(crate) fn run(conn: &mut Connection) -> Result<(), CatalogError> {
@@ -112,19 +137,41 @@ fn run_inner(conn: &mut Connection) -> Result<(), rusqlite::Error> {
         [],
         |row| row.get(0),
     )?;
+    if MIGRATIONS.iter().all(|(v, _)| *v <= current) {
+        return Ok(());
+    }
 
+    // `PRAGMA foreign_keys` is a no-op inside a transaction, so it brackets
+    // the transaction rather than living in it. It is restored whether or not
+    // the migration succeeds.
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    let migrated = migrate(conn, current);
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    migrated
+}
+
+fn migrate(conn: &mut Connection, current: i64) -> Result<(), rusqlite::Error> {
     let tx = conn.transaction()?;
     for (version, statements) in MIGRATIONS.iter().filter(|(v, _)| *v > current) {
         for statement in *statements {
             tx.execute(statement, [])?;
         }
         // One row, always: the Scala replaced rather than appended, and
-        // `MigrationsSpec` pins that the table holds exactly one version.
+        // `MigrationsSpec` pinned that the table holds exactly one version.
         tx.execute("delete from schema_version", [])?;
         tx.execute(
             "insert into schema_version (version) values (?1)",
             [version],
         )?;
+    }
+    let dangling: i64 = tx.query_row("select count(*) from pragma_foreign_key_check", [], |r| {
+        r.get(0)
+    })?;
+    if dangling > 0 {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some(format!("{dangling} foreign key violations after migrating")),
+        ));
     }
     tx.commit()
 }
