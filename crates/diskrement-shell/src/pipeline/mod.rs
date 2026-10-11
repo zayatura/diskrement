@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use diskrement_core::{
-    diff, manifest, Capacity, ChangeSet, DiscKey, DiscStatus, DiscType, RelPath, ScannedFile,
+    diff, manifest, Capacity, DiscContents, DiscKey, DiscStatus, DiscType, RelPath, ScannedFile,
     SessionManifest,
 };
 
@@ -278,7 +278,6 @@ impl<'a> Pipeline<'a> {
         }
 
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
-        let change_set = diff::diff(&view, &scanned);
         let sess_ord = self.next_session_ordinal(p.id, report.disc.key())?;
         let contents = diskrement_core::replication::classify(&view, &report.disc.files);
         let manifest = manifest::build(
@@ -297,7 +296,8 @@ impl<'a> Pipeline<'a> {
                 &report,
                 sess_ord,
                 now,
-                &change_set,
+                &contents,
+                report.tombstones.clone(),
                 &manifest,
             )],
         };
@@ -497,7 +497,7 @@ impl<'a> Pipeline<'a> {
                 .max_by_key(|s| s.ordinal)
             {
                 self.catalog
-                    .mark_verified(p.id, ordinal, session.ordinal)
+                    .mark_verified(p.id, DiscKey::new(ordinal, 0), session.ordinal)
                     .map_err(Self::failed)?;
             }
         }
@@ -603,31 +603,24 @@ fn same_filesystem(source: &Path, work: &Path) -> std::io::Result<(u64, u64)> {
     ))
 }
 
-/// `PipelineLive.toDiscWrite`: split the disc's files into added vs modified
-/// using the change set, and stamp every one with its `/data/`-rooted disc
-/// path. `copy_index` is 0 until `copies > 1` is activated.
+/// The catalog write for one disc: its files split by commit-time
+/// classification and stamped with their `/data/`-rooted disc path, plus the
+/// tombstones still current in the catalog.
 fn disc_write(
     label: &str,
     report: &PlanReport,
     sess_ord: u32,
     now: DateTime<Utc>,
-    cs: &ChangeSet,
+    contents: &DiscContents,
+    tombstones: Vec<RelPath>,
     manifest: &SessionManifest,
 ) -> DiscWrite {
-    let added_paths: std::collections::HashSet<&RelPath> =
-        cs.added.iter().map(|f| &f.rel_path).collect();
-    let (added, modified): (Vec<&ScannedFile>, Vec<&ScannedFile>) = report
-        .disc
-        .files
-        .iter()
-        .partition(|f| added_paths.contains(&f.rel_path));
     let fw = |f: &ScannedFile| FileWrite {
         rel_path: f.rel_path.clone(),
         content_hash: f.content_hash.clone(),
         size_bytes: f.size_bytes,
         mtime: f.mtime,
         disc_path: format!("/data/{}", f.rel_path.0),
-        copy_index: 0,
     };
     DiscWrite {
         ordinal: report.disc.ordinal,
@@ -645,9 +638,10 @@ fn disc_write(
             ordinal: sess_ord,
             burned_at: now,
             manifest_hash: json::manifest_hash(manifest),
-            added: added.into_iter().map(fw).collect(),
-            modified: modified.into_iter().map(fw).collect(),
-            deleted: report.tombstones.clone(),
+            added: contents.added.iter().map(fw).collect(),
+            modified: contents.modified.iter().map(fw).collect(),
+            copied: contents.copied.iter().map(fw).collect(),
+            deleted: tombstones,
         },
     }
 }

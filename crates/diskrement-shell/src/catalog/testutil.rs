@@ -38,7 +38,7 @@ pub(crate) fn project_init(name: &str) -> ProjectInit {
 }
 
 /// A file write with the conventional test values: mtime `ts()`, disc path
-/// `/data/<path>`, copy 0.
+/// `/data/<path>`.
 pub(crate) fn fw(path: &str, hash: &str, size: u64) -> FileWrite {
     fw_at(path, hash, size, ts())
 }
@@ -55,7 +55,6 @@ pub(crate) fn fw_at(
         size_bytes: size,
         mtime,
         disc_path: format!("/data/{path}"),
-        copy_index: 0,
     }
 }
 
@@ -86,6 +85,7 @@ pub(crate) fn update(
                 manifest_hash: format!("m{disc_ordinal}-{session_ordinal}"),
                 added,
                 modified,
+                copied: Vec::new(),
                 deleted,
             },
         }],

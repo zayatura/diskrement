@@ -39,7 +39,8 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
 }
 
-/// One file written this run: its identity, where it landed, and which copy.
+/// One file written this run: its identity and where it landed. Its
+/// `copy_index` is its disc's copy set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileWrite {
     pub rel_path: RelPath,
@@ -47,7 +48,6 @@ pub struct FileWrite {
     pub size_bytes: u64,
     pub mtime: DateTime<Utc>,
     pub disc_path: String,
-    pub copy_index: u32,
 }
 
 /// One session burned onto one disc this run.
@@ -61,6 +61,9 @@ pub struct SessionWrite {
     pub manifest_hash: String,
     pub added: Vec<FileWrite>,
     pub modified: Vec<FileWrite>,
+    /// Further copies of versions already recorded: one `placement` each, no
+    /// new `file_version`, no `change_record`.
+    pub copied: Vec<FileWrite>,
     pub deleted: Vec<RelPath>,
 }
 
@@ -87,7 +90,7 @@ pub struct DiscWrite {
 pub struct CatalogUpdate {
     pub project_id: ProjectId,
     /// Pre-existing OPEN discs to flip to FINALIZED.
-    pub finalize_disc_ordinals: Vec<u32>,
+    pub finalize_disc_ordinals: Vec<DiscKey>,
     pub discs: Vec<DiscWrite>,
 }
 

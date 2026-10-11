@@ -18,7 +18,7 @@ use super::model::{
 use super::time;
 use super::Catalog;
 use crate::error::{is_unique_violation, CatalogError};
-use diskrement_core::{ContentHash, DiscStatus, DiscType, ManifestChangeKind, RelPath};
+use diskrement_core::{ContentHash, DiscKey, DiscStatus, DiscType, ManifestChangeKind, RelPath};
 
 impl Catalog {
     /// Insert a project row, returning its new id.
@@ -100,8 +100,8 @@ impl Catalog {
     /// as it was.
     pub fn apply_update(&mut self, u: &CatalogUpdate) -> Result<(), CatalogError> {
         self.tx(|tx| {
-            for ordinal in &u.finalize_disc_ordinals {
-                finalize_disc(tx, u.project_id, *ordinal)?;
+            for disc in &u.finalize_disc_ordinals {
+                finalize_disc(tx, u.project_id, *disc)?;
             }
             for disc in &u.discs {
                 write_disc(tx, u.project_id, disc)?;
@@ -117,7 +117,7 @@ impl Catalog {
     pub fn mark_verified(
         &mut self,
         project: ProjectId,
-        disc_ordinal: u32,
+        disc: DiscKey,
         session_ordinal: u32,
     ) -> Result<(), CatalogError> {
         self.tx(|tx| {
@@ -126,13 +126,20 @@ impl Catalog {
                     "update session set state = 'VERIFIED'
                      where state = 'BURNED' and ordinal = ?1
                        and disc_id = (select id from disc
-                                      where project_id = ?2 and ordinal = ?3)",
-                    params![session_ordinal as i64, project.0, disc_ordinal as i64],
+                                      where project_id = ?2 and ordinal = ?3
+                                        and copy_set = ?4)",
+                    params![
+                        session_ordinal as i64,
+                        project.0,
+                        disc.ordinal as i64,
+                        disc.copy_set as i64
+                    ],
                 )
                 .map_err(CatalogError::from_sqlite)?;
             if updated == 0 {
                 return Err(CatalogError::IllegalStatusTransition(format!(
-                    "no BURNED session {session_ordinal} on disc {disc_ordinal}"
+                    "no BURNED session {session_ordinal} on disc {} (set {})",
+                    disc.ordinal, disc.copy_set
                 )));
             }
             Ok(())
@@ -153,7 +160,7 @@ impl Catalog {
         at: &DateTime<Utc>,
     ) -> Result<LostReport, CatalogError> {
         self.tx(|tx| {
-            let disc_id = disc_id_by_ordinal(tx, project, disc_ordinal)?;
+            let disc_id = disc_id(tx, project, DiscKey::new(disc_ordinal, 0))?;
             let already: i64 = tx
                 .query_row(
                     "select count(*) from disc_event
@@ -241,41 +248,43 @@ impl Catalog {
     }
 }
 
+fn disc_id(tx: &Transaction<'_>, project: ProjectId, disc: DiscKey) -> Result<i64, CatalogError> {
+    tx.query_row(
+        "select id from disc where project_id = ?1 and ordinal = ?2 and copy_set = ?3",
+        params![project.0, disc.ordinal as i64, disc.copy_set as i64],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(CatalogError::from_sqlite)?
+    .ok_or_else(|| {
+        CatalogError::ConstraintViolation(format!(
+            "no disc with ordinal {} in copy set {}",
+            disc.ordinal, disc.copy_set
+        ))
+    })
+}
+
 /// Flip a pre-existing OPEN disc to FINALIZED. Anything else is an illegal
 /// transition — including a disc that is already FINALIZED.
 fn finalize_disc(
     tx: &Transaction<'_>,
     project: ProjectId,
-    ordinal: u32,
+    disc: DiscKey,
 ) -> Result<(), CatalogError> {
     let updated = tx
         .execute(
             "update disc set status = 'FINALIZED'
-             where project_id = ?1 and ordinal = ?2 and status = 'OPEN'",
-            params![project.0, ordinal as i64],
+             where project_id = ?1 and ordinal = ?2 and copy_set = ?3 and status = 'OPEN'",
+            params![project.0, disc.ordinal as i64, disc.copy_set as i64],
         )
         .map_err(CatalogError::from_sqlite)?;
     if updated == 0 {
         return Err(CatalogError::IllegalStatusTransition(format!(
-            "disc {ordinal} is not OPEN"
+            "disc {} (set {}) is not OPEN",
+            disc.ordinal, disc.copy_set
         )));
     }
     Ok(())
-}
-
-fn disc_id_by_ordinal(
-    tx: &Transaction<'_>,
-    project: ProjectId,
-    ordinal: u32,
-) -> Result<i64, CatalogError> {
-    tx.query_row(
-        "select id from disc where project_id = ?1 and ordinal = ?2",
-        params![project.0, ordinal as i64],
-        |row| row.get::<_, i64>(0),
-    )
-    .optional()
-    .map_err(CatalogError::from_sqlite)?
-    .ok_or_else(|| CatalogError::ConstraintViolation(format!("no disc with ordinal {ordinal}")))
 }
 
 /// Insert or find the disc row, insert its session, then write the session's
@@ -300,7 +309,7 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
         .map_err(CatalogError::from_sqlite)?;
         tx.last_insert_rowid()
     } else {
-        let id = disc_id_by_ordinal(tx, project, d.ordinal)?;
+        let id = disc_id(tx, project, DiscKey::new(d.ordinal, d.copy_set))?;
         if d.status == DiscStatus::Finalized {
             let updated = tx
                 .execute(
@@ -339,6 +348,7 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
             file,
             ManifestChangeKind::Added,
             &d.session.burned_at,
+            d.copy_set,
         )?;
     }
     for file in &d.session.modified {
@@ -349,7 +359,11 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
             file,
             ManifestChangeKind::Modified,
             &d.session.burned_at,
+            d.copy_set,
         )?;
+    }
+    for file in &d.session.copied {
+        write_copy(tx, project, session_id, disc_id, d.copy_set, file)?;
     }
     for path in &d.session.deleted {
         write_tombstone(tx, project, session_id, path)?;
@@ -364,6 +378,7 @@ fn write_file(
     f: &FileWrite,
     kind: ManifestChangeKind,
     first_seen_at: &DateTime<Utc>,
+    copy_set: u32,
 ) -> Result<(), CatalogError> {
     tx.execute(
         "insert into file_version
@@ -384,18 +399,75 @@ fn write_file(
     tx.execute(
         "insert into placement (file_version_id, session_id, disc_path, copy_index)
          values (?1, ?2, ?3, ?4)",
-        params![
-            file_version_id,
-            session_id,
-            f.disc_path,
-            f.copy_index as i64
-        ],
+        params![file_version_id, session_id, f.disc_path, copy_set as i64],
     )
     .map_err(CatalogError::from_sqlite)?;
 
     tx.execute(
         "insert into change_record (session_id, file_version_id, kind) values (?1, ?2, ?3)",
         params![session_id, file_version_id, kind.as_str()],
+    )
+    .map_err(CatalogError::from_sqlite)?;
+    Ok(())
+}
+
+/// Place another copy of a path's current version on this disc: one
+/// `placement` row and nothing else.
+///
+/// The version must still be current and carry the same hash — the pipeline
+/// classified the file against the live catalog a moment ago, so anything else
+/// is a bug — and must not already be on this disc, where a second copy would
+/// protect nothing.
+fn write_copy(
+    tx: &Transaction<'_>,
+    project: ProjectId,
+    session_id: i64,
+    disc_id: i64,
+    copy_set: u32,
+    f: &FileWrite,
+) -> Result<(), CatalogError> {
+    let current: Option<(i64, String, String)> = tx
+        .query_row(
+            "select fv.id, fv.content_hash, l.kind
+             from (select cr.file_version_id as fvid, cr.kind as kind
+                   from change_record cr
+                   join file_version fv on fv.id = cr.file_version_id
+                   where fv.project_id = ?1 and fv.rel_path = ?2
+                   order by cr.id desc limit 1) l
+             join file_version fv on fv.id = l.fvid",
+            params![project.0, f.rel_path.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(CatalogError::from_sqlite)?;
+    let file_version_id = match current {
+        Some((id, hash, kind)) if kind != "DELETED" && hash == f.content_hash.as_str() => id,
+        _ => {
+            return Err(CatalogError::ConstraintViolation(format!(
+                "cannot copy {}: no current version with hash {}",
+                f.rel_path, f.content_hash
+            )))
+        }
+    };
+    let already_here: bool = tx
+        .query_row(
+            "select exists (select 1 from placement p
+                            join session s on s.id = p.session_id
+                            where p.file_version_id = ?1 and s.disc_id = ?2)",
+            params![file_version_id, disc_id],
+            |row| row.get(0),
+        )
+        .map_err(CatalogError::from_sqlite)?;
+    if already_here {
+        return Err(CatalogError::ConstraintViolation(format!(
+            "{} already has a copy on this disc",
+            f.rel_path
+        )));
+    }
+    tx.execute(
+        "insert into placement (file_version_id, session_id, disc_path, copy_index)
+         values (?1, ?2, ?3, ?4)",
+        params![file_version_id, session_id, f.disc_path, copy_set as i64],
     )
     .map_err(CatalogError::from_sqlite)?;
     Ok(())
@@ -603,6 +675,7 @@ mod tests {
                 manifest_hash: "m2".to_string(),
                 added: vec![],
                 modified: vec![],
+                copied: Vec::new(),
                 deleted: vec![],
             },
         });
@@ -628,7 +701,7 @@ mod tests {
 
         let seal = CatalogUpdate {
             project_id: pid,
-            finalize_disc_ordinals: vec![1],
+            finalize_disc_ordinals: vec![DiscKey::new(1, 0)],
             discs: vec![],
         };
         cat.apply_update(&seal).expect("sealing an OPEN disc works");
@@ -677,7 +750,8 @@ mod tests {
         cat.apply_update(&update(pid, 1, 1, vec![fw("a", "h", 10)], vec![], vec![]))
             .expect("burn");
 
-        cat.mark_verified(pid, 1, 1).expect("verification recorded");
+        cat.mark_verified(pid, DiscKey::new(1, 0), 1)
+            .expect("verification recorded");
 
         let verified = cat
             .sessions_by_state(pid, SessionState::Verified)
@@ -695,7 +769,7 @@ mod tests {
         let (_dir, mut cat) = temp_catalog();
         let pid = cat.create_project(&project_init("p")).expect("project");
         let err = cat
-            .mark_verified(pid, 1, 1)
+            .mark_verified(pid, DiscKey::new(1, 0), 1)
             .expect_err("there is no such session");
         assert!(
             matches!(err, CatalogError::IllegalStatusTransition(_)),
@@ -1178,7 +1252,6 @@ mod tests {
             size_bytes: f.size_bytes,
             mtime: ts(),
             disc_path: format!("/data/{}", f.rel_path.as_str()),
-            copy_index: 0,
         };
         update(
             project,
@@ -1242,5 +1315,167 @@ mod tests {
                 .collect();
             prop_assert_eq!(actual, expected);
         }
+    }
+
+    use diskrement_core::DiscKey;
+
+    fn copy_update(
+        project: crate::catalog::model::ProjectId,
+        ordinal: u32,
+        copy_set: u32,
+        session: u32,
+        copied: Vec<crate::catalog::model::FileWrite>,
+    ) -> CatalogUpdate {
+        let mut u =
+            crate::catalog::testutil::update(project, ordinal, session, vec![], vec![], vec![]);
+        u.discs[0].copy_set = copy_set;
+        u.discs[0].session.copied = copied;
+        u
+    }
+
+    #[test]
+    fn a_copy_placement_adds_one_placement_and_no_version_or_change() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = cat
+            .create_project(&crate::catalog::testutil::project_init("p"))
+            .unwrap();
+        cat.apply_update(&crate::catalog::testutil::update(
+            p,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+            vec![],
+            vec![],
+        ))
+        .unwrap();
+        let count = |t| crate::catalog::testutil::count(&cat, t);
+        let before = (
+            count("file_version"),
+            count("change_record"),
+            count("placement"),
+        );
+
+        cat.apply_update(&copy_update(
+            p,
+            1,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+        ))
+        .unwrap();
+
+        let count = |t| crate::catalog::testutil::count(&cat, t);
+        assert_eq!(count("file_version"), before.0);
+        assert_eq!(count("change_record"), before.1);
+        assert_eq!(count("placement"), before.2 + 1);
+        let copy_index: i64 = cat
+            .raw_connection_for_tests()
+            .query_row(
+                "select copy_index from placement order by id desc limit 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(copy_index, 1, "copy_index is the disc's copy set");
+        let view = cat.read_view(p).unwrap();
+        assert_eq!(
+            view.current[&RelPath("a".into())].live_sets,
+            std::collections::BTreeSet::from([0, 1])
+        );
+    }
+
+    #[test]
+    fn a_copy_of_a_hash_that_is_not_current_is_refused_and_rolls_back() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = cat
+            .create_project(&crate::catalog::testutil::project_init("p"))
+            .unwrap();
+        cat.apply_update(&crate::catalog::testutil::update(
+            p,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+            vec![],
+            vec![],
+        ))
+        .unwrap();
+        let discs_before = crate::catalog::testutil::count(&cat, "disc");
+        let err = cat
+            .apply_update(&copy_update(
+                p,
+                1,
+                1,
+                1,
+                vec![crate::catalog::testutil::fw("a", "other", 4)],
+            ))
+            .unwrap_err();
+        assert!(matches!(err, CatalogError::ConstraintViolation(_)), "{err}");
+        assert_eq!(crate::catalog::testutil::count(&cat, "disc"), discs_before);
+    }
+
+    #[test]
+    fn a_second_copy_on_the_same_disc_is_refused() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = cat
+            .create_project(&crate::catalog::testutil::project_init("p"))
+            .unwrap();
+        cat.apply_update(&crate::catalog::testutil::update(
+            p,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+            vec![],
+            vec![],
+        ))
+        .unwrap();
+        // Session 2 of the same disc 1A tries to place `a` again.
+        let mut again = copy_update(p, 1, 0, 2, vec![crate::catalog::testutil::fw("a", "ha", 4)]);
+        again.discs[0].is_new = false;
+        let err = cat.apply_update(&again).unwrap_err();
+        assert!(matches!(err, CatalogError::ConstraintViolation(_)), "{err}");
+    }
+
+    #[test]
+    fn finalizing_and_verifying_touch_only_the_named_set() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = cat
+            .create_project(&crate::catalog::testutil::project_init("p"))
+            .unwrap();
+        cat.apply_update(&crate::catalog::testutil::update(
+            p,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+            vec![],
+            vec![],
+        ))
+        .unwrap();
+        cat.apply_update(&copy_update(
+            p,
+            1,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+        ))
+        .unwrap();
+
+        cat.mark_verified(p, DiscKey::new(1, 1), 1).unwrap();
+        cat.apply_update(&CatalogUpdate {
+            project_id: p,
+            finalize_disc_ordinals: vec![DiscKey::new(1, 1)],
+            discs: vec![],
+        })
+        .unwrap();
+
+        let states = cat.read_disc_states(p).unwrap();
+        assert_eq!(states[0].status, DiscStatus::Open, "1A untouched");
+        assert_eq!(states[1].status, DiscStatus::Finalized, "1B sealed");
+        let verified = cat
+            .sessions_by_state(p, crate::catalog::model::SessionState::Verified)
+            .unwrap();
+        assert_eq!(
+            verified.iter().map(|s| s.disc).collect::<Vec<_>>(),
+            vec![DiscKey::new(1, 1)]
+        );
     }
 }
