@@ -89,12 +89,19 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       `Aborted.`, exit 0.)
 - [ ] 9. `verify` with the disc in another machine's drive or after remount —
       optional bit-rot drill. (Not performed 2026-09-11 — no second machine.)
-- [ ] 10. Burn progress on a full-size disc (≥ 1 GB staged, ideally a full
+- [x] 10. Burn progress on a full-size disc (≥ 1 GB staged, ideally a full
       BD-R): a `burning disc <name> X/Y GB · R MB/s · ETA …` line on stderr
       advances during the write, not only at the end; no raw
       `xorriso : UPDATE` lines are printed; after 100% one `Writing done;
       closing the session …` line appears, and the close (~11 s for a sealed
       BD-R on 2026-10-11) passes without output. (#14)
+      (Rust @ 4dd3482's branch build, 2026-10-11 — disc 1B of a `copies = 2`
+      project, 24.5 GB on a blank BD-R, Pioneer at `/dev/sr0` via its by-id
+      path: the line refreshed in place for the whole write (`burning disc 1B
+      6.3/24.5 GB · 13 MB/s · ETA 22m47s` … `24.5/24.5 GB`), then exactly
+      `Writing done; closing the session and finalizing disc 1B. This can take
+      a minute.`, no `UPDATE` lines, then `✔ Wrote disc 1B`, `Status:
+      FINALIZED`, `Copies: every current file has 2 copies.`)
 
 Run record: 2026-09-11, Rust binary @ commit b81b342 (release build), Pioneer
 BDR-UD04 at `/dev/sr1`, one CMC BD-R (POW caveat above did not apply — media
