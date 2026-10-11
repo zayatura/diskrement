@@ -123,6 +123,18 @@ pub enum PipelineError {
     /// Renders its cause's message and nothing else (`PipelineError.Burn`).
     #[error(transparent)]
     Burn(#[from] crate::burn::BurnError),
+    /// A multi-disc burn that committed some discs and then failed. The cause
+    /// decides the exit code — an aborted prompt still exits 0 — and the
+    /// message says what to do next.
+    #[error(
+        "{} — {} committed; {} not written (re-run burn)",
+        .cause, .committed.join(", "), .pending.join(", ")
+    )]
+    PartialBurn {
+        committed: Vec<String>,
+        pending: Vec<String>,
+        cause: Box<PipelineError>,
+    },
     /// Unexpected-but-handled failure: rendered as
     /// `internal error: <detail> (this is a bug)`, exit 5.
     #[error("internal error: {0} (this is a bug)")]
@@ -172,6 +184,7 @@ impl PipelineError {
             // other burn failure is 6 (media/burner).
             PipelineError::Burn(crate::burn::BurnError::Aborted) => 0,
             PipelineError::Burn(_) => 6,
+            PipelineError::PartialBurn { cause, .. } => cause.exit_code(),
             PipelineError::Failed(_) => 5,
         }
     }
@@ -232,6 +245,27 @@ mod tests {
         assert_eq!(
             PipelineError::Failed("project already exists: p".into()).to_string(),
             "internal error: project already exists: p (this is a bug)"
+        );
+    }
+
+    #[test]
+    fn a_partial_burn_carries_its_causes_exit_code_and_names_both_halves() {
+        let partial = |cause| PipelineError::PartialBurn {
+            committed: vec!["1A".into()],
+            pending: vec!["1B".into()],
+            cause: Box::new(cause),
+        };
+        let media = partial(PipelineError::Burn(crate::burn::BurnError::NoMedia(
+            "/dev/sr0".into(),
+        )));
+        assert_eq!(media.exit_code(), 6);
+        assert_eq!(
+            media.to_string(),
+            "no disc in /dev/sr0 — 1A committed; 1B not written (re-run burn)"
+        );
+        assert_eq!(
+            partial(PipelineError::Burn(crate::burn::BurnError::Aborted)).exit_code(),
+            0
         );
     }
 

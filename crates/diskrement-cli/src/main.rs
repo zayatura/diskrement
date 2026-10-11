@@ -234,7 +234,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 &sink,
             );
             let report = pipeline.burn(&name, chrono::Utc::now(), &burner)?;
-            say(&render::burn_report(&report));
+            say(&render::burn_report(&report, p.copies));
             Ok(0)
         }
         Command::Reset { name } => {

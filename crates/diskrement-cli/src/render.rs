@@ -1,7 +1,7 @@
 //! Output rendering (`Render.scala`). Success text goes to stdout; error text
 //! is `PipelineError`'s `Display` and goes to stderr with its exit code.
 
-use diskrement_core::RelPath;
+use diskrement_core::{set_letter, RelPath, SetCoverage};
 use diskrement_shell::catalog::model::{FileHistoryEntry, LostReport, Project, ProjectId};
 use diskrement_shell::catalog::time;
 use diskrement_shell::error::PipelineError;
@@ -29,42 +29,70 @@ pub fn scan_report(r: &ScanReport) -> String {
     }
 }
 
-/// `Render.plan`. Three shapes: nothing to do, a bare seal, and the summary
-/// block with its optional deletion and oversize lines.
+/// `Render.plan`. Three shapes: nothing to do, bare seals, and one summary
+/// pair per copy set with the optional deletion and oversize lines. At
+/// `copies = 1` there is one set and the output is the single-disc text.
 pub fn plan_report(p: &PlanReport) -> String {
-    let d = &p.disc;
-    if d.files.is_empty() && p.tombstones.is_empty() && p.oversized.is_empty() {
-        return if d.will_finalize {
-            format!("Plan: finalize disc {} (seal; no new files).", d.ordinal)
-        } else {
+    let copies = p.copies;
+    let nothing = p.sets.iter().all(|s| s.disc.files.is_empty())
+        && p.tombstones.is_empty()
+        && p.oversized.is_empty();
+    if nothing {
+        let seals: Vec<String> = p
+            .sets
+            .iter()
+            .filter(|s| s.disc.will_finalize)
+            .map(|s| {
+                format!(
+                    "Plan: finalize disc {} (seal; no new files).",
+                    s.disc.key().name(copies)
+                )
+            })
+            .collect();
+        return if seals.is_empty() {
             "Nothing to burn: no changes to plan.".to_string()
+        } else {
+            seals.join("\n")
         };
     }
-    let kind = if d.is_new {
-        "new disc".to_string()
-    } else {
-        format!("appending to open disc {}", d.ordinal)
-    };
-    let fin = if d.will_finalize {
-        "will FINALIZE"
-    } else {
-        "left OPEN"
-    };
-    let mut lines = vec![format!(
-        "Plan: disc {} ({kind}, {}) — {} files, {}, {fin}",
-        d.ordinal,
-        p.disc_type,
-        d.files.len(),
-        gb(d.total_used_bytes())
-    )];
-    lines.push(if p.remaining.more_discs == 0 {
-        "This disc completes the set.".to_string()
-    } else {
-        format!(
-            "~{} more files (~{} more discs) remain after this one.",
-            p.remaining.more_files, p.remaining.more_discs
-        )
-    });
+    let mut lines = Vec::new();
+    for s in &p.sets {
+        let d = &s.disc;
+        let name = d.key().name(copies);
+        let kind = if d.is_new {
+            "new disc".to_string()
+        } else {
+            format!("appending to open disc {name}")
+        };
+        let fin = if d.will_finalize {
+            "will FINALIZE"
+        } else {
+            "left OPEN"
+        };
+        let count = if copies > 1 {
+            format!(
+                "{} files ({} new, {} catch-up)",
+                d.files.len(),
+                d.files.len() - s.catch_up,
+                s.catch_up
+            )
+        } else {
+            format!("{} files", d.files.len())
+        };
+        lines.push(format!(
+            "Plan: disc {name} ({kind}, {}) — {count}, {}, {fin}",
+            p.disc_type,
+            gb(d.total_used_bytes())
+        ));
+        lines.push(if s.remaining.more_discs == 0 {
+            "This disc completes the set.".to_string()
+        } else {
+            format!(
+                "~{} more files (~{} more discs) remain after this one.",
+                s.remaining.more_files, s.remaining.more_discs
+            )
+        });
+    }
     if !p.tombstones.is_empty() {
         lines.push(format!("Deletions: {}", p.tombstones.len()));
     }
@@ -82,26 +110,63 @@ pub fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1.0e9)
 }
 
-/// `Render.burn`. One disc per cycle, so there is exactly one block.
-pub fn burn_report(r: &BurnReport) -> String {
-    let d = &r.disc;
-    let status = if d.finalized {
-        "Status: FINALIZED — set this disc aside, it is sealed."
-    } else {
-        "Status: left OPEN — may receive more sessions later."
-    };
-    let next = if r.remaining.more_discs == 0 {
+/// `Render.burn`: one block per disc written, the copy coverage when the
+/// project keeps more than one copy, then what to do next.
+pub fn burn_report(r: &BurnReport, copies: u32) -> String {
+    let mut lines = Vec::new();
+    if r.discs.is_empty() {
+        lines.push("No disc written: every planned disc was already committed.".to_string());
+    }
+    for d in &r.discs {
+        lines.push(format!(
+            "✔ Wrote disc {}  —  label: \"{}\"",
+            d.disc.name(copies),
+            d.label
+        ));
+        lines.push(
+            if d.finalized {
+                "Status: FINALIZED — set this disc aside, it is sealed."
+            } else {
+                "Status: left OPEN — may receive more sessions later."
+            }
+            .to_string(),
+        );
+    }
+    if copies > 1 {
+        lines.extend(coverage_lines(&r.coverage));
+    }
+    lines.push(if r.remaining.more_discs == 0 {
         "No more changes — the set is up to date.".to_string()
     } else {
         format!(
             "~{} more discs of changes remain. Run: scan → plan → burn",
             r.remaining.more_discs
         )
-    };
-    format!(
-        "✔ Wrote disc {}  —  label: \"{}\"\n{status}\n{next}",
-        d.ordinal, d.label
-    )
+    });
+    lines.join("\n")
+}
+
+/// One line when every set is complete, otherwise one line per lagging set.
+fn coverage_lines(coverage: &[SetCoverage]) -> Vec<String> {
+    if coverage.iter().all(|c| c.missing_files == 0) {
+        return vec![format!(
+            "Copies: every current file has {} copies.",
+            coverage.len()
+        )];
+    }
+    coverage
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.missing_files > 0)
+        .map(|(set, c)| {
+            format!(
+                "Copies: set {} is missing {} files ({}).",
+                set_letter(set as u32),
+                c.missing_files,
+                gb(c.missing_bytes)
+            )
+        })
+        .collect()
 }
 
 pub fn status_report(p: &Project, r: &StatusReport) -> String {
@@ -268,6 +333,21 @@ pub fn reset_done(name: &str) -> String {
 pub fn error_line(err: &PipelineError) -> String {
     match err {
         PipelineError::Burn(diskrement_shell::burn::BurnError::Aborted) => "Aborted.".to_string(),
+        PipelineError::PartialBurn {
+            committed,
+            pending,
+            cause,
+        } if matches!(
+            **cause,
+            PipelineError::Burn(diskrement_shell::burn::BurnError::Aborted)
+        ) =>
+        {
+            format!(
+                "Aborted. {} committed; {} not written (re-run burn).",
+                committed.join(", "),
+                pending.join(", ")
+            )
+        }
         other => other.to_string(),
     }
 }
@@ -398,8 +478,10 @@ mod tests {
         assert_eq!(gb(0), "0.0 GB");
     }
 
-    use diskrement_core::{ContentHash, PlannedDisc, RelPath, ScannedFile};
-    use diskrement_shell::pipeline::reports::{PlanReport, RemainingEstimate};
+    use diskrement_core::{ContentHash, DiscKey, PlannedDisc, RelPath, ScannedFile};
+    use diskrement_shell::pipeline::reports::{
+        BurnReport, DiscBurn, PlanReport, RemainingEstimate, SetPlan,
+    };
 
     fn scanned(rel: &str, size: u64) -> ScannedFile {
         ScannedFile {
@@ -417,14 +499,19 @@ mod tests {
         oversized: Vec<ScannedFile>,
     ) -> PlanReport {
         PlanReport {
-            disc,
+            copies: 1,
+            sets: vec![SetPlan {
+                disc,
+                catch_up: 0,
+                session_ordinal: 1,
+                remaining: RemainingEstimate {
+                    more_discs: remaining.0,
+                    more_files: remaining.1,
+                    more_bytes: remaining.2,
+                },
+            }],
             disc_type: DiscType::BdR,
             tombstones: tombstones.into_iter().map(|t| RelPath(t.into())).collect(),
-            remaining: RemainingEstimate {
-                more_discs: remaining.0,
-                more_files: remaining.1,
-                more_bytes: remaining.2,
-            },
             oversized,
         }
     }
@@ -613,6 +700,102 @@ mod tests {
             "project not found: photos"
         );
     }
+
+    #[test]
+    fn a_two_copy_plan_names_each_set_and_splits_new_from_catch_up() {
+        let disc = |set, files| PlannedDisc {
+            ordinal: 2,
+            copy_set: set,
+            is_new: true,
+            will_finalize: false,
+            files,
+            prior_used_bytes: 0,
+            usable_bytes: 25_000_000_000,
+        };
+        let none = RemainingEstimate {
+            more_discs: 0,
+            more_files: 0,
+            more_bytes: 0,
+        };
+        let p = PlanReport {
+            copies: 2,
+            sets: vec![
+                SetPlan {
+                    disc: disc(0, vec![scanned("n", 1)]),
+                    catch_up: 0,
+                    session_ordinal: 1,
+                    remaining: none.clone(),
+                },
+                SetPlan {
+                    disc: disc(1, vec![scanned("c", 1), scanned("n", 1)]),
+                    catch_up: 1,
+                    session_ordinal: 1,
+                    remaining: none,
+                },
+            ],
+            disc_type: DiscType::BdR,
+            tombstones: vec![],
+            oversized: vec![],
+        };
+        assert_eq!(
+            plan_report(&p),
+            "Plan: disc 2A (new disc, BD_R) — 1 files (1 new, 0 catch-up), 0.0 GB, left OPEN\n\
+             This disc completes the set.\n\
+             Plan: disc 2B (new disc, BD_R) — 2 files (1 new, 1 catch-up), 0.0 GB, left OPEN\n\
+             This disc completes the set."
+        );
+    }
+
+    #[test]
+    fn a_two_copy_burn_lists_both_discs_and_the_coverage() {
+        let d = |set| DiscBurn {
+            disc: DiscKey::new(1, set),
+            label: format!("p disc 1{}", if set == 0 { 'A' } else { 'B' }),
+            finalized: false,
+            staging_dir: "/w/staging".into(),
+            image_bytes: 1,
+        };
+        let r = BurnReport {
+            discs: vec![d(0), d(1)],
+            remaining: RemainingEstimate {
+                more_discs: 0,
+                more_files: 0,
+                more_bytes: 0,
+            },
+            coverage: vec![
+                SetCoverage::default(),
+                SetCoverage {
+                    missing_files: 3,
+                    missing_bytes: 2_000_000_000,
+                },
+            ],
+        };
+        assert_eq!(
+            burn_report(&r, 2),
+            "✔ Wrote disc 1A  —  label: \"p disc 1A\"\n\
+             Status: left OPEN — may receive more sessions later.\n\
+             ✔ Wrote disc 1B  —  label: \"p disc 1B\"\n\
+             Status: left OPEN — may receive more sessions later.\n\
+             Copies: set B is missing 3 files (2.0 GB).\n\
+             No more changes — the set is up to date."
+        );
+    }
+
+    #[test]
+    fn an_aborted_second_disc_names_what_was_committed() {
+        let err = PipelineError::PartialBurn {
+            committed: vec!["1A".into()],
+            pending: vec!["1B".into()],
+            cause: Box::new(PipelineError::Burn(
+                diskrement_shell::burn::BurnError::Aborted,
+            )),
+        };
+        assert_eq!(
+            error_line(&err),
+            "Aborted. 1A committed; 1B not written (re-run burn)."
+        );
+        assert_eq!(err.exit_code(), 0);
+    }
 }
 
 #[cfg(test)]
@@ -622,18 +805,19 @@ mod burn_render_tests {
 
     fn report(finalized: bool, more_discs: usize) -> BurnReport {
         BurnReport {
-            disc: DiscBurn {
-                ordinal: 1,
+            discs: vec![DiscBurn {
+                disc: diskrement_core::DiscKey::new(1, 0),
                 label: "p disc 1".to_string(),
                 finalized,
                 staging_dir: "/w/staging/disc-1".into(),
                 image_bytes: 4096,
-            },
+            }],
             remaining: RemainingEstimate {
                 more_discs,
                 more_files: 1,
                 more_bytes: 800,
             },
+            coverage: vec![SetCoverage::default()],
         }
     }
 
@@ -641,7 +825,7 @@ mod burn_render_tests {
     #[test]
     fn a_finalized_disc_with_more_to_come_matches_the_render_oracle() {
         assert_eq!(
-            burn_report(&report(true, 1)),
+            burn_report(&report(true, 1), 1),
             "✔ Wrote disc 1  —  label: \"p disc 1\"\n\
              Status: FINALIZED — set this disc aside, it is sealed.\n\
              ~1 more discs of changes remain. Run: scan → plan → burn"
@@ -652,7 +836,7 @@ mod burn_render_tests {
     #[test]
     fn an_open_disc_with_nothing_left_matches_the_render_oracle() {
         assert_eq!(
-            burn_report(&report(false, 0)),
+            burn_report(&report(false, 0), 1),
             "✔ Wrote disc 1  —  label: \"p disc 1\"\n\
              Status: left OPEN — may receive more sessions later.\n\
              No more changes — the set is up to date."
@@ -663,7 +847,7 @@ mod burn_render_tests {
     /// is byte-exact, so pin it on its own.
     #[test]
     fn the_wrote_line_uses_two_spaces_around_the_dash() {
-        let line = burn_report(&report(false, 0))
+        let line = burn_report(&report(false, 0), 1)
             .lines()
             .next()
             .unwrap()
@@ -968,13 +1152,14 @@ mod snapshots {
     use super::*;
     use chrono::TimeZone as _;
     use diskrement_core::{
-        ContentHash, DiscState, DiscStatus, DiscType, PlannedDisc, RelPath, ScannedFile,
+        ContentHash, DiscKey, DiscState, DiscStatus, DiscType, PlannedDisc, RelPath, ScannedFile,
     };
     use diskrement_shell::catalog::model::{
         FileHistoryEntry, LostReport, LostVersionEntry, ReburnEntry, VersionStatus,
     };
     use diskrement_shell::pipeline::reports::{
-        BurnReport, DiscBurn, PlanReport, RemainingEstimate, ScanReport, StatusReport, VerifyReport,
+        BurnReport, DiscBurn, PlanReport, RemainingEstimate, ScanReport, SetPlan, StatusReport,
+        VerifyReport,
     };
 
     /// Join labelled renders into one reviewable document.
@@ -1035,17 +1220,22 @@ mod snapshots {
         oversized: Vec<ScannedFile>,
     ) -> PlanReport {
         PlanReport {
-            disc,
+            copies: 1,
+            sets: vec![SetPlan {
+                disc,
+                catch_up: 0,
+                session_ordinal: 1,
+                remaining: RemainingEstimate {
+                    more_discs: remaining.0,
+                    more_files: remaining.1,
+                    more_bytes: remaining.2,
+                },
+            }],
             disc_type: DiscType::BdR,
             tombstones: tombstones
                 .iter()
                 .map(|t| RelPath((*t).to_string()))
                 .collect(),
-            remaining: RemainingEstimate {
-                more_discs: remaining.0,
-                more_files: remaining.1,
-                more_bytes: remaining.2,
-            },
             oversized,
         }
     }
@@ -1075,18 +1265,19 @@ mod snapshots {
 
     fn burn_of(ordinal: u32, label: &str, finalized: bool, more_discs: usize) -> BurnReport {
         BurnReport {
-            disc: DiscBurn {
-                ordinal,
+            discs: vec![DiscBurn {
+                disc: DiscKey::new(ordinal, 0),
                 label: label.to_string(),
                 finalized,
                 staging_dir: "/srv/work/staging/disc-1".into(),
                 image_bytes: 4096,
-            },
+            }],
             remaining: RemainingEstimate {
                 more_discs,
                 more_files: 1,
                 more_bytes: 800,
             },
+            coverage: vec![SetCoverage::default()],
         }
     }
 
@@ -1309,11 +1500,11 @@ mod snapshots {
             gallery(&[
                 (
                     "a finalized disc with more to come (run-manifest step 04)",
-                    burn_report(&burn_of(1, "p disc 1", true, 1)),
+                    burn_report(&burn_of(1, "p disc 1", true, 1), 1),
                 ),
                 (
                     "an open disc, set complete (run-manifest step 08)",
-                    burn_report(&burn_of(2, "p disc 2", false, 0)),
+                    burn_report(&burn_of(2, "p disc 2", false, 0), 1),
                 ),
             ]),
         );

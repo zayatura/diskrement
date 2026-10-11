@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
-use diskrement_core::DiscState;
+use diskrement_core::{
+    DiscKey, DiscState, DiscType, PlannedDisc, RelPath, ScannedFile, SetCoverage,
+};
 
 /// `ScanResult` — `hashed` is `None` when a staged scan was reused.
 #[derive(Debug)]
@@ -27,8 +29,6 @@ pub struct StatusReport {
     pub last_burn_at: Option<DateTime<Utc>>,
 }
 
-use diskrement_core::{DiscType, PlannedDisc, RelPath, ScannedFile};
-
 /// How much outstanding change did NOT fit on the disc planned this cycle
 /// (`Pipeline.scala`'s `RemainingEstimate`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,35 +38,54 @@ pub struct RemainingEstimate {
     pub more_bytes: u64,
 }
 
-/// The single disc this cycle will write, plus what spills to later cycles
-/// (`Pipeline.scala`'s `PlanReport`).
+/// One copy set's share of the cycle: the disc it writes, plus what spills to
+/// later cycles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetPlan {
+    pub disc: PlannedDisc,
+    /// How many of `disc.files` are catch-up copies rather than new files.
+    pub catch_up: usize,
+    /// The session ordinal this burn writes onto the disc (1 for a new disc).
+    /// A catalog already one past it means the disc was committed before the
+    /// staged plan could be rewritten, and `burn` skips it.
+    pub session_ordinal: u32,
+    pub remaining: RemainingEstimate,
+}
+
+/// The discs this cycle writes — one per copy set with something to do — in
+/// set order.
 ///
-/// `tombstones` are the whole scan's deletions rather than this disc's: on a
-/// cross-cycle spill they attach to the session actually written this cycle.
+/// `tombstones` are the whole scan's deletions. Every disc's manifest lists
+/// them; the catalog records each one once, on the first disc to commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanReport {
-    pub disc: PlannedDisc,
+    pub copies: u32,
+    pub sets: Vec<SetPlan>,
     pub disc_type: DiscType,
     pub tombstones: Vec<RelPath>,
-    pub remaining: RemainingEstimate,
     pub oversized: Vec<ScannedFile>,
 }
 
-/// What one disc's burn produced (`Pipeline.scala`'s `DiscBurn`).
+/// What one disc's burn produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscBurn {
-    pub ordinal: u32,
+    pub disc: DiscKey,
     pub label: String,
     pub finalized: bool,
     pub staging_dir: PathBuf,
     pub image_bytes: u64,
 }
 
-/// The result of one burn cycle: exactly one disc, plus what still remains.
+/// The result of one burn cycle: every disc written this run, the largest
+/// remaining estimate among their sets, and each set's coverage afterwards.
+///
+/// `discs` can be empty when every planned disc had already been committed by
+/// an earlier, interrupted run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BurnReport {
-    pub disc: DiscBurn,
+    pub discs: Vec<DiscBurn>,
     pub remaining: RemainingEstimate,
+    pub coverage: Vec<SetCoverage>,
 }
 
 /// One disc's verification result (`Pipeline.scala`'s `VerifyReport`).
