@@ -99,7 +99,9 @@ impl<'a> Pipeline<'a> {
 
     /// `scan`: reuse a staged scan unless `--force`/`--verify`; otherwise
     /// snapshot → hash → stage → cache, and diff against the catalog view
-    /// (`PipelineLive.scan`). `hashed` is `None` on the reuse path.
+    /// (`PipelineLive.scan`). Added/modified/unchanged come from that view;
+    /// the deleted count comes from the catalog history, like the plan's
+    /// tombstones. `hashed` is `None` on the reuse path.
     pub fn scan(
         &mut self,
         name: &str,

@@ -55,9 +55,11 @@ pub struct SetPlan {
 }
 
 /// The discs this cycle writes — one per copy set with something to do — in
-/// set order.
+/// set order. `sets` may be empty (nothing to place); the tombstones are then
+/// deferred to the next disc that is burned anyway (issue #9).
 ///
-/// `tombstones` are the whole scan's deletions. Every disc's manifest lists
+/// `tombstones` are the whole scan's deletions, computed against the catalog
+/// history (`diff::tombstones`), not the live view. Every disc's manifest lists
 /// them; the catalog records each one once, on the first disc to commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanReport {

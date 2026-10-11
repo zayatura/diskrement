@@ -11,6 +11,8 @@ use crate::model::{CatalogView, RelPath, ScannedFile};
 pub struct ChangeSet {
     pub added: Vec<ScannedFile>,
     pub modified: Vec<ScannedFile>,
+    /// Computed against the live view. This is not the cycle's deletions:
+    /// those are `tombstones` over the catalog history.
     pub deleted: Vec<RelPath>,
     pub unchanged: Vec<ScannedFile>,
 }
@@ -44,19 +46,11 @@ pub fn diff(catalog: &CatalogView, scanned: &[ScannedFile]) -> ChangeSet {
         }
     }
 
-    let scanned_paths: HashSet<&RelPath> = scanned.iter().map(|f| &f.rel_path).collect();
-    let mut deleted: Vec<RelPath> = catalog
-        .current
-        .keys()
-        .filter(|p| !scanned_paths.contains(*p))
-        .cloned()
-        .collect();
+    let deleted = tombstones(catalog.current.keys(), scanned);
 
     added.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     modified.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     unchanged.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    deleted.sort();
-
     ChangeSet {
         added,
         modified,

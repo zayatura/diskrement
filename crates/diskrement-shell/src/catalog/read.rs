@@ -102,7 +102,10 @@ impl Catalog {
     ///
     /// Deliberately *not* filtered by dead disc, unlike `read_view`: a dead
     /// disc does not make the source file change, and re-hashing it would be
-    /// wasted work. Ported as-is with the rest of the deferred debt (spec §1).
+    /// wasted work. `diff::tombstones` (the plan's deletions and the scan
+    /// count) and burn's recorded-tombstone filter also depend on this: they
+    /// need every path whose latest change is not `DELETED`, including a path
+    /// whose every copy died. Do not "fix" this to filter dead discs.
     pub fn fingerprints(
         &self,
         project: ProjectId,
