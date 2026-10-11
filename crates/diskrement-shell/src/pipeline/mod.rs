@@ -210,6 +210,8 @@ impl<'a> Pipeline<'a> {
             .ok_or_else(|| PipelineError::NoStagedScan(name.to_string()))?;
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
+        let recorded = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
+        let tombstones = diff::tombstones(recorded.keys(), &scanned);
         let disc_type = disc_type_override.unwrap_or(p.default_disc_type);
         let cap = planning::effective_capacity(
             Capacity::from_disc_type(disc_type, p.margin_percent),
@@ -219,6 +221,7 @@ impl<'a> Pipeline<'a> {
         let report = planning::plan_from(
             &view,
             &scanned,
+            tombstones,
             &states,
             disc_type,
             cap,
@@ -1388,6 +1391,7 @@ mod burn_tests {
         let report = crate::pipeline::planning::plan_from(
             &diskrement_core::CatalogView::empty(),
             &scanned,
+            Vec::new(),
             &[],
             DiscType::BdR,
             diskrement_core::Capacity::new(1_000_000),
@@ -1814,6 +1818,7 @@ mod burn_tests {
         let mut report = crate::pipeline::planning::plan_from(
             &diskrement_core::CatalogView::empty(),
             &scanned,
+            Vec::new(),
             &[],
             DiscType::BdR,
             diskrement_core::Capacity::new(1_000_000),
@@ -2375,6 +2380,7 @@ mod verify_tests {
         let report = crate::pipeline::planning::plan_from(
             &diskrement_core::CatalogView::empty(),
             &scanned,
+            Vec::new(),
             &[],
             DiscType::BdR,
             diskrement_core::Capacity::new(1_000_000),
@@ -2528,7 +2534,35 @@ mod verify_tests {
     /// files checked — the `disc 4: 0 files OK` line in run-manifest step 21.
     #[test]
     fn a_sealed_disc_with_no_files_verifies_clean_with_zero_checked() {
-        let mut env = burned_env(&[], true);
+        // A fresh project with nothing to place plans no disc (issue #9), so the
+        // seal session is produced the way an operator does: burn a disc, then
+        // `plan --finalize` an unchanged tree and burn the file-less seal.
+        let mut env = burned_env(&[("a.txt", b"aaa")], false);
+        // The burn removed the snapshot and the staged scan; put them back.
+        std::fs::create_dir_all(env.work.join("snapshot")).unwrap();
+        std::fs::write(env.work.join("snapshot/a.txt"), b"aaa").unwrap();
+        let again = vec![ScannedFile {
+            rel_path: RelPath("a.txt".to_string()),
+            content_hash: crate::fs::hasher::hash(&env.work.join("snapshot/a.txt")).unwrap(),
+            size_bytes: 3,
+            mtime: Utc.timestamp_opt(1_757_000_000, 0).unwrap(),
+        }];
+        staged::write_scan(&env.work, &again).unwrap();
+        {
+            let sink = NoopSink;
+            let burner = Burner::Simulated(SimulatedBurner::new(&sink, 2));
+            let mut pipeline = Pipeline::new(
+                &mut env.catalog,
+                PipelinePaths {
+                    work_dir: env.work.clone(),
+                    scan_cache: env.scan_cache.clone(),
+                },
+                &sink,
+            );
+            let plan = pipeline.plan("p", None, true).unwrap();
+            assert!(plan.sets[0].disc.files.is_empty());
+            pipeline.burn("p", now(), &burner).unwrap();
+        }
         let reports = run_verify(&mut env, None).unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].files_checked, 0);
