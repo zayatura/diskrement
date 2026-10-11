@@ -22,7 +22,7 @@ use crate::catalog::model::{
     ProjectId, ProjectInit, Session, SessionState, SessionWrite,
 };
 use crate::catalog::Catalog;
-use crate::error::PipelineError;
+use crate::error::{PipelineError, UnrecordedDisc};
 use crate::fs::fingerprint_cache::FingerprintCache;
 use crate::fs::hasher;
 use crate::fs::scanner::{self, parallelism_from_env, ScanOutput};
@@ -282,7 +282,7 @@ impl<'a> Pipeline<'a> {
         // Once a disc has committed, every failure must say so: the operator
         // has to know which discs the catalog now holds.
         let partial = |done: &[DiscKey],
-                       unrecorded: Option<DiscKey>,
+                       unrecorded: Option<UnrecordedDisc>,
                        pending: &[SetPlan],
                        cause: PipelineError| {
             if done.is_empty() {
@@ -290,7 +290,7 @@ impl<'a> Pipeline<'a> {
             }
             PipelineError::PartialBurn {
                 committed: done.iter().map(|k| k.name(p.copies)).collect(),
-                unrecorded: unrecorded.map(|k| k.name(p.copies)),
+                unrecorded,
                 pending: pending
                     .iter()
                     .map(|s| s.disc.key().name(p.copies))
@@ -319,8 +319,17 @@ impl<'a> Pipeline<'a> {
                 Err(DiscFailure::Unwritten(e)) => {
                     return Err(partial(&done, None, &report.sets, e));
                 }
-                Err(DiscFailure::Unrecorded(e)) => {
-                    return Err(partial(&done, Some(sp.disc.key()), &report.sets[1..], e));
+                Err(DiscFailure::Unrecorded {
+                    cause,
+                    surely_written,
+                }) => {
+                    let name = sp.disc.key().name(p.copies);
+                    let disc = if surely_written {
+                        UnrecordedDisc::written(name)
+                    } else {
+                        UnrecordedDisc::maybe_written(name)
+                    };
+                    return Err(partial(&done, Some(disc), &report.sets[1..], cause));
                 }
             }
         }
@@ -361,7 +370,10 @@ impl<'a> Pipeline<'a> {
         // so the disc row itself still reads OPEN. Without this guard the
         // burner would commit a session onto a disc that no longer physically
         // exists.
-        let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
+        let states = self
+            .catalog
+            .read_disc_states(p.id)
+            .map_err(DiscFailure::unwritten)?;
         if states
             .iter()
             .any(|s| s.key() == key && s.status == DiscStatus::Dead)
@@ -371,7 +383,9 @@ impl<'a> Pipeline<'a> {
             ))));
         }
 
-        let sess_ord = self.next_session_ordinal(p.id, key)?;
+        let sess_ord = self
+            .next_session_ordinal(p.id, key)
+            .map_err(DiscFailure::Unwritten)?;
         if sess_ord == sp.session_ordinal + 1 {
             return Ok(None);
         }
@@ -396,7 +410,10 @@ impl<'a> Pipeline<'a> {
         // Classified against the catalog as it stands now — after any disc
         // this cycle already committed — so a twin's files become copies of
         // the versions its sibling just recorded.
-        let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
+        let view = self
+            .catalog
+            .read_view(p.id)
+            .map_err(DiscFailure::unwritten)?;
         let contents = replication::classify(&view, &disc.files);
         // A tombstone is written by the first disc to commit; later discs
         // find the path already deleted. "Still current" is the catalog's
@@ -405,7 +422,10 @@ impl<'a> Pipeline<'a> {
         // lists its tombstone, so the catalog must record it too.
         // `fingerprints` is exactly "latest change is not DELETED", unfiltered
         // by dead discs.
-        let not_deleted = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
+        let not_deleted = self
+            .catalog
+            .fingerprints(p.id)
+            .map_err(DiscFailure::unwritten)?;
         let tombstones: Vec<RelPath> = report
             .tombstones
             .iter()
@@ -437,18 +457,21 @@ impl<'a> Pipeline<'a> {
 
         let tmp_catalog = self.paths.work_dir.join("burn-catalog.sqlite");
         if let Some(parent) = tmp_catalog.parent() {
-            std::fs::create_dir_all(parent).map_err(Self::failed)?;
+            std::fs::create_dir_all(parent).map_err(DiscFailure::unwritten)?;
         }
         let _ = std::fs::remove_file(&tmp_catalog);
         self.catalog
             .snapshot_to(&tmp_catalog)
-            .map_err(Self::failed)?;
+            .map_err(DiscFailure::unwritten)?;
         // Materialize the post-burn state into the snapshot this disc embeds.
         // Applies to the copy only; the live catalog is committed after the
         // disc is staged.
-        Catalog::apply_update_to(&tmp_catalog, &update).map_err(Self::failed)?;
+        Catalog::apply_update_to(&tmp_catalog, &update).map_err(DiscFailure::unwritten)?;
 
-        let pointers = self.catalog.archive_pointers(p.id).map_err(Self::failed)?;
+        let pointers = self
+            .catalog
+            .archive_pointers(p.id)
+            .map_err(DiscFailure::unwritten)?;
         let image = DiscImage {
             staging_dir: self
                 .paths
@@ -472,13 +495,16 @@ impl<'a> Pipeline<'a> {
             },
             close_disc: disc.will_finalize,
         };
-        let burned = burner.burn(&image).map_err(PipelineError::from)?;
+        let burned = burner.burn(&image).map_err(burner_failure)?;
 
         // The crash-safe commit point: the disc exists, so the catalog may now
         // learn about it. The committed state equals the embedded snapshot.
         self.catalog
             .apply_update(&update)
-            .map_err(|e| DiscFailure::Unrecorded(Self::failed(e)))?;
+            .map_err(|e| DiscFailure::Unrecorded {
+                cause: Self::failed(e),
+                surely_written: true,
+            })?;
         let _ = std::fs::remove_file(&tmp_catalog);
 
         Ok(Some(DiscBurn {
@@ -735,17 +761,53 @@ impl<'a> Pipeline<'a> {
     }
 }
 
-/// Why one disc of a burn failed: before its disc was written, or after —
-/// the disc exists but its commit did not land, so the catalog does not know
-/// it.
+/// Why one disc of a burn failed: before its media was touched, or after —
+/// the disc exists (or may) but its commit did not land, so the catalog does
+/// not know it.
+///
+/// There is deliberately no `From<PipelineError>`: every failure in
+/// `burn_disc` picks its side explicitly, so a new `?` after the burner runs
+/// cannot silently claim the disc was never written.
 enum DiscFailure {
     Unwritten(PipelineError),
-    Unrecorded(PipelineError),
+    Unrecorded {
+        cause: PipelineError,
+        surely_written: bool,
+    },
 }
 
-impl From<PipelineError> for DiscFailure {
-    fn from(e: PipelineError) -> Self {
-        DiscFailure::Unwritten(e)
+impl DiscFailure {
+    /// An unexpected failure before the burner touched any media.
+    fn unwritten(e: impl std::error::Error + 'static) -> Self {
+        DiscFailure::Unwritten(Pipeline::failed(e))
+    }
+}
+
+/// Which side of the media write a burner failure falls on. Exhaustive on
+/// purpose: a new `BurnError` variant must be classified here.
+fn burner_failure(e: crate::burn::BurnError) -> DiscFailure {
+    use crate::burn::BurnError as B;
+    match e {
+        // xorriso ran: a non-zero exit usually means the media was touched
+        // (a BD-R is likely spent), and a failed post-burn check comes after
+        // xorriso exited 0 with a session on the disc.
+        B::BurnFailed { .. } | B::PostBurnCheckFailed(_) => DiscFailure::Unrecorded {
+            cause: PipelineError::Burn(e),
+            surely_written: false,
+        },
+        // Staging, tool and device checks, media inspection and the operator
+        // prompt all run before anything is written.
+        B::HashMismatch { .. }
+        | B::SourceFileMissing(_)
+        | B::Io(_)
+        | B::ToolMissing(_)
+        | B::ToolTooOld(_)
+        | B::DeviceNotFound(_)
+        | B::DevicePermissionDenied(_)
+        | B::NoMedia(_)
+        | B::InsufficientCapacity { .. }
+        | B::MountFailed(_)
+        | B::Aborted => DiscFailure::Unwritten(PipelineError::Burn(e)),
     }
 }
 
@@ -1837,7 +1899,7 @@ mod burn_tests {
         assert_eq!(manifest_deleted(&env, "2"), vec!["gone.bin"]);
     }
 
-    fn partial_parts(err: &PipelineError) -> (Vec<String>, Option<String>, Vec<String>) {
+    fn partial_parts(err: &PipelineError) -> (Vec<String>, Option<UnrecordedDisc>, Vec<String>) {
         match err {
             PipelineError::PartialBurn {
                 committed,
@@ -1905,7 +1967,11 @@ mod burn_tests {
         let err = run_burn(&mut env).unwrap_err();
         assert_eq!(
             partial_parts(&err),
-            (vec!["1A".to_string()], Some("1B".to_string()), vec![])
+            (
+                vec!["1A".to_string()],
+                Some(UnrecordedDisc::written("1B")),
+                vec![]
+            )
         );
         assert!(env.work.join("staging/disc-1B/data/a.bin").is_file());
         let text = err.to_string();
@@ -1926,6 +1992,47 @@ mod burn_tests {
         let err = run_burn(&mut env).unwrap_err();
         assert!(matches!(err, PipelineError::StalePlan(_)), "{err}");
         assert!(!err.to_string().contains("reset"), "{err}");
+    }
+
+    /// The real burner is the only one that can fail after touching media, so
+    /// the classification is pinned on the error variants directly.
+    #[test]
+    fn a_burner_failure_after_xorriso_ran_may_have_written_the_disc() {
+        use crate::burn::BurnError as B;
+        let maybe = |e: B| {
+            matches!(
+                burner_failure(e),
+                DiscFailure::Unrecorded {
+                    surely_written: false,
+                    ..
+                }
+            )
+        };
+        assert!(maybe(B::BurnFailed {
+            exit_code: 5,
+            output_tail: vec![],
+        }));
+        assert!(maybe(B::PostBurnCheckFailed("unreadable".into())));
+
+        let unwritten = |e: B| matches!(burner_failure(e), DiscFailure::Unwritten(_));
+        assert!(unwritten(B::Aborted));
+        assert!(unwritten(B::ToolMissing("x".into())));
+        assert!(unwritten(B::ToolTooOld("1.4".into())));
+        assert!(unwritten(B::DeviceNotFound("/dev/sr9".into())));
+        assert!(unwritten(B::DevicePermissionDenied("/dev/sr0".into())));
+        assert!(unwritten(B::NoMedia("/dev/sr0".into())));
+        assert!(unwritten(B::InsufficientCapacity {
+            needed_bytes: 2,
+            free_bytes: 1,
+        }));
+        assert!(unwritten(B::MountFailed("m".into())));
+        assert!(unwritten(B::SourceFileMissing(RelPath("a".into()))));
+        assert!(unwritten(B::Io(std::io::Error::other("staging"))));
+        assert!(unwritten(B::HashMismatch {
+            rel_path: RelPath("a".into()),
+            expected: diskrement_core::ContentHash("x".into()),
+            actual: diskrement_core::ContentHash("y".into()),
+        }));
     }
 }
 

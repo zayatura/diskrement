@@ -128,14 +128,18 @@ pub enum PipelineError {
     /// advice: a stale plan needs a re-plan (never `reset`, which deletes the
     /// staging the verifier needs), anything else a re-run of `burn`.
     ///
-    /// `unrecorded` is a disc that was physically written but whose commit
-    /// failed, so the catalog does not know it; it is neither committed nor
-    /// "not written". `pending` is empty when the failure came after every
-    /// disc had committed.
-    #[error("{}", partial_burn_message(.committed, .unrecorded, .pending, .cause))]
+    /// - `committed`: discs the catalog now holds, in burn order.
+    /// - `unrecorded`: the failing disc, when the failure came after media was
+    ///   (or may have been) written — the catalog does not know it, so it is
+    ///   neither committed nor "not written".
+    /// - `pending`: the discs not yet attempted. It never includes the
+    ///   failing disc when that disc is `unrecorded`, and it is empty when the
+    ///   failure came after every disc had committed (only the work-dir
+    ///   cleanup failed).
+    #[error("{cause} — {}", partial_burn_tail(.committed, .unrecorded, .pending, .cause))]
     PartialBurn {
         committed: Vec<String>,
-        unrecorded: Option<String>,
+        unrecorded: Option<UnrecordedDisc>,
         pending: Vec<String>,
         cause: Box<PipelineError>,
     },
@@ -145,8 +149,34 @@ pub enum PipelineError {
     Failed(String),
 }
 
+/// A disc a `PartialBurn` wrote, or may have written, without recording it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrecordedDisc {
+    pub name: String,
+    /// `true` when the burner reported success and only the commit failed;
+    /// `false` when the burner failed after it may already have touched the
+    /// media (a failed xorriso run, a failed post-burn check).
+    pub surely_written: bool,
+}
+
+impl UnrecordedDisc {
+    pub fn written(name: impl Into<String>) -> Self {
+        UnrecordedDisc {
+            name: name.into(),
+            surely_written: true,
+        }
+    }
+
+    pub fn maybe_written(name: impl Into<String>) -> Self {
+        UnrecordedDisc {
+            name: name.into(),
+            surely_written: false,
+        }
+    }
+}
+
 /// What to do after a `PartialBurn`, decided by its cause.
-pub fn partial_burn_advice(cause: &PipelineError) -> &'static str {
+fn partial_burn_advice(cause: &PipelineError) -> &'static str {
     match cause {
         // The staged plan no longer holds; a re-plan turns the committed
         // discs' files into catch-up copies for the lagging sets.
@@ -157,29 +187,30 @@ pub fn partial_burn_advice(cause: &PipelineError) -> &'static str {
     }
 }
 
-/// `"1A committed; 1B written but not recorded; 1C not written"`, leaving out
-/// the parts that are empty. No trailing advice.
-pub fn partial_burn_summary(
+/// Everything a `PartialBurn` says after its cause:
+/// `"1A committed; 1B not written (re-run burn)"`. Parts that are empty are
+/// left out. The single source of the advice text: the error's `Display` and
+/// the CLI's `Aborted.` line both use it.
+pub fn partial_burn_tail(
     committed: &[String],
-    unrecorded: &Option<String>,
+    unrecorded: &Option<UnrecordedDisc>,
     pending: &[String],
+    cause: &PipelineError,
 ) -> String {
     let mut parts = vec![format!("{} committed", committed.join(", "))];
-    if let Some(disc) = unrecorded {
-        parts.push(format!("{disc} written but not recorded"));
+    match unrecorded {
+        Some(d) if d.surely_written => {
+            parts.push(format!("{} written but not recorded", d.name));
+        }
+        Some(d) => parts.push(format!(
+            "{} may have been written but was not recorded",
+            d.name
+        )),
+        None => {}
     }
     if !pending.is_empty() {
         parts.push(format!("{} not written", pending.join(", ")));
     }
-    parts.join("; ")
-}
-
-fn partial_burn_message(
-    committed: &[String],
-    unrecorded: &Option<String>,
-    pending: &[String],
-    cause: &PipelineError,
-) -> String {
     // After every disc committed, only the work-dir cleanup failed: there is
     // nothing to re-burn, and "re-run burn" would only find no staged plan.
     let advice = if pending.is_empty() && unrecorded.is_none() {
@@ -187,10 +218,7 @@ fn partial_burn_message(
     } else {
         partial_burn_advice(cause)
     };
-    format!(
-        "{cause} — {} ({advice})",
-        partial_burn_summary(committed, unrecorded, pending)
-    )
+    format!("{} ({advice})", parts.join("; "))
 }
 
 /// `e`'s message followed by each of its causes, joined with `": "`.
@@ -347,7 +375,7 @@ mod tests {
     fn a_disc_written_but_not_recorded_is_not_called_unwritten() {
         let err = PipelineError::PartialBurn {
             committed: vec!["1A".into()],
-            unrecorded: Some("1B".into()),
+            unrecorded: Some(UnrecordedDisc::written("1B")),
             pending: vec!["1C".into()],
             cause: Box::new(PipelineError::Failed("disk full".into())),
         };
@@ -356,6 +384,35 @@ mod tests {
             err.to_string(),
             "internal error: disk full (this is a bug) — 1A committed; \
              1B written but not recorded; 1C not written (re-run burn)"
+        );
+    }
+
+    #[test]
+    fn a_disc_the_burner_may_have_written_says_so() {
+        let err = PipelineError::PartialBurn {
+            committed: vec!["1A".into()],
+            unrecorded: Some(UnrecordedDisc::maybe_written("1B")),
+            pending: vec![],
+            cause: Box::new(PipelineError::Burn(
+                crate::burn::BurnError::PostBurnCheckFailed("unreadable".into()),
+            )),
+        };
+        assert_eq!(err.exit_code(), 6);
+        assert_eq!(
+            err.to_string(),
+            "post-burn sanity check failed: unreadable — 1A committed; \
+             1B may have been written but was not recorded (re-run burn)"
+        );
+    }
+
+    #[test]
+    fn the_partial_burn_tail_is_the_display_after_the_cause() {
+        let cause = PipelineError::Burn(crate::burn::BurnError::Aborted);
+        let tail = partial_burn_tail(&["1A".into()], &None, &["1B".into()], &cause);
+        assert_eq!(tail, "1A committed; 1B not written (re-run burn)");
+        assert_eq!(
+            partial(cause).to_string(),
+            format!("aborted by operator — {tail}")
         );
     }
 

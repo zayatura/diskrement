@@ -4524,3 +4524,18 @@ git push origin --delete feat/multiple-copies   # only if the branch was pushed
     - A commit failure, forced with a temp trigger on the live connection, reports 1B as unrecorded.
     - Render: an empty coverage prints no "Copies:" line.
     - The crash-window test now also asserts that the disc written is 1B.
+- **Task 12 (second review):**
+  - **Burner errors are classified explicitly** (`pipeline::burner_failure`, an exhaustive match with no wildcard):
+    - `BurnFailed` (xorriso exited non-zero; the media was usually touched) and `PostBurnCheckFailed` (xorriso exited 0) mean the disc may have been written. They become an unrecorded disc.
+    - Every other variant means nothing was written: Aborted, tool/device/permission/media/capacity, MountFailed, and the staging HashMismatch/SourceFileMissing/Io.
+  - **No blanket conversion.** The blanket `From<PipelineError> for DiscFailure` is gone. Every `?` in `burn_disc` now picks its side explicitly.
+  - **Two strengths of unrecorded.** `PartialBurn.unrecorded` is now `Option<UnrecordedDisc { name, surely_written }>`:
+    - `surely_written = true` (the commit failed after the burner succeeded) reads "1B written but not recorded".
+    - `surely_written = false` reads "1B may have been written but was not recorded".
+  - **Residual risk:** an `Io` error from xorriso's process pipe in the middle of the write, or from the post-burn `read_identity`, is classified by its variant, so it reads as not written. The variant cannot tell which phase it came from; fixing that needs the burner itself to report phase.
+  - **One source for the advice.** `error::partial_burn_tail` produces all the text after the cause, including the advice. Both the error's `Display` and the CLI's `Aborted. …` line use it.
+  - **`PartialBurn` doc.** It now explains that `pending` never includes an unrecorded failing disc, and is empty once every disc has committed.
+  - **Per-set plan line at copies>1.** The "nothing remaining" line reads "Nothing more for set {L} after this disc." because "the set" is ambiguous next to copy sets. The copies=1 text is unchanged.
+  - **Known behaviour changes:**
+    - At copies=1, a `clear` failure or a final `read_view` failure after the disc committed now renders as a `PartialBurn` ("… — 1 committed (nothing is left to write)", still exit 5) instead of a bare internal error.
+    - At copies=2, `verify` is knowingly broken between Task 12 and Task 13. It iterates bare ordinals with the set-0 `DiscKey::new(ordinal, 0)` shims, and Task 13 fixes it.

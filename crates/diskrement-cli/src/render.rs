@@ -84,13 +84,19 @@ pub fn plan_report(p: &PlanReport) -> String {
             p.disc_type,
             gb(d.total_used_bytes())
         ));
-        lines.push(if s.remaining.more_discs == 0 {
-            "This disc completes the set.".to_string()
-        } else {
+        lines.push(if s.remaining.more_discs > 0 {
             format!(
                 "~{} more files (~{} more discs) remain after this one.",
                 s.remaining.more_files, s.remaining.more_discs
             )
+        } else if copies > 1 {
+            // "the set" would read as copy set A/B here.
+            format!(
+                "Nothing more for set {} after this disc.",
+                set_letter(d.copy_set)
+            )
+        } else {
+            "This disc completes the set.".to_string()
         });
     }
     if !p.tombstones.is_empty() {
@@ -348,8 +354,8 @@ pub fn error_line(err: &PipelineError) -> String {
         ) =>
         {
             format!(
-                "Aborted. {} (re-run burn).",
-                diskrement_shell::error::partial_burn_summary(committed, unrecorded, pending)
+                "Aborted. {}.",
+                diskrement_shell::error::partial_burn_tail(committed, unrecorded, pending, cause)
             )
         }
         other => other.to_string(),
@@ -744,9 +750,9 @@ mod tests {
         assert_eq!(
             plan_report(&p),
             "Plan: disc 2A (new disc, BD_R) — 1 files (1 new, 0 catch-up), 0.0 GB, left OPEN\n\
-             This disc completes the set.\n\
+             Nothing more for set A after this disc.\n\
              Plan: disc 2B (new disc, BD_R) — 2 files (1 new, 1 catch-up), 0.0 GB, left OPEN\n\
-             This disc completes the set."
+             Nothing more for set B after this disc."
         );
     }
 
