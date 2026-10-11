@@ -363,7 +363,7 @@ impl Catalog {
                    ) c where c.rn = 1 and c.kind <> 'DELETED'
                  ) cur on cur.fvid = fv.id
                  where fv.project_id = ?1 and fv.rel_path = ?2
-                 order by fv.id, d.copy_set",
+                 order by fv.id, d.copy_set, d.ordinal, s.ordinal",
             )
             .map_err(CatalogError::from_sqlite)?;
 

@@ -589,7 +589,7 @@ impl<'a> Pipeline<'a> {
             Some(_) => {}
         }
         self.catalog
-            .mark_dead(p.id, disc_ordinal, &at)
+            .mark_dead(p.id, DiscKey::new(disc_ordinal, 0), &at)
             .map_err(Self::failed)
     }
 }
@@ -1321,7 +1321,7 @@ mod burn_tests {
         staged::write_plan(&env.work, &report).unwrap();
 
         env.catalog
-            .mark_dead(ProjectId(1), 1, &now())
+            .mark_dead(ProjectId(1), DiscKey::new(1, 0), &now())
             .expect("marking disc 1 dead");
 
         let err = run_burn(&mut env).unwrap_err();
@@ -2038,7 +2038,7 @@ mod mark_dead_tests {
         cycle(&mut e, &[("a.txt", b"aaa"), ("b.txt", b"bbbb")], at(20));
 
         let report = run_mark_dead(&mut e, 1).expect("mark-dead succeeds");
-        assert_eq!(report.disc_ordinal, 1);
+        assert_eq!(report.disc, DiscKey::new(1, 0));
         assert_eq!(
             report
                 .lost

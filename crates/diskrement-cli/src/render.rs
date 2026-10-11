@@ -217,7 +217,7 @@ pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry]) -> String {
 /// two-space indent and the double-space column gaps are contract
 /// (`run-manifest.txt` step 12).
 pub fn mark_dead(r: &LostReport) -> String {
-    let mut lines = vec![format!("Disc {} marked DEAD.", r.disc_ordinal)];
+    let mut lines = vec![format!("Disc {} marked DEAD.", r.disc.ordinal)];
 
     if r.lost.is_empty() {
         lines.push("No versions permanently lost.".to_string());
@@ -879,7 +879,9 @@ mod p6_render_tests {
         let a2 = "e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77";
         assert_eq!(
             mark_dead(&LostReport {
-                disc_ordinal: 3,
+                disc: diskrement_core::DiscKey::new(3, 0),
+                degraded: vec![],
+                superseded_survivors: 0,
                 lost: vec![],
                 reburn: vec![reburn("a.bin", 800, a2)],
             }),
@@ -900,7 +902,9 @@ mod p6_render_tests {
         let a1 = "0868513521f77faae1cf5200d9ff9603007fa04e0caef9f81183b44d46cbba86";
         assert_eq!(
             mark_dead(&LostReport {
-                disc_ordinal: 1,
+                disc: diskrement_core::DiscKey::new(1, 0),
+                degraded: vec![],
+                superseded_survivors: 0,
                 lost: vec![lost("b.bin", 800, b1, 1)],
                 reburn: vec![reburn("a.bin", 800, a1), reburn("b.bin", 800, b2)],
             }),
@@ -921,7 +925,9 @@ mod p6_render_tests {
     fn a_disc_that_cost_nothing_says_so_twice() {
         assert_eq!(
             mark_dead(&LostReport {
-                disc_ordinal: 2,
+                disc: diskrement_core::DiscKey::new(2, 0),
+                degraded: vec![],
+                superseded_survivors: 0,
                 lost: vec![],
                 reburn: vec![],
             }),
@@ -936,7 +942,9 @@ mod p6_render_tests {
     fn the_lost_line_uses_the_shared_gb_format() {
         assert_eq!(
             mark_dead(&LostReport {
-                disc_ordinal: 9,
+                disc: diskrement_core::DiscKey::new(9, 0),
+                degraded: vec![],
+                superseded_survivors: 0,
                 lost: vec![lost("big/movie.mkv", 12_300_000_000, "a1b2c3", 4)],
                 reburn: vec![],
             }),
@@ -1428,7 +1436,9 @@ mod snapshots {
                 (
                     "nothing lost, nothing to re-burn",
                     mark_dead(&LostReport {
-                        disc_ordinal: 2,
+                        disc: diskrement_core::DiscKey::new(2, 0),
+                        degraded: vec![],
+                        superseded_survivors: 0,
                         lost: vec![],
                         reburn: vec![],
                     }),
@@ -1436,7 +1446,9 @@ mod snapshots {
                 (
                     "one live file re-queued (run-manifest step 12)",
                     mark_dead(&LostReport {
-                        disc_ordinal: 3,
+                        disc: diskrement_core::DiscKey::new(3, 0),
+                        degraded: vec![],
+                        superseded_survivors: 0,
                         lost: vec![],
                         reburn: vec![reburn_entry("a.bin", 800, a2)],
                     }),
@@ -1444,7 +1456,9 @@ mod snapshots {
                 (
                     "a superseded version gone forever",
                     mark_dead(&LostReport {
-                        disc_ordinal: 1,
+                        disc: diskrement_core::DiscKey::new(1, 0),
+                        degraded: vec![],
+                        superseded_survivors: 0,
                         lost: vec![lost_entry("b.bin", 800, b1, 1)],
                         reburn: vec![],
                     }),
@@ -1452,7 +1466,9 @@ mod snapshots {
                 (
                     "both halves, with the GB column",
                     mark_dead(&LostReport {
-                        disc_ordinal: 4,
+                        disc: diskrement_core::DiscKey::new(4, 0),
+                        degraded: vec![],
+                        superseded_survivors: 0,
                         lost: vec![
                             lost_entry("b.bin", 800, b1, 1),
                             lost_entry("big/movie.mkv", 12_300_000_000, "a1b2c3", 2),

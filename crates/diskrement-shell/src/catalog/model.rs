@@ -235,7 +235,8 @@ pub struct LostVersionEntry {
 }
 
 /// A live file whose only burned copy was on the dead disc; the next
-/// scan/plan/burn writes it again from the source.
+/// scan/plan/burn writes it again from the source. Also used for
+/// `LostReport::degraded`, where the file still has a live copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReburnEntry {
     pub rel_path: RelPath,
@@ -243,13 +244,20 @@ pub struct ReburnEntry {
     pub size_bytes: u64,
 }
 
-/// What marking a disc dead cost. Recorded in `lost_version`, rendered by the
-/// CLI.
+/// What marking a disc dead cost. `lost` and `reburn` are recorded in
+/// `lost_version`; `degraded` and `superseded_survivors` are derived and only
+/// reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LostReport {
-    pub disc_ordinal: u32,
+    pub disc: DiscKey,
     pub lost: Vec<LostVersionEntry>,
     pub reburn: Vec<ReburnEntry>,
+    /// Current versions that still have a live copy on another disc. The next
+    /// cycle restores the missing copy.
+    pub degraded: Vec<ReburnEntry>,
+    /// Superseded or deleted versions that still have a live copy elsewhere.
+    /// They are not lost, and not restored either: the source moved past them.
+    pub superseded_survivors: usize,
 }
 
 #[cfg(test)]

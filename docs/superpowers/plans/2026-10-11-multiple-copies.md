@@ -4491,3 +4491,8 @@ git branch -d feat/multiple-copies
 git push origin main
 git push origin --delete feat/multiple-copies   # only if the branch was pushed
 ```
+
+## Execution deviations
+
+- **Task 8 → 10:** `file_history` orders by `fv.id, d.copy_set, d.ordinal, s.ordinal` (the plan's `fv.id, d.copy_set` is not a total order once one version has several placements), and a two-set `live_sets` test (including a dead set dropping out) was added with Task 10, once copy placements could be written.
+- **Task 10:** the plan's degraded test called `also_place_a_on_disc_2` straight after `seed`, but `seed` writes only disc 1, so the helper's session subquery is NULL and the insert fails. The test first burns disc 2 (`update(p, 2, 1, [c])`), as the existing `a_version_alive_on_another_disc_is_neither_lost_nor_reburned` does, and asserts `a@a1` is current before the disc dies. A companion test pins `superseded_survivors` (a superseded `b@b1` with a live copy on disc 2 is neither lost nor recorded). The pipeline test asserting `report.disc_ordinal == 1` (no stated rule) now asserts `report.disc == DiscKey::new(1, 0)`.
