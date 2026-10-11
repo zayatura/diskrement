@@ -46,6 +46,7 @@ pub fn entry(path: &str, hash: &str) -> CatalogEntry {
         rel_path: RelPath(path.to_string()),
         content_hash: ContentHash(hash.to_string()),
         size_bytes: 1,
+        live_sets: Default::default(),
     }
 }
 
@@ -147,6 +148,7 @@ pub fn disc_states_strategy(cap: Capacity) -> impl Strategy<Value = Vec<DiscStat
                 .enumerate()
                 .map(|(idx, used_bytes)| DiscState {
                     ordinal: idx as u32 + 1,
+                    copy_set: 0,
                     status: if idx + 1 == n && last_open {
                         DiscStatus::Open
                     } else {

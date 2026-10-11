@@ -101,6 +101,7 @@ fn the_catalog_after_the_first_burn_reports_one_full_disc() {
         cat.read_disc_states(project.id).expect("states"),
         vec![DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Finalized,
             usable_bytes: 1000,
             used_bytes: 800,
@@ -139,18 +140,21 @@ fn a_marked_dead_disc_reads_dead_without_its_row_having_changed() {
         vec![
             DiscState {
                 ordinal: 1,
+                copy_set: 0,
                 status: DiscStatus::Finalized,
                 usable_bytes: 1000,
                 used_bytes: 800,
             },
             DiscState {
                 ordinal: 2,
+                copy_set: 0,
                 status: DiscStatus::Open,
                 usable_bytes: 1000,
                 used_bytes: 800,
             },
             DiscState {
                 ordinal: 3,
+                copy_set: 0,
                 status: DiscStatus::Dead,
                 usable_bytes: 1000,
                 used_bytes: 800,

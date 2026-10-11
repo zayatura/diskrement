@@ -54,12 +54,18 @@ impl std::str::FromStr for DiscStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscState {
     pub ordinal: u32,
+    /// Which copy set the disc belongs to (0 = `A`).
+    pub copy_set: u32,
     pub status: DiscStatus,
     pub usable_bytes: u64,
     pub used_bytes: u64,
 }
 
 impl DiscState {
+    pub fn key(&self) -> crate::model::DiscKey {
+        crate::model::DiscKey::new(self.ordinal, self.copy_set)
+    }
+
     /// Remaining space, saturating at zero.
     ///
     /// Reporting only. The planner decides whether a file fits with an
@@ -261,6 +267,7 @@ mod tests {
     fn disc_state_reports_free_bytes() {
         let d = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 100,
             used_bytes: 30,
@@ -276,6 +283,7 @@ mod tests {
         // `a_zero_byte_file_does_not_fit_an_overfull_disc` below.
         let d = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 100,
             used_bytes: 130,
@@ -351,6 +359,7 @@ mod tests {
         // open disc 1: 100 usable, 90 used -> 10 free.
         let open = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 100,
             used_bytes: 90,
@@ -414,6 +423,7 @@ mod tests {
         // it keeps its ordinal, and the fresh disc takes the next one.
         let dead = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Dead,
             usable_bytes: 100,
             used_bytes: 10,
@@ -474,6 +484,7 @@ mod tests {
         // open disc, and the up-front oversize filter must know that.
         let open = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 50_000_000_000,
             used_bytes: 0,
@@ -494,6 +505,7 @@ mod tests {
         // neither. This is the second stage of the oversize check.
         let open = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 50_000_000_000,
             used_bytes: 40_000_000_000,
@@ -520,12 +532,14 @@ mod tests {
         let discs = [
             DiscState {
                 ordinal: 2,
+                copy_set: 0,
                 status: DiscStatus::Open,
                 usable_bytes: 100,
                 used_bytes: 100,
             },
             DiscState {
                 ordinal: 5,
+                copy_set: 0,
                 status: DiscStatus::Finalized,
                 usable_bytes: 100,
                 used_bytes: 100,
@@ -548,6 +562,7 @@ mod tests {
         // Open BD-R with only 5 bytes free.
         let open = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: bdr_usable,
             used_bytes: bdr_usable - 5,
@@ -583,6 +598,7 @@ mod tests {
         // existing test covers.
         let overfull = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 100,
             used_bytes: 130,

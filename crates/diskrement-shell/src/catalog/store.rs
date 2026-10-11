@@ -795,6 +795,7 @@ mod tests {
             cat.read_disc_states(pid).expect("states read"),
             vec![diskrement_core::DiscState {
                 ordinal: 1,
+                copy_set: 0,
                 status: diskrement_core::DiscStatus::Dead,
                 usable_bytes: 1_000_000,
                 used_bytes: 55,

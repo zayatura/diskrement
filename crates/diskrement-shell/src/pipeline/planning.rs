@@ -256,6 +256,7 @@ mod tests {
         let files = vec![file("a.bin", 300)];
         let states = [DiscState {
             ordinal: 4,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 1_000,
             used_bytes: 300,
@@ -285,6 +286,7 @@ mod tests {
         files.sort_by(|x, y| x.rel_path.cmp(&y.rel_path));
         let states = [DiscState {
             ordinal: 2,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 1_000,
             used_bytes: 800,

@@ -1,6 +1,6 @@
 //! Pure domain types shared across the functional core.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 
@@ -146,6 +146,10 @@ pub struct CatalogEntry {
     pub rel_path: RelPath,
     pub content_hash: ContentHash,
     pub size_bytes: u64,
+    /// The copy sets holding at least one copy of this version on a disc not
+    /// marked dead. Never empty in a view the catalog produced: a version with
+    /// no live copy is left out of the view entirely.
+    pub live_sets: BTreeSet<u32>,
 }
 
 /// Immutable snapshot of the catalog's current view: rel path -> live version.
@@ -165,6 +169,7 @@ impl CatalogView {
 
     /// The view that results from recording exactly these files as the current
     /// versions. Used to express diff idempotence (see `DiffPropertyTest`).
+    /// No version is on a disc yet, so every `live_sets` is empty.
     pub fn from_scanned(files: &[ScannedFile]) -> Self {
         CatalogView {
             current: files
@@ -176,6 +181,7 @@ impl CatalogView {
                             rel_path: f.rel_path.clone(),
                             content_hash: f.content_hash.clone(),
                             size_bytes: f.size_bytes,
+                            live_sets: BTreeSet::new(),
                         },
                     )
                 })
@@ -341,6 +347,7 @@ mod tests {
                 rel_path: RelPath("a".to_string()),
                 content_hash: ContentHash("h1".to_string()),
                 size_bytes: 7,
+                live_sets: Default::default(),
             })
         );
     }

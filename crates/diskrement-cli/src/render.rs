@@ -300,12 +300,14 @@ mod tests {
             discs: vec![
                 DiscState {
                     ordinal: 1,
+                    copy_set: 0,
                     status: DiscStatus::Finalized,
                     usable_bytes: 25_000_000_000,
                     used_bytes: 24_800_000_000,
                 },
                 DiscState {
                     ordinal: 2,
+                    copy_set: 0,
                     status: DiscStatus::Open,
                     usable_bytes: 25_000_000_000,
                     used_bytes: 3_200_000_000,
@@ -1036,6 +1038,7 @@ mod snapshots {
     fn disc(ordinal: u32, status: DiscStatus, used: u64, usable: u64) -> DiscState {
         DiscState {
             ordinal,
+            copy_set: 0,
             status,
             usable_bytes: usable,
             used_bytes: used,

@@ -74,6 +74,8 @@ impl Catalog {
                     rel_path,
                     content_hash: ContentHash(hash),
                     size_bytes: size as u64,
+                    // copy_set / live_sets read for real in the V3 read model.
+                    live_sets: Default::default(),
                 },
             );
         }
@@ -216,6 +218,8 @@ impl Catalog {
             let (ordinal, status, usable, used) = row.map_err(CatalogError::from_sqlite)?;
             out.push(DiscState {
                 ordinal: ordinal as u32,
+                // copy_set / live_sets read for real in the V3 read model.
+                copy_set: 0,
                 status: DiscStatus::from_str(&status).map_err(CatalogError::ConstraintViolation)?,
                 usable_bytes: usable as u64,
                 used_bytes: used as u64,
@@ -624,12 +628,14 @@ mod tests {
             vec![
                 DiscState {
                     ordinal: 1,
+                    copy_set: 0,
                     status: DiscStatus::Open,
                     usable_bytes: 1_000_000,
                     used_bytes: 30,
                 },
                 DiscState {
                     ordinal: 2,
+                    copy_set: 0,
                     status: DiscStatus::Open,
                     usable_bytes: 1_000_000,
                     used_bytes: 10,
