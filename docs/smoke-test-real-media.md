@@ -102,6 +102,13 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       `Writing done; closing the session and finalizing disc 1B. This can take
       a minute.`, no `UPDATE` lines, then `✔ Wrote disc 1B`, `Status:
       FINALIZED`, `Copies: every current file has 2 copies.`)
+- [ ] 11. Verify progress on a full disc: after the insert prompt, `Mounting
+      disc <name>…` appears, then a `verifying disc <name> X/Y GB · N/M files ·
+      R MB/s · ETA …` line on stderr that refreshes in place, including while
+      one multi-GB file is read (the GB figure climbs while the file count
+      stands still). A disc with versions hidden by a later session also shows
+      an `extracting earlier versions on disc <name>` line. The stdout report is
+      unchanged. (#15)
 
 Run record: 2026-09-11, Rust binary @ commit b81b342 (release build), Pioneer
 BDR-UD04 at `/dev/sr1`, one CMC BD-R (POW caveat above did not apply — media

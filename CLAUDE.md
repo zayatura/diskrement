@@ -54,6 +54,11 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   bytes-only `ProgressSink` phase. Writing ends at 100% or at libburn's
   `Closing track/session` line; the close that follows prints no percentages
   (about 11 s for a sealed BD-R), so the operator is told once.
+- **Verify progress advances within a file.** At ~13 MB/s from an optical
+  drive, a per-file bar stands still for minutes on one large video, so both
+  verifiers hash through `hasher::hash_with` and advance by bytes as they read.
+  Scan and staging still advance per file; that is fine from NVMe. Tier 2's
+  extractions are opaque to us and advance one file at a time.
 - **A real burn deletes each disc's staging tree right after its commit**
   (`Burner::retains_staging`, `discard_staging` in `pipeline/mod.rs`); the simulated
   backend keeps them because `StagingVerifier` reads them. This is safe only because

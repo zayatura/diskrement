@@ -23,7 +23,7 @@ use diskrement_shell::catalog::model::{Project, ProjectInit};
 use diskrement_shell::catalog::Catalog;
 use diskrement_shell::error::PipelineError;
 use diskrement_shell::pipeline::{Pipeline, PipelinePaths};
-use diskrement_shell::progress::NoopSink;
+use diskrement_shell::progress::{NoopSink, ProgressSink};
 
 fn main() -> ExitCode {
     // try_parse, never parse(): clap exits 2 on usage errors by default, but
@@ -257,12 +257,15 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             let p = find_or_fail(&catalog, &name)?;
             let exec = SYSTEM_EXEC;
             let operator = prompt::ConsoleOperator;
+            // The read-back bar goes to stderr; stdout stays the report.
+            let sink = progress::ConsoleProgress::new();
             let verifier = resolve_verifier(
                 cli.burner,
                 cli.device.as_deref(),
                 std::path::Path::new(&p.work_dir),
                 &exec,
                 &operator,
+                &sink,
             );
             let mut pipeline = Pipeline::new(
                 &mut catalog,
@@ -270,7 +273,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                     work_dir: PathBuf::from(&p.work_dir),
                     scan_cache: paths::scan_cache_path(&resolved.catalog, &name),
                 },
-                &NoopSink,
+                &sink,
             );
             let reports = pipeline.verify(&name, disc, &verifier)?;
             say(&render::verify_report(&reports, p.copies));
@@ -345,12 +348,15 @@ fn resolve_verifier<'a>(
     work_dir: &Path,
     exec: &'a dyn Exec,
     operator: &'a dyn diskrement_shell::burn::BurnOperator,
+    sink: &'a dyn ProgressSink,
 ) -> Verifier<'a> {
     match backend::resolve(burner, device, &env_lookup) {
         backend::Backend::Simulated => {
-            Verifier::Staging(StagingVerifier::new(work_dir.join("staging")))
+            Verifier::Staging(StagingVerifier::new(work_dir.join("staging"), sink))
         }
-        backend::Backend::Real(device) => Verifier::Disc(DiscVerifier::new(device, exec, operator)),
+        backend::Backend::Real(device) => {
+            Verifier::Disc(DiscVerifier::new(device, exec, operator, sink))
+        }
     }
 }
 

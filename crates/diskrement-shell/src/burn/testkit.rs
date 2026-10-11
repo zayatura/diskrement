@@ -76,6 +76,15 @@ impl RecordingSink {
             .sum()
     }
 
+    /// The files of every `advance`, summed.
+    pub fn advanced_files(&self) -> usize {
+        self.events()
+            .iter()
+            .filter_map(|e| e.strip_prefix("advance "))
+            .map(|rest| rest.split(' ').nth(1).unwrap().parse::<usize>().unwrap())
+            .sum()
+    }
+
     fn push(&self, event: String) {
         self.0.lock().unwrap().push(event);
     }

@@ -7,7 +7,7 @@
 //! meaningless (spec §5.2).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use diskrement_core::{ContentHash, DiscKey, RelPath};
 
@@ -18,6 +18,7 @@ use crate::burn::{BurnDevice, BurnError, BurnOperator, DiscIdentity};
 use crate::catalog::model::SupersededVersion;
 use crate::fs::hasher;
 use crate::fs::scanner::relativize;
+use crate::progress::{self, ProgressSink};
 
 /// What the catalog says one disc should hold.
 ///
@@ -53,13 +54,14 @@ pub struct VerifyOutcome {
 ///
 /// The staging dir holds only the disc's **latest** session, so
 /// `latest_session` is the reference; an absent `data/` directory is a skip.
-pub struct StagingVerifier {
+pub struct StagingVerifier<'a> {
     staging_root: PathBuf,
+    sink: &'a dyn ProgressSink,
 }
 
-impl StagingVerifier {
-    pub fn new(staging_root: PathBuf) -> Self {
-        StagingVerifier { staging_root }
+impl<'a> StagingVerifier<'a> {
+    pub fn new(staging_root: PathBuf, sink: &'a dyn ProgressSink) -> Self {
+        StagingVerifier { staging_root, sink }
     }
 
     pub fn verify(&self, exp: &DiscExpectation) -> Result<VerifyOutcome, BurnError> {
@@ -75,34 +77,64 @@ impl StagingVerifier {
             });
         }
 
-        // Sorted, unlike the Scala original: `Files.walk` order is
-        // unspecified, so a multi-mismatch report was not reproducible run to
-        // run. Sorting can only make the rendered list stable, and every
-        // oracle in the corpus has at most one mismatch.
-        let mut files = Vec::new();
-        for entry in walkdir::WalkDir::new(&data_dir).sort_by_file_name() {
-            let entry = entry.map_err(|e| BurnError::Io(std::io::Error::other(e)))?;
-            if entry.file_type().is_file() {
-                files.push(entry.into_path());
-            }
-        }
-
-        let mut mismatches = Vec::new();
-        for file in &files {
-            let rel = relativize(&data_dir, file);
-            let actual = hasher::hash(file).map_err(BurnError::Io)?;
-            if exp.latest_session.get(&rel) != Some(&actual) {
-                mismatches.push(rel);
-            }
-        }
+        let hashed = hash_tree(&data_dir, self.sink, &verifying_label(exp))?;
+        let mut mismatches: Vec<RelPath> = hashed
+            .iter()
+            .filter(|(rel, actual)| exp.latest_session.get(rel) != Some(actual))
+            .map(|(rel, _)| rel.clone())
+            .collect();
         mismatches.sort();
 
         Ok(VerifyOutcome {
-            files_checked: files.len(),
+            files_checked: hashed.len(),
             mismatches,
             skipped: false,
         })
     }
+}
+
+/// The label of a disc's read-back phase, the same for both backends.
+fn verifying_label(exp: &DiscExpectation) -> String {
+    format!("verifying disc {}", exp.disc_name)
+}
+
+/// Hash every file under `data_dir`, as one progress phase.
+///
+/// The walk comes first so the phase opens with its totals. The bar advances
+/// by bytes during each read, not once per file: from an optical drive at
+/// ~13 MB/s a multi-GB video would otherwise hold it still for minutes.
+///
+/// Sorted, unlike the Scala original: `Files.walk` order is unspecified, so a
+/// multi-mismatch report was not reproducible run to run. Sorting can only
+/// make the rendered list stable, and every oracle in the corpus has at most
+/// one mismatch.
+fn hash_tree(
+    data_dir: &Path,
+    sink: &dyn ProgressSink,
+    label: &str,
+) -> Result<Vec<(RelPath, ContentHash)>, BurnError> {
+    let walk_err = |e: walkdir::Error| BurnError::Io(std::io::Error::other(e));
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(data_dir).sort_by_file_name() {
+        let entry = entry.map_err(walk_err)?;
+        if entry.file_type().is_file() {
+            let size = entry.metadata().map_err(walk_err)?.len();
+            files.push((entry.into_path(), size));
+        }
+    }
+
+    let total_bytes = files.iter().map(|(_, size)| size).sum();
+    progress::phase(sink, label, total_bytes, files.len(), || {
+        files
+            .iter()
+            .map(|(file, _)| {
+                let actual =
+                    hasher::hash_with(file, &mut |n| sink.advance(n, 0)).map_err(BurnError::Io)?;
+                sink.advance(0, 1);
+                Ok((relativize(data_dir, file), actual))
+            })
+            .collect()
+    })
 }
 
 /// Read-back verification of physical (or image) media.
@@ -115,14 +147,21 @@ pub struct DiscVerifier<'a> {
     device: BurnDevice,
     exec: &'a dyn Exec,
     operator: &'a dyn BurnOperator,
+    sink: &'a dyn ProgressSink,
 }
 
 impl<'a> DiscVerifier<'a> {
-    pub fn new(device: BurnDevice, exec: &'a dyn Exec, operator: &'a dyn BurnOperator) -> Self {
+    pub fn new(
+        device: BurnDevice,
+        exec: &'a dyn Exec,
+        operator: &'a dyn BurnOperator,
+        sink: &'a dyn ProgressSink,
+    ) -> Self {
         DiscVerifier {
             device,
             exec,
             operator,
+            sink,
         }
     }
 
@@ -180,26 +219,21 @@ impl<'a> DiscVerifier<'a> {
 
     /// The merged view: what a mount shows.
     fn tier1(&self, exp: &DiscExpectation) -> Result<(usize, Vec<RelPath>), BurnError> {
+        // A just-inserted disc can take seconds to spin up and mount, and the
+        // walk that sizes the phase reads every directory off the disc.
+        self.operator
+            .progress(&format!("Mounting disc {}…", exp.disc_name));
         let reader = DiscReader::new(self.device.clone(), self.exec);
         reader.with_data_tree(|data_dir| {
-            let mut files = Vec::new();
-            for entry in walkdir::WalkDir::new(data_dir).sort_by_file_name() {
-                let entry = entry.map_err(|e| BurnError::Io(std::io::Error::other(e)))?;
-                if entry.file_type().is_file() {
-                    files.push(entry.into_path());
-                }
-            }
-
-            let mut found = BTreeMap::new();
-            let mut mismatches = Vec::new();
-            for file in &files {
-                let rel = relativize(data_dir, file);
-                let actual = hasher::hash(file).map_err(BurnError::Io)?;
-                if exp.visible.get(&rel) != Some(&actual) {
-                    mismatches.push(rel.clone());
-                }
-                found.insert(rel, actual);
-            }
+            let found: BTreeMap<RelPath, ContentHash> =
+                hash_tree(data_dir, self.sink, &verifying_label(exp))?
+                    .into_iter()
+                    .collect();
+            let mut mismatches: Vec<RelPath> = found
+                .iter()
+                .filter(|(rel, actual)| exp.visible.get(*rel) != Some(*actual))
+                .map(|(rel, _)| rel.clone())
+                .collect();
             let missing: Vec<RelPath> = exp
                 .visible
                 .keys()
@@ -207,7 +241,7 @@ impl<'a> DiscVerifier<'a> {
                 .cloned()
                 .collect();
 
-            let checked = files.len() + missing.len();
+            let checked = found.len() + missing.len();
             mismatches.extend(missing);
             Ok((checked, mismatches))
         })
@@ -225,21 +259,30 @@ impl<'a> DiscVerifier<'a> {
         }
         let dir = tempfile::TempDir::new().map_err(BurnError::Io)?;
         let reader = DiscReader::new(self.device.clone(), self.exec);
-        let mut mismatches = Vec::new();
-        for (i, sv) in exp.superseded.iter().enumerate() {
-            let dest = dir.path().join(format!("tier2-{i}.bin"));
-            let checked = reader
-                .extract_from_session(
-                    sv.session_ordinal,
-                    &format!("/data/{}", sv.rel_path.as_str()),
-                    &dest,
-                )
-                .and_then(|()| hasher::hash(&dest).map_err(BurnError::Io));
-            match checked {
-                Ok(actual) if actual == sv.content_hash => {}
-                _ => mismatches.push(sv.rel_path.clone()),
-            }
-        }
+        // xorriso extracts each file silently, so this phase advances one
+        // whole file at a time, by the size the catalog recorded.
+        let label = format!("extracting earlier versions on disc {}", exp.disc_name);
+        let total_bytes = exp.superseded.iter().map(|sv| sv.size_bytes).sum();
+        let mismatches =
+            progress::phase(self.sink, &label, total_bytes, exp.superseded.len(), || {
+                let mut mismatches = Vec::new();
+                for (i, sv) in exp.superseded.iter().enumerate() {
+                    let dest = dir.path().join(format!("tier2-{i}.bin"));
+                    let checked = reader
+                        .extract_from_session(
+                            sv.session_ordinal,
+                            &format!("/data/{}", sv.rel_path.as_str()),
+                            &dest,
+                        )
+                        .and_then(|()| hasher::hash(&dest).map_err(BurnError::Io));
+                    self.sink.advance(sv.size_bytes, 1);
+                    match checked {
+                        Ok(actual) if actual == sv.content_hash => {}
+                        _ => mismatches.push(sv.rel_path.clone()),
+                    }
+                }
+                mismatches
+            });
         Ok((exp.superseded.len(), mismatches))
     }
 }
@@ -247,7 +290,7 @@ impl<'a> DiscVerifier<'a> {
 /// The verification backends, chosen by the same decision that chooses the
 /// burner (spec §5.2).
 pub enum Verifier<'a> {
-    Staging(StagingVerifier),
+    Staging(StagingVerifier<'a>),
     Disc(DiscVerifier<'a>),
 }
 
@@ -263,6 +306,8 @@ impl Verifier<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::burn::testkit::RecordingSink;
+    use crate::progress::NoopSink;
     use std::collections::BTreeMap;
 
     fn sha(body: &[u8]) -> ContentHash {
@@ -298,7 +343,7 @@ mod tests {
         std::fs::write(data.join("a.txt"), b"hello").unwrap();
         std::fs::write(data.join("bad.txt"), b"corrupted").unwrap();
 
-        let v = StagingVerifier::new(staging);
+        let v = StagingVerifier::new(staging, &NoopSink);
         let exp = expectation(&[("a.txt", b"hello"), ("bad.txt", b"original")], 1);
 
         assert_eq!(
@@ -336,7 +381,7 @@ mod tests {
         std::fs::create_dir_all(data.join("nested")).unwrap();
         std::fs::write(data.join("nested/extra.bin"), b"surprise").unwrap();
 
-        let out = StagingVerifier::new(staging)
+        let out = StagingVerifier::new(staging, &NoopSink)
             .verify(&expectation(&[], 2))
             .unwrap();
         assert_eq!(out.files_checked, 1);
@@ -358,7 +403,7 @@ mod tests {
         std::fs::create_dir_all(staging.join("disc-4/data")).unwrap();
 
         assert_eq!(
-            StagingVerifier::new(staging)
+            StagingVerifier::new(staging, &NoopSink)
                 .verify(&expectation(&[], 4))
                 .unwrap(),
             VerifyOutcome {
@@ -381,7 +426,7 @@ mod tests {
         for name in ["z.bin", "a.bin", "m.bin"] {
             std::fs::write(data.join(name), b"wrong").unwrap();
         }
-        let out = StagingVerifier::new(staging)
+        let out = StagingVerifier::new(staging, &NoopSink)
             .verify(&expectation(&[], 1))
             .unwrap();
         assert_eq!(
@@ -394,10 +439,53 @@ mod tests {
         );
     }
 
+    /// One phase per disc, sized to what is on it before the first read, so
+    /// the bar has a total and an ETA from the start; it advances to exactly
+    /// that total and closes.
+    #[test]
+    fn staging_verify_reports_one_phase_sized_to_the_tree() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let staging = dir.path().join("staging");
+        let data = staging.join("disc-1B/data");
+        std::fs::create_dir_all(data.join("nested")).unwrap();
+        std::fs::write(data.join("a.txt"), b"hello").unwrap();
+        std::fs::write(data.join("nested/b.bin"), vec![7u8; 200_000]).unwrap();
+
+        let sink = RecordingSink::default();
+        let exp = DiscExpectation {
+            disc: DiscKey::new(1, 1),
+            disc_name: "1B".to_string(),
+            ..expectation(&[], 1)
+        };
+        StagingVerifier::new(staging, &sink).verify(&exp).unwrap();
+
+        let events = sink.events();
+        assert_eq!(events.first().unwrap(), "start verifying disc 1B 200005 2");
+        assert_eq!(events.last().unwrap(), "done");
+        assert_eq!(sink.advanced_bytes(), 200_005);
+        assert_eq!(sink.advanced_files(), 2);
+        assert!(
+            events.iter().filter(|e| e.starts_with("advance ")).count() > 2,
+            "a 200 kB file advances during its read, not only at its end: {events:?}"
+        );
+    }
+
+    /// A skipped disc has nothing to report.
+    #[test]
+    fn a_staging_skip_opens_no_phase() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sink = RecordingSink::default();
+        let out = StagingVerifier::new(dir.path().join("staging"), &sink)
+            .verify(&expectation(&[], 1))
+            .unwrap();
+        assert!(out.skipped);
+        assert!(sink.events().is_empty(), "{:?}", sink.events());
+    }
+
     mod disc {
         use super::*;
         use crate::burn::cmd::CmdOutput;
-        use crate::burn::testkit::ScriptedOperator;
+        use crate::burn::testkit::{RecordingSink, ScriptedOperator};
         use crate::burn::BurnDevice;
         use std::cell::RefCell;
 
@@ -420,15 +508,26 @@ mod tests {
             }
         }
 
-        /// A queue of identity payloads, one per `-extract` of project.json.
+        /// A queue of identity payloads, one per `-extract` of project.json,
+        /// and the disc's `/data` tree as (path, body) pairs. A single-file
+        /// extraction of `/data/<path>` writes that path's body.
         struct Toc {
             identities: RefCell<std::collections::VecDeque<&'static str>>,
+            data: Vec<(&'static str, &'static [u8])>,
         }
 
         impl Toc {
             fn new(ids: &[&'static str]) -> Self {
                 Toc {
                     identities: RefCell::new(ids.iter().copied().collect()),
+                    data: Vec::new(),
+                }
+            }
+
+            fn with_data(ids: &[&'static str], data: &[(&'static str, &'static [u8])]) -> Self {
+                Toc {
+                    data: data.to_vec(),
+                    ..Toc::new(ids)
                 }
             }
 
@@ -455,10 +554,20 @@ mod tests {
                             .pop_front()
                             .expect("the script ran out of identities");
                         std::fs::write(dest, json).expect("writable destination");
-                    } else {
-                        // A `/data` extraction produces a directory; an empty
-                        // one is the right answer for an empty expectation.
+                    } else if disc_path == "/data" {
                         std::fs::create_dir_all(dest).expect("writable destination");
+                        for (rel, body) in &self.data {
+                            std::fs::write(std::path::Path::new(dest).join(rel), body)
+                                .expect("writable destination");
+                        }
+                    } else {
+                        let rel = disc_path.strip_prefix("/data/").expect("a /data path");
+                        let (_, body) = self
+                            .data
+                            .iter()
+                            .find(|(r, _)| *r == rel)
+                            .expect("the script has this file");
+                        std::fs::write(dest, body).expect("writable destination");
                     }
                     return Ok(CmdOutput {
                         exit_code: 0,
@@ -480,8 +589,13 @@ mod tests {
             let toc = Toc::new(&[]);
             let exec = |c: &[String], l: &mut dyn FnMut(&str)| toc.respond(c, l);
             let op = ScriptedOperator::new(&[false]);
-            let verifier =
-                DiscVerifier::new(BurnDevice::RealDevice("/dev/sr0".to_string()), &exec, &op);
+            let sink = RecordingSink::default();
+            let verifier = DiscVerifier::new(
+                BurnDevice::RealDevice("/dev/sr0".to_string()),
+                &exec,
+                &op,
+                &sink,
+            );
             assert_eq!(
                 verifier.verify(&expectation()).unwrap(),
                 VerifyOutcome {
@@ -496,6 +610,7 @@ mod tests {
                      (or decline to skip this disc)."
                     .to_string()]
             );
+            assert!(sink.events().is_empty(), "{:?}", sink.events());
         }
 
         /// The wrong disc re-prompts, and the message carries the `MediaStatus`
@@ -507,10 +622,14 @@ mod tests {
             let exec = |c: &[String], l: &mut dyn FnMut(&str)| toc.respond(c, l);
             // Confirm once with the wrong disc, then give up.
             let op = ScriptedOperator::new(&[true, false]);
-            let outcome =
-                DiscVerifier::new(BurnDevice::RealDevice("/dev/sr0".to_string()), &exec, &op)
-                    .verify(&expectation())
-                    .unwrap();
+            let outcome = DiscVerifier::new(
+                BurnDevice::RealDevice("/dev/sr0".to_string()),
+                &exec,
+                &op,
+                &NoopSink,
+            )
+            .verify(&expectation())
+            .unwrap();
             assert!(outcome.skipped);
             assert!(
                 op.said(
@@ -530,6 +649,7 @@ mod tests {
             let toc = Toc::new(&[IDENTITY]);
             let exec = |c: &[String], l: &mut dyn FnMut(&str)| toc.respond(c, l);
             let op = ScriptedOperator::new(&[true]);
+            let sink = RecordingSink::default();
             // No `visible`, no `superseded`: the disc is accepted and both
             // tiers have nothing to check. The extraction of `/data` is what
             // an image-backed run exercises (tests/xorriso_image.rs).
@@ -537,11 +657,69 @@ mod tests {
                 BurnDevice::ImageFile(std::path::PathBuf::from("/tmp/none.iso")),
                 &exec,
                 &op,
+                &sink,
             )
             .verify(&expectation())
             .unwrap();
             assert!(!outcome.skipped);
             assert_eq!(outcome.files_checked, 0);
+            // An empty disc still opens (and closes) its tier-1 phase; with
+            // nothing superseded there is no tier-2 phase.
+            assert_eq!(sink.events(), vec!["start verifying disc 1 0 0", "done"]);
+        }
+
+        /// Tier 1 is sized to the files on the disc and advances by bytes
+        /// within each read; tier 2 is its own phase, sized from the catalog,
+        /// one file per extraction. The operator hears about the mount first:
+        /// a just-inserted disc can take seconds to spin up.
+        #[test]
+        fn both_tiers_report_their_own_phase_after_a_mounting_line() {
+            let toc = Toc::with_data(&[IDENTITY], &[("a.txt", b"hello"), ("b.txt", b"keep")]);
+            let exec = |c: &[String], l: &mut dyn FnMut(&str)| toc.respond(c, l);
+            let op = ScriptedOperator::new(&[true]);
+            let sink = RecordingSink::default();
+            let exp = DiscExpectation {
+                visible: BTreeMap::from([
+                    (RelPath("a.txt".to_string()), sha(b"hello")),
+                    (RelPath("b.txt".to_string()), sha(b"keep")),
+                ]),
+                superseded: vec![SupersededVersion {
+                    session_ordinal: 1,
+                    rel_path: RelPath("a.txt".to_string()),
+                    content_hash: sha(b"hello"),
+                    size_bytes: 5,
+                }],
+                ..expectation()
+            };
+            let outcome = DiscVerifier::new(
+                BurnDevice::ImageFile(std::path::PathBuf::from("/tmp/none.iso")),
+                &exec,
+                &op,
+                &sink,
+            )
+            .verify(&exp)
+            .unwrap();
+            assert_eq!(outcome.mismatches, Vec::<RelPath>::new());
+            assert_eq!(outcome.files_checked, 3);
+
+            assert!(op.said("Mounting disc 1…"), "{:?}", op.log());
+            let events = sink.events();
+            let tier2 = events
+                .iter()
+                .position(|e| e.starts_with("start extracting"))
+                .expect("a tier-2 phase");
+            assert_eq!(events[0], "start verifying disc 1 9 2");
+            assert_eq!(events[tier2 - 1], "done");
+            assert_eq!(
+                &events[tier2..],
+                [
+                    "start extracting earlier versions on disc 1 5 1",
+                    "advance 5 1",
+                    "done"
+                ]
+            );
+            assert_eq!(sink.advanced_bytes(), 9 + 5);
+            assert_eq!(sink.advanced_files(), 2 + 1);
         }
     }
 }
