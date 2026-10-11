@@ -758,7 +758,7 @@ mod mark_dead {
 
     /// The disc becomes DEAD in `status` — the one place the CLI shows the
     /// derived state — while the row behind it is untouched (asserted in the
-    /// shell's `fixture_mark_dead` and `mark_dead_tests`, which can see SQL).
+    /// shell's pipeline `mark_dead_tests`, which can see SQL).
     #[test]
     fn status_reports_the_disc_dead_and_drops_its_files_from_the_view() {
         let f = two_session_disc();
