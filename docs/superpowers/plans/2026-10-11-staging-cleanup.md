@@ -797,7 +797,14 @@ The merge into `main` (`Merge feat/staging-cleanup: …`, branch deleted locally
 
 ## Execution deviations
 
-- Baseline test count (Task 0): _filled in at execution_.
+- Baseline test count (Task 0): 572 passed, 0 failed, with
+  `DISKREMENT_SCENARIOS_REQUIRED=1`. Final (Task 6): 581 (+9, as planned). xorriso was
+  installed, so `xorriso_image.rs` ran (5/5).
+- Task 3: to watch the behavioural tests fail before wiring, `discard_staging` was added
+  first under a temporary `#[allow(dead_code)]`, because `-D warnings` rejects an unused
+  function. The red run showed the expected failures (the probe saw `[false, true]`).
+  The `allow` was removed in the same commit that wired the call sites.
+- Executed inline rather than subagent-driven, at the user's choice.
 - Spec D4 wording was aligned with the codebase's unprefixed stderr warnings before the
   plan was written. Spec test 6 was moved to `discard_staging` directly, because no fault
   can be injected between staging and commit without a burner hook.
