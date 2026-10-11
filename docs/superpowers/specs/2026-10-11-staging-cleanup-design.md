@@ -39,7 +39,7 @@ reads. A failed cleanup never fails a committed burn.
 | D1 | Where the backend decision lives | **`Burner::retains_staging(&self) -> bool`** on the closed enum: `Simulated` → `true`, `Real` → `false`. The pipeline asks; it never matches on the variant. Rejected: an `after_commit` hook on the burner (the ordering rule would live in a callback that cannot see the commit), and a `BurnResult` flag (per-result data for a per-backend constant). |
 | D2 | When | **Per disc, immediately after that disc's `catalog.apply_update` succeeds** (and after the temporary burn catalog is removed). Not at the end of the run: if 1A commits and 1B fails, 1A's tree is already gone and 1B's stays. |
 | D3 | Resume path | When `burn_disc` finds the disc **already committed** by an earlier run (`Ok(None)`), it removes `staging/disc-<name>` too (real backend only). This closes the crash window between commit and removal. |
-| D4 | Failure handling | **Best-effort.** `NotFound` is silent. Any other error prints `warning: could not remove staging tree <path>: <error>` on stderr and the burn continues. No `PipelineError`, no exit-code change. |
+| D4 | Failure handling | **Best-effort.** `NotFound` is silent. Any other error prints `could not remove staging tree <path> (<error>); it is safe to delete by hand` on stderr (unprefixed, like the fingerprint-cache warnings) and the burn continues. No `PipelineError`, no exit-code change. |
 | D5 | Trees left by older builds | **Documented only.** No sweep: the backend is chosen per invocation, not stored per project, so a tree under `staging/` might be simulated evidence. README says that `reset` is safe on a real-backend project with nothing staged. |
 | D6 | Burn report | **Silent on success.** `render::burn_report` and its snapshots are unchanged. |
 | D7 | `DiscBurn.staging_dir` | Kept. Its doc comment says that with the real backend the path has already been removed by the time the report is returned. |
@@ -114,9 +114,12 @@ Pipeline tests, real backend via the scripted exec:
    assertion is kept).
 5. **Resume:** a leftover `staging/disc-1` for a disc the catalog already holds is
    removed by the `Ok(None)` path.
-6. **Removal failure:** removal fails (e.g. a read-only `staging/` parent, skipped when
-   running as root, where permissions do not bite). The burn still returns `Ok` and the
-   catalog holds the session.
+6. **Removal failure:** tested on `discard_staging` directly. A tree holding a
+   read-only subdirectory cannot be removed: the call returns, the tree is left in
+   place, and nothing panics. The test is skipped as root, where permissions do not
+   bite. Inside a burn, no fault can be injected after staging and before the commit
+   without adding a hook to the burner. `discard_staging` returns `()`, so the type
+   system already guarantees that it cannot fail a burn.
 
 Simulated backend: the existing pipeline tests and CLI scenarios keep their staging trees
 and `verify` passes. Add one explicit assertion that a simulated burn keeps
