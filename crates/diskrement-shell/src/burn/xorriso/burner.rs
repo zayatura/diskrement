@@ -79,12 +79,13 @@ impl<'a> XorrisoBurner<'a> {
         let expected = if id.session_ordinal == 1 {
             format!(
                 "a blank disc for '{}' disc {}",
-                id.project_name, id.disc_ordinal
+                id.project_name,
+                id.disc_name()
             )
         } else {
             format!(
                 "disc {} of '{}' (last burned session {})",
-                id.disc_ordinal,
+                id.disc_name(),
                 id.project_name,
                 id.session_ordinal - 1
             )
@@ -132,12 +133,7 @@ impl<'a> XorrisoBurner<'a> {
                     ..
                 },
                 n,
-            ) if found.project_name == id.project_name
-                && found.disc_ordinal == id.disc_ordinal
-                && found.session_ordinal + 1 == n =>
-            {
-                Ok(free_bytes)
-            }
+            ) if found.same_disc(id) && found.session_ordinal + 1 == n => Ok(free_bytes),
             (
                 MediaStatus::Appendable {
                     identity: Some(found),
@@ -146,7 +142,9 @@ impl<'a> XorrisoBurner<'a> {
                 _,
             ) => Err(format!(
                 "disc '{}' #{} at session {}",
-                found.project_name, found.disc_ordinal, found.session_ordinal
+                found.project_name,
+                found.disc_name(),
+                found.session_ordinal
             )),
             (MediaStatus::Appendable { identity: None, .. }, _) => {
                 Err("a written non-diskrement disc".to_string())
@@ -161,7 +159,7 @@ impl<'a> XorrisoBurner<'a> {
 
     fn write(&self, image: &DiscImage) -> Result<(), BurnError> {
         let id = &image.metadata.identity;
-        let volid = args::volid(&id.project_name, id.disc_ordinal);
+        let volid = args::volid(&id.project_name, &id.disc_name());
         let command = args::burn(
             &self.device,
             &image.staging_dir,
@@ -187,18 +185,16 @@ impl<'a> XorrisoBurner<'a> {
 
     fn post_burn_check(&self, id: &DiscIdentity) -> Result<(), BurnError> {
         let found = MediaInspector::new(self.device.clone(), self.exec).read_identity()?;
-        let matches = found.as_ref().is_some_and(|f| {
-            f.project_name == id.project_name
-                && f.disc_ordinal == id.disc_ordinal
-                && f.session_ordinal == id.session_ordinal
-        });
+        let matches = found
+            .as_ref()
+            .is_some_and(|f| f.same_disc(id) && f.session_ordinal == id.session_ordinal);
         if matches {
             return Ok(());
         }
         Err(BurnError::PostBurnCheckFailed(format!(
             "expected identity ({}, disc {}, session {}) readable from the disc, found: {}",
             id.project_name,
-            id.disc_ordinal,
+            id.disc_name(),
             id.session_ordinal,
             match &found {
                 Some(f) => format!("Some({f})"),
@@ -250,6 +246,8 @@ mod tests {
 
     const IDENTITY_1: &str = r#"{"projectName":"photos","discOrdinal":1,"sessionOrdinal":1,"createdAt":"2026-08-30T10:00:00Z"}"#;
     const IDENTITY_2: &str = r#"{"projectName":"photos","discOrdinal":1,"sessionOrdinal":2,"createdAt":"2026-08-30T10:00:00Z"}"#;
+    /// The disc 1 twin from set B of a two-copy project, at session 1.
+    const IDENTITY_1B: &str = r#"{"projectName":"photos","discOrdinal":1,"copySet":1,"copies":2,"sessionOrdinal":1,"createdAt":"2026-08-30T10:00:00Z"}"#;
     const IDENTITY_7: &str = r#"{"projectName":"photos","discOrdinal":1,"sessionOrdinal":7,"createdAt":"2026-08-30T10:00:00Z"}"#;
 
     const BLANK: &[&str] = &["Media status : is blank", "Media space  : 500000s"];
@@ -472,6 +470,39 @@ mod tests {
             "{:?}",
             op.log()
         );
+    }
+
+    /// The twin from the other copy set is the same project, the same ordinal
+    /// and the previous session: it is still the wrong disc, and re-prompts.
+    #[test]
+    fn a_top_off_refuses_the_twin_from_another_copy_set() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = Script::new()
+            .toc(&[APPENDABLE])
+            .identities(&[Some(IDENTITY_1B)]);
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+        let op = ScriptedOperator::new(&[true, false]);
+        let image = image_of(dir.path(), 2, &[("a.txt", "hello")], false);
+        assert_eq!(image.metadata.identity.copy_set, 0);
+        let err = XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            &op,
+            &NoopSink,
+            2,
+        )
+        .burn(&image)
+        .unwrap_err();
+        assert!(matches!(err, BurnError::Aborted), "{err:?}");
+        assert!(
+            op.said(
+                "Not the expected disc: found disc 'photos' #1B at session 1. \
+                 Swap discs and confirm again."
+            ),
+            "{:?}",
+            op.log()
+        );
+        assert!(!script.ran("-commit"), "nothing is written to the twin");
     }
 
     /// A top-off is accepted only when the disc identifies as this project,

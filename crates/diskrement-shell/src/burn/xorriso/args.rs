@@ -78,8 +78,8 @@ pub fn version() -> Vec<String> {
 }
 
 /// An ISO volume id: uppercase, `[A-Z0-9_]`, at most 32 characters.
-pub fn volid(project_name: &str, disc_ordinal: u32) -> String {
-    format!("{project_name}_DISC_{disc_ordinal}")
+pub fn volid(project_name: &str, disc_name: &str) -> String {
+    format!("{project_name}_DISC_{disc_name}")
         .to_uppercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
@@ -221,8 +221,13 @@ mod tests {
 
     /// An ISO volume id is uppercase `[A-Z0-9_]`, at most 32 characters.
     #[test]
+    fn the_volume_id_carries_the_set_letter() {
+        assert_eq!(volid("photos", "3B"), "PHOTOS_DISC_3B");
+    }
+
+    #[test]
     fn volid_uppercases_replaces_and_truncates() {
-        assert_eq!(volid("my photos!", 3), "MY_PHOTOS__DISC_3");
-        assert_eq!(volid(&"x".repeat(40), 1).len(), 32);
+        assert_eq!(volid("my photos!", "3"), "MY_PHOTOS__DISC_3");
+        assert_eq!(volid(&"x".repeat(40), "1").len(), 32);
     }
 }

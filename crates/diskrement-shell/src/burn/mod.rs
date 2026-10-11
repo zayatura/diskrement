@@ -22,29 +22,53 @@ pub mod testkit;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use diskrement_core::{ContentHash, RelPath, ScannedFile, SessionManifest};
+use diskrement_core::{ContentHash, DiscKey, RelPath, ScannedFile, SessionManifest};
 
 use crate::catalog::model::ArchivePointer;
 
 /// Who this disc is, as written to `/.diskrement/project.json`.
+///
+/// `copies` is the project's copy count, so a single disc can say "I am 1B of
+/// 2" without the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscIdentity {
     pub project_name: String,
     pub disc_ordinal: u32,
+    pub copy_set: u32,
+    pub copies: u32,
     pub session_ordinal: u32,
     pub created_at: DateTime<Utc>,
+}
+
+impl DiscIdentity {
+    pub fn disc(&self) -> DiscKey {
+        DiscKey::new(self.disc_ordinal, self.copy_set)
+    }
+
+    /// `3` or `3B` — see `DiscKey::name`.
+    pub fn disc_name(&self) -> String {
+        self.disc().name(self.copies)
+    }
+
+    /// The same physical disc series member: project, ordinal and copy set.
+    /// The session is deliberately not compared.
+    pub fn same_disc(&self, other: &DiscIdentity) -> bool {
+        self.project_name == other.project_name && self.disc() == other.disc()
+    }
 }
 
 /// Scala's case-class `toString`, reproduced because it is interpolated into
 /// `PostBurnCheckFailed`'s detail and into the verifier's re-prompt line
 /// (spec §3.2: output wording is contract outside clap's argument errors).
+/// At `copies = 1` it reads as it always has; otherwise the ordinal slot
+/// carries the disc name (`1B`).
 impl std::fmt::Display for DiscIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "DiscIdentity({},{},{},{})",
             self.project_name,
-            self.disc_ordinal,
+            self.disc_name(),
             self.session_ordinal,
             crate::catalog::time::format(&self.created_at)
         )
@@ -180,5 +204,39 @@ impl Burner<'_> {
             Burner::Simulated(b) => b.burn(image),
             Burner::Real(b) => b.burn(image),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(ordinal: u32, copy_set: u32, copies: u32) -> DiscIdentity {
+        DiscIdentity {
+            project_name: "photos".to_string(),
+            disc_ordinal: ordinal,
+            copy_set,
+            copies,
+            session_ordinal: 2,
+            created_at: crate::catalog::time::parse("2026-08-30T10:00:00Z").unwrap(),
+        }
+    }
+
+    #[test]
+    fn twins_are_different_discs() {
+        assert!(!id(1, 0, 2).same_disc(&id(1, 1, 2)));
+        assert!(id(1, 1, 2).same_disc(&id(1, 1, 2)));
+    }
+
+    #[test]
+    fn the_identity_displays_with_the_disc_name() {
+        assert_eq!(
+            id(1, 0, 1).to_string(),
+            "DiscIdentity(photos,1,2,2026-08-30T10:00:00Z)"
+        );
+        assert_eq!(
+            id(1, 1, 2).to_string(),
+            "DiscIdentity(photos,1B,2,2026-08-30T10:00:00Z)"
+        );
     }
 }

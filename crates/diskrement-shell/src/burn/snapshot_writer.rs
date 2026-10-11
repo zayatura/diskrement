@@ -53,6 +53,8 @@ mod tests {
             identity: DiscIdentity {
                 project_name: "p".to_string(),
                 disc_ordinal: 2,
+                copy_set: 0,
+                copies: 1,
                 session_ordinal: 1,
                 created_at: chrono::Utc.timestamp_opt(1_757_100_066, 0).unwrap(),
             },

@@ -287,7 +287,7 @@ impl<'a> Pipeline<'a> {
             &contents,
             report.tombstones.clone(),
         );
-        let label = format!("{name} disc {}", report.disc.ordinal);
+        let label = format!("{name} disc {}", report.disc.key().name(p.copies));
         let update = CatalogUpdate {
             project_id: p.id,
             finalize_disc_ordinals: Vec::new(),
@@ -321,13 +321,15 @@ impl<'a> Pipeline<'a> {
                 .paths
                 .work_dir
                 .join("staging")
-                .join(format!("disc-{}", report.disc.ordinal)),
+                .join(format!("disc-{}", report.disc.key().name(p.copies))),
             snapshot_root: snap_root.clone(),
             files: report.disc.files.clone(),
             metadata: DiscMetadata {
                 identity: DiscIdentity {
                     project_name: name.to_string(),
                     disc_ordinal: report.disc.ordinal,
+                    copy_set: report.disc.copy_set,
+                    copies: p.copies,
                     session_ordinal: sess_ord,
                     created_at: now,
                 },
@@ -483,7 +485,8 @@ impl<'a> Pipeline<'a> {
             .map_err(Self::failed)?;
         let expectation = DiscExpectation {
             project_name: p.name.clone(),
-            disc_ordinal: ordinal,
+            disc: DiscKey::new(ordinal, 0),
+            disc_name: DiscKey::new(ordinal, 0).name(p.copies),
             latest_session,
             visible: recorded.visible,
             superseded: recorded.superseded,

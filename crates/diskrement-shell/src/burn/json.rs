@@ -106,11 +106,21 @@ pub fn to_pretty<T: Serialize>(value: &T) -> String {
 
 // --- project.json -------------------------------------------------------
 
+fn one() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectJson {
     pub project_name: String,
     pub disc_ordinal: u32,
+    /// Absent on discs written before copy sets existed: those are set A of a
+    /// single-copy project.
+    #[serde(default)]
+    pub copy_set: u32,
+    #[serde(default = "one")]
+    pub copies: u32,
     pub session_ordinal: u32,
     pub created_at: String,
 }
@@ -120,6 +130,8 @@ impl ProjectJson {
         ProjectJson {
             project_name: id.project_name.clone(),
             disc_ordinal: id.disc_ordinal,
+            copy_set: id.copy_set,
+            copies: id.copies,
             session_ordinal: id.session_ordinal,
             created_at: time::format(&id.created_at),
         }
@@ -131,6 +143,8 @@ impl ProjectJson {
         Ok(DiscIdentity {
             project_name: self.project_name.clone(),
             disc_ordinal: self.disc_ordinal,
+            copy_set: self.copy_set,
+            copies: self.copies,
             session_ordinal: self.session_ordinal,
             created_at,
         })
@@ -348,6 +362,8 @@ mod tests {
         let id = DiscIdentity {
             project_name: "p".to_string(),
             disc_ordinal: 1,
+            copy_set: 0,
+            copies: 1,
             session_ordinal: 1,
             created_at: Utc.timestamp_opt(1_757_100_066, 623_959_846).unwrap(),
         };
@@ -365,11 +381,41 @@ mod tests {
         let p = ProjectJson {
             project_name: "p".to_string(),
             disc_ordinal: 1,
+            copy_set: 0,
+            copies: 1,
             session_ordinal: 1,
             created_at: "not a timestamp".to_string(),
         };
         let err = p.to_identity().unwrap_err();
         assert!(err.starts_with("bad createdAt in project.json:"), "{err}");
+    }
+
+    #[test]
+    fn project_json_records_the_copy_set_and_copies() {
+        let id = DiscIdentity {
+            project_name: "p".to_string(),
+            disc_ordinal: 2,
+            copy_set: 1,
+            copies: 2,
+            session_ordinal: 1,
+            created_at: Utc.timestamp_opt(1_757_100_066, 0).unwrap(),
+        };
+        let rendered = to_pretty(&ProjectJson::from(&id));
+        assert!(rendered.contains("\"copySet\" : 1"), "{rendered}");
+        assert!(rendered.contains("\"copies\" : 2"), "{rendered}");
+        let parsed: ProjectJson = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed.to_identity().unwrap(), id);
+    }
+
+    #[test]
+    fn a_project_json_without_copy_fields_is_set_a_of_one() {
+        let old = "{\"projectName\":\"p\",\"discOrdinal\":1,\"sessionOrdinal\":1,\
+                   \"createdAt\":\"2026-08-30T10:00:00Z\"}";
+        let id = serde_json::from_str::<ProjectJson>(old)
+            .unwrap()
+            .to_identity()
+            .unwrap();
+        assert_eq!((id.copy_set, id.copies), (0, 1));
     }
 
     #[test]
