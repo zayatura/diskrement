@@ -22,29 +22,61 @@ pub mod testkit;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use diskrement_core::{ContentHash, RelPath, ScannedFile, SessionManifest};
+use diskrement_core::{ContentHash, DiscKey, RelPath, ScannedFile, SessionManifest, MAX_COPIES};
 
 use crate::catalog::model::ArchivePointer;
 
 /// Who this disc is, as written to `/.diskrement/project.json`.
+///
+/// `copies` is the project's copy count, so a single disc can say "I am 1B of
+/// 2" without the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscIdentity {
     pub project_name: String,
     pub disc_ordinal: u32,
+    pub copy_set: u32,
+    pub copies: u32,
     pub session_ordinal: u32,
     pub created_at: DateTime<Utc>,
+}
+
+impl DiscIdentity {
+    pub fn disc(&self) -> DiscKey {
+        DiscKey::new(self.disc_ordinal, self.copy_set)
+    }
+
+    /// `3` or `3B` — see `DiscKey::name`.
+    ///
+    /// Identities are also read off media, where a corrupt `project.json` can
+    /// carry a copy set with no letter (`>= MAX_COPIES`). `DiscKey::name`
+    /// panics on that; here it renders as `<ordinal>?<copy set>` (`3?26`), so
+    /// the burner describes the wrong disc and re-prompts instead of dying.
+    pub fn disc_name(&self) -> String {
+        if self.copies > 1 && self.copy_set >= MAX_COPIES {
+            return format!("{}?{}", self.disc_ordinal, self.copy_set);
+        }
+        self.disc().name(self.copies)
+    }
+
+    /// The same physical disc series member: project, ordinal and copy set.
+    /// The session is deliberately not compared.
+    pub fn same_disc(&self, other: &DiscIdentity) -> bool {
+        self.project_name == other.project_name && self.disc() == other.disc()
+    }
 }
 
 /// Scala's case-class `toString`, reproduced because it is interpolated into
 /// `PostBurnCheckFailed`'s detail and into the verifier's re-prompt line
 /// (spec §3.2: output wording is contract outside clap's argument errors).
+/// At `copies = 1` it reads as it always has; otherwise the ordinal slot
+/// carries the disc name (`1B`).
 impl std::fmt::Display for DiscIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "DiscIdentity({},{},{},{})",
             self.project_name,
-            self.disc_ordinal,
+            self.disc_name(),
             self.session_ordinal,
             crate::catalog::time::format(&self.created_at)
         )
@@ -180,5 +212,51 @@ impl Burner<'_> {
             Burner::Simulated(b) => b.burn(image),
             Burner::Real(b) => b.burn(image),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(ordinal: u32, copy_set: u32, copies: u32) -> DiscIdentity {
+        DiscIdentity {
+            project_name: "photos".to_string(),
+            disc_ordinal: ordinal,
+            copy_set,
+            copies,
+            session_ordinal: 2,
+            created_at: crate::catalog::time::parse("2026-08-30T10:00:00Z").unwrap(),
+        }
+    }
+
+    #[test]
+    fn twins_are_different_discs() {
+        assert!(!id(1, 0, 2).same_disc(&id(1, 1, 2)));
+        assert!(id(1, 1, 2).same_disc(&id(1, 1, 2)));
+    }
+
+    /// A corrupt `project.json` read off media must not panic the burner:
+    /// it is just the wrong disc, to be described and re-prompted.
+    #[test]
+    fn a_copy_set_without_a_letter_still_has_a_name() {
+        assert_eq!(id(3, 26, 2).disc_name(), "3?26");
+        assert_eq!(id(3, u32::MAX, 2).disc_name(), format!("3?{}", u32::MAX));
+        assert_eq!(
+            id(1, 30, 2).to_string(),
+            "DiscIdentity(photos,1?30,2,2026-08-30T10:00:00Z)"
+        );
+    }
+
+    #[test]
+    fn the_identity_displays_with_the_disc_name() {
+        assert_eq!(
+            id(1, 0, 1).to_string(),
+            "DiscIdentity(photos,1,2,2026-08-30T10:00:00Z)"
+        );
+        assert_eq!(
+            id(1, 1, 2).to_string(),
+            "DiscIdentity(photos,1B,2,2026-08-30T10:00:00Z)"
+        );
     }
 }

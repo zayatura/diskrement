@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use diskrement_core::{ContentHash, DiscStatus, DiscType, ManifestChangeKind, RelPath};
+use diskrement_core::{ContentHash, DiscKey, DiscStatus, DiscType, ManifestChangeKind, RelPath};
 
 /// Primary key of a project row (a SQLite rowid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,8 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
 }
 
-/// One file written this run: its identity, where it landed, and which copy.
+/// One file written this run: its identity and where it landed. Its
+/// `copy_index` is its disc's copy set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileWrite {
     pub rel_path: RelPath,
@@ -47,7 +48,6 @@ pub struct FileWrite {
     pub size_bytes: u64,
     pub mtime: DateTime<Utc>,
     pub disc_path: String,
-    pub copy_index: u32,
 }
 
 /// One session burned onto one disc this run.
@@ -61,6 +61,9 @@ pub struct SessionWrite {
     pub manifest_hash: String,
     pub added: Vec<FileWrite>,
     pub modified: Vec<FileWrite>,
+    /// Further copies of versions already recorded: one `placement` each, no
+    /// new `file_version`, no `change_record`.
+    pub copied: Vec<FileWrite>,
     pub deleted: Vec<RelPath>,
 }
 
@@ -71,6 +74,8 @@ pub struct SessionWrite {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscWrite {
     pub ordinal: u32,
+    /// The copy set of the disc (0 = `A`). Persisted only when `is_new`.
+    pub copy_set: u32,
     pub is_new: bool,
     pub disc_type: DiscType,
     pub usable_bytes: u64,
@@ -85,7 +90,7 @@ pub struct DiscWrite {
 pub struct CatalogUpdate {
     pub project_id: ProjectId,
     /// Pre-existing OPEN discs to flip to FINALIZED.
-    pub finalize_disc_ordinals: Vec<u32>,
+    pub finalize_disc_ordinals: Vec<DiscKey>,
     pub discs: Vec<DiscWrite>,
 }
 
@@ -127,10 +132,10 @@ impl std::str::FromStr for SessionState {
     }
 }
 
-/// A persisted session row, joined to its disc's ordinal for convenience.
+/// A persisted session row, joined to its disc's key for convenience.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
-    pub disc_ordinal: u32,
+    pub disc: DiscKey,
     pub ordinal: u32,
     pub state: SessionState,
     pub burned_at: Option<DateTime<Utc>>,
@@ -156,6 +161,7 @@ pub struct ArchivePointer {
     pub content_hash: ContentHash,
     pub size_bytes: u64,
     pub disc_ordinal: u32,
+    pub copy_set: u32,
     pub session_ordinal: u32,
     pub disc_path: String,
     pub kind: ManifestChangeKind,
@@ -196,7 +202,7 @@ impl std::fmt::Display for VersionStatus {
 pub struct FileHistoryEntry {
     pub content_hash: ContentHash,
     pub size_bytes: u64,
-    pub disc_ordinal: u32,
+    pub disc: DiscKey,
     pub session_ordinal: u32,
     pub status: VersionStatus,
 }
@@ -229,7 +235,8 @@ pub struct LostVersionEntry {
 }
 
 /// A live file whose only burned copy was on the dead disc; the next
-/// scan/plan/burn writes it again from the source.
+/// scan/plan/burn writes it again from the source. Also used for
+/// `LostReport::degraded`, where the file still has a live copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReburnEntry {
     pub rel_path: RelPath,
@@ -237,13 +244,20 @@ pub struct ReburnEntry {
     pub size_bytes: u64,
 }
 
-/// What marking a disc dead cost. Recorded in `lost_version`, rendered by the
-/// CLI.
+/// What marking a disc dead cost. `lost` and `reburn` are recorded in
+/// `lost_version`; `degraded` and `superseded_survivors` are derived and only
+/// reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LostReport {
-    pub disc_ordinal: u32,
+    pub disc: DiscKey,
     pub lost: Vec<LostVersionEntry>,
     pub reburn: Vec<ReburnEntry>,
+    /// Current versions that still have a live copy on another disc, but none
+    /// in the dying disc's copy set. The next cycle restores that set's copy.
+    pub degraded: Vec<ReburnEntry>,
+    /// Superseded or deleted versions that still have a live copy elsewhere.
+    /// They are not lost, and not restored either: the source moved past them.
+    pub superseded_survivors: usize,
 }
 
 #[cfg(test)]

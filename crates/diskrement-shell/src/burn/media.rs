@@ -298,6 +298,8 @@ mod tests {
         let id = DiscIdentity {
             project_name: "photos".to_string(),
             disc_ordinal: 1,
+            copy_set: 0,
+            copies: 1,
             session_ordinal: 2,
             created_at: crate::catalog::time::parse("2026-08-30T10:00:00Z").unwrap(),
         };

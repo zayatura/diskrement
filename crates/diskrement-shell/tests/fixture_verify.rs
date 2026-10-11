@@ -6,6 +6,7 @@
 
 mod support;
 
+use diskrement_core::DiscArg;
 use diskrement_shell::burn::verifier::{StagingVerifier, Verifier};
 use diskrement_shell::catalog::model::{ProjectId, SessionState};
 use diskrement_shell::catalog::Catalog;
@@ -48,7 +49,14 @@ fn sweep(env: &mut Env, disc: Option<i64>) -> Result<Vec<VerifyReport>, Pipeline
         },
         &NoopSink,
     );
-    pipeline.verify("p", disc, &verifier)
+    pipeline.verify(
+        "p",
+        disc.map(|o| DiscArg {
+            ordinal: o,
+            copy_set: None,
+        }),
+        &verifier,
+    )
 }
 
 fn discs_in(env: &Env, state: SessionState) -> Vec<u32> {
@@ -56,7 +64,7 @@ fn discs_in(env: &Env, state: SessionState) -> Vec<u32> {
         .sessions_by_state(ProjectId(1), state)
         .expect("sessions")
         .iter()
-        .map(|s| s.disc_ordinal)
+        .map(|s| s.disc.ordinal)
         .collect()
 }
 
@@ -70,7 +78,7 @@ fn a_sweep_over_the_corpus_staging_trees_is_clean_on_every_disc() {
     assert_eq!(
         reports
             .iter()
-            .map(|r| (r.disc_ordinal, r.files_checked, r.skipped))
+            .map(|r| (r.disc.ordinal, r.files_checked, r.skipped))
             .collect::<Vec<_>>(),
         vec![(1, 1, false), (2, 1, false)]
     );
@@ -105,7 +113,7 @@ fn a_corrupted_corpus_payload_is_caught_and_blocks_the_transition() {
     let reports = sweep(&mut env, None).expect("verify succeeds");
     let disc2 = reports
         .iter()
-        .find(|r| r.disc_ordinal == 2)
+        .find(|r| r.disc.ordinal == 2)
         .expect("disc 2 is in the sweep");
     assert_eq!(
         disc2.mismatches,
@@ -126,7 +134,7 @@ fn a_sweep_skips_a_dead_disc_without_mentioning_it() {
     let mut env = env("catalog/08-after-mark-dead.sqlite", "work/02-after-plan3");
     let reports = sweep(&mut env, None).expect("verify succeeds");
     assert_eq!(
-        reports.iter().map(|r| r.disc_ordinal).collect::<Vec<_>>(),
+        reports.iter().map(|r| r.disc.ordinal).collect::<Vec<_>>(),
         vec![1, 2],
         "disc 3 is dead and must not appear"
     );
@@ -148,7 +156,10 @@ fn a_sweep_skips_a_dead_disc_without_mentioning_it() {
 fn naming_the_dead_disc_is_an_error_rather_than_a_silent_success() {
     let mut env = env("catalog/08-after-mark-dead.sqlite", "work/02-after-plan3");
     let err = sweep(&mut env, Some(3)).expect_err("a dead disc is refused");
-    assert!(matches!(err, PipelineError::DiscIsDead(3)), "{err}");
+    assert!(
+        matches!(err, PipelineError::DiscIsDead(ref s) if s == "3"),
+        "{err}"
+    );
     assert_eq!(err.to_string(), "disc 3 is marked dead");
     assert_eq!(err.exit_code(), 2);
 }
@@ -158,6 +169,9 @@ fn naming_the_dead_disc_is_an_error_rather_than_a_silent_success() {
 fn naming_an_ordinal_the_corpus_never_had_is_unknown_disc() {
     let mut env = env("catalog/05-after-burn2.sqlite", "work/02-after-plan3");
     let err = sweep(&mut env, Some(99)).expect_err("an unknown disc is refused");
-    assert!(matches!(err, PipelineError::UnknownDisc(99)), "{err}");
+    assert!(
+        matches!(err, PipelineError::UnknownDisc(ref s) if s == "99"),
+        "{err}"
+    );
     assert_eq!(err.exit_code(), 2);
 }

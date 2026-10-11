@@ -73,27 +73,22 @@ pub enum PipelineError {
     /// verifier's evidence.
     #[error("staged plan is stale: {0} (re-run plan)")]
     StalePlan(String),
-    /// A `--disc` ordinal that names no disc in this project.
-    ///
-    /// The ordinal is `i64` because zio-cli let a negative value through to
-    /// the domain, and the exit ladder — not clap's argument parser — is the
-    /// contract for what happens next.
+    /// A `--disc` or `mark-dead` argument that names no disc in this project.
+    /// Carries the argument as typed (normalised to an upper-case letter), so
+    /// `-1` and `9C` are echoed back. A negative `--disc` reaches the domain
+    /// (zio-cli let it through), and the exit ladder — not clap's argument
+    /// parser — is the contract for what happens next.
     #[error("no disc with ordinal {0}")]
-    UnknownDisc(i64),
-    /// A `--disc` ordinal that names a disc marked dead. A *sweep* skips dead
-    /// discs quietly; naming one is an assertion of intent, and answering it
-    /// with a reassuring exit 0 would be a lie.
+    UnknownDisc(String),
+    /// A `--disc` naming a disc marked dead. A *sweep* skips dead discs
+    /// quietly; naming one is an assertion of intent, and answering it with a
+    /// reassuring exit 0 would be a lie. Carries the disc's name (`3`, `3B`).
     #[error("disc {0} is marked dead")]
-    DiscIsDead(i64),
+    DiscIsDead(String),
     /// A `disc mark-dead` naming a disc that already carries a `MARKED_DEAD`
-    /// event.
-    ///
-    /// The ordinal is `u32`, not the `i64` `UnknownDisc` and `DiscIsDead`
-    /// carry: `disc mark-dead`'s ordinal is validated in the *parser*
-    /// (`Commands.scala`), so a non-positive value never reaches the domain.
-    /// `verify --disc`'s does, which is why that one stays signed.
+    /// event. Carries the disc's name (`3`, `3B`).
     #[error("disc {0} is already marked dead")]
-    DiscAlreadyDead(u32),
+    DiscAlreadyDead(String),
     /// Surfaced by `plan` in its report and refused by `burn`: the
     /// two-stage oversize check.
     #[error(
@@ -123,10 +118,102 @@ pub enum PipelineError {
     /// Renders its cause's message and nothing else (`PipelineError.Burn`).
     #[error(transparent)]
     Burn(#[from] crate::burn::BurnError),
+    /// A multi-disc burn that committed some discs and then failed. The cause
+    /// decides the exit code — an aborted prompt still exits 0 — and also the
+    /// advice: a stale plan needs a re-plan (never `reset`, which deletes the
+    /// staging the verifier needs), anything else a re-run of `burn`.
+    ///
+    /// - `committed`: discs the catalog now holds, in burn order.
+    /// - `unrecorded`: the failing disc, when the failure came after media was
+    ///   (or may have been) written — the catalog does not know it, so it is
+    ///   neither committed nor "not written".
+    /// - `pending`: the discs not yet attempted. It never includes the
+    ///   failing disc when that disc is `unrecorded`, and it is empty when the
+    ///   failure came after every disc had committed (only the work-dir
+    ///   cleanup failed).
+    #[error("{cause} — {}", partial_burn_tail(.committed, .unrecorded, .pending, .cause))]
+    PartialBurn {
+        committed: Vec<String>,
+        unrecorded: Option<UnrecordedDisc>,
+        pending: Vec<String>,
+        cause: Box<PipelineError>,
+    },
     /// Unexpected-but-handled failure: rendered as
     /// `internal error: <detail> (this is a bug)`, exit 5.
     #[error("internal error: {0} (this is a bug)")]
     Failed(String),
+}
+
+/// A disc a `PartialBurn` wrote, or may have written, without recording it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrecordedDisc {
+    pub name: String,
+    /// `true` when the burner reported success and only the commit failed;
+    /// `false` when the burner failed after it may already have touched the
+    /// media (a failed xorriso run, a failed post-burn check).
+    pub surely_written: bool,
+}
+
+impl UnrecordedDisc {
+    pub fn written(name: impl Into<String>) -> Self {
+        UnrecordedDisc {
+            name: name.into(),
+            surely_written: true,
+        }
+    }
+
+    pub fn maybe_written(name: impl Into<String>) -> Self {
+        UnrecordedDisc {
+            name: name.into(),
+            surely_written: false,
+        }
+    }
+}
+
+/// What to do after a `PartialBurn`, decided by its cause.
+fn partial_burn_advice(cause: &PipelineError) -> &'static str {
+    match cause {
+        // The staged plan no longer holds; a re-plan turns the committed
+        // discs' files into catch-up copies for the lagging sets.
+        PipelineError::StalePlan(_) => "re-run plan, then burn",
+        // `plan` cannot recreate the snapshot; only a fresh scan does.
+        PipelineError::SnapshotMissing(_) => "re-run scan --force, then plan and burn",
+        _ => "re-run burn",
+    }
+}
+
+/// Everything a `PartialBurn` says after its cause:
+/// `"1A committed; 1B not written (re-run burn)"`. Parts that are empty are
+/// left out. The single source of the advice text: the error's `Display` and
+/// the CLI's `Aborted.` line both use it.
+pub fn partial_burn_tail(
+    committed: &[String],
+    unrecorded: &Option<UnrecordedDisc>,
+    pending: &[String],
+    cause: &PipelineError,
+) -> String {
+    let mut parts = vec![format!("{} committed", committed.join(", "))];
+    match unrecorded {
+        Some(d) if d.surely_written => {
+            parts.push(format!("{} written but not recorded", d.name));
+        }
+        Some(d) => parts.push(format!(
+            "{} may have been written but was not recorded",
+            d.name
+        )),
+        None => {}
+    }
+    if !pending.is_empty() {
+        parts.push(format!("{} not written", pending.join(", ")));
+    }
+    // After every disc committed, only the work-dir cleanup failed: there is
+    // nothing to re-burn, and "re-run burn" would only find no staged plan.
+    let advice = if pending.is_empty() && unrecorded.is_none() {
+        "nothing is left to write"
+    } else {
+        partial_burn_advice(cause)
+    };
+    format!("{} ({advice})", parts.join("; "))
 }
 
 /// `e`'s message followed by each of its causes, joined with `": "`.
@@ -172,6 +259,7 @@ impl PipelineError {
             // other burn failure is 6 (media/burner).
             PipelineError::Burn(crate::burn::BurnError::Aborted) => 0,
             PipelineError::Burn(_) => 6,
+            PipelineError::PartialBurn { cause, .. } => cause.exit_code(),
             PipelineError::Failed(_) => 5,
         }
     }
@@ -232,6 +320,108 @@ mod tests {
         assert_eq!(
             PipelineError::Failed("project already exists: p".into()).to_string(),
             "internal error: project already exists: p (this is a bug)"
+        );
+    }
+
+    fn partial(cause: PipelineError) -> PipelineError {
+        PipelineError::PartialBurn {
+            committed: vec!["1A".into()],
+            unrecorded: None,
+            pending: vec!["1B".into()],
+            cause: Box::new(cause),
+        }
+    }
+
+    #[test]
+    fn a_partial_burn_carries_its_causes_exit_code_and_names_both_halves() {
+        let media = partial(PipelineError::Burn(crate::burn::BurnError::NoMedia(
+            "/dev/sr0".into(),
+        )));
+        assert_eq!(media.exit_code(), 6);
+        assert_eq!(
+            media.to_string(),
+            "no disc in /dev/sr0 — 1A committed; 1B not written (re-run burn)"
+        );
+        assert_eq!(
+            partial(PipelineError::Burn(crate::burn::BurnError::Aborted)).exit_code(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_partial_burn_on_a_stale_plan_advises_re_planning_never_reset() {
+        let stale = partial(PipelineError::StalePlan("disc 1B was marked dead".into()));
+        assert_eq!(stale.exit_code(), 2);
+        let text = stale.to_string();
+        assert!(
+            text.ends_with("1A committed; 1B not written (re-run plan, then burn)"),
+            "{text}"
+        );
+        assert!(!text.contains("reset"), "{text}");
+        let missing = partial(PipelineError::SnapshotMissing("p".into())).to_string();
+        assert!(
+            missing.ends_with("(re-run scan --force, then plan and burn)"),
+            "{missing}"
+        );
+        assert!(!missing.contains("reset"), "{missing}");
+    }
+
+    #[test]
+    fn a_disc_written_but_not_recorded_is_not_called_unwritten() {
+        let err = PipelineError::PartialBurn {
+            committed: vec!["1A".into()],
+            unrecorded: Some(UnrecordedDisc::written("1B")),
+            pending: vec!["1C".into()],
+            cause: Box::new(PipelineError::Failed("disk full".into())),
+        };
+        assert_eq!(err.exit_code(), 5);
+        assert_eq!(
+            err.to_string(),
+            "internal error: disk full (this is a bug) — 1A committed; \
+             1B written but not recorded; 1C not written (re-run burn)"
+        );
+    }
+
+    #[test]
+    fn a_disc_the_burner_may_have_written_says_so() {
+        let err = PipelineError::PartialBurn {
+            committed: vec!["1A".into()],
+            unrecorded: Some(UnrecordedDisc::maybe_written("1B")),
+            pending: vec![],
+            cause: Box::new(PipelineError::Burn(
+                crate::burn::BurnError::PostBurnCheckFailed("unreadable".into()),
+            )),
+        };
+        assert_eq!(err.exit_code(), 6);
+        assert_eq!(
+            err.to_string(),
+            "post-burn sanity check failed: unreadable — 1A committed; \
+             1B may have been written but was not recorded (re-run burn)"
+        );
+    }
+
+    #[test]
+    fn the_partial_burn_tail_is_the_display_after_the_cause() {
+        let cause = PipelineError::Burn(crate::burn::BurnError::Aborted);
+        let tail = partial_burn_tail(&["1A".into()], &None, &["1B".into()], &cause);
+        assert_eq!(tail, "1A committed; 1B not written (re-run burn)");
+        assert_eq!(
+            partial(cause).to_string(),
+            format!("aborted by operator — {tail}")
+        );
+    }
+
+    #[test]
+    fn a_failure_after_every_disc_committed_lists_nothing_as_unwritten() {
+        let err = PipelineError::PartialBurn {
+            committed: vec!["1A".into(), "1B".into()],
+            unrecorded: None,
+            pending: vec![],
+            cause: Box::new(PipelineError::Failed("cannot clear".into())),
+        };
+        assert_eq!(
+            err.to_string(),
+            "internal error: cannot clear (this is a bug) — 1A, 1B committed (nothing is left to write)"
         );
     }
 
@@ -373,14 +563,14 @@ mod tests {
 
     #[test]
     fn disc_state_errors_are_exit_2_with_their_messages() {
-        assert_eq!(PipelineError::UnknownDisc(9).exit_code(), 2);
-        assert_eq!(PipelineError::DiscIsDead(3).exit_code(), 2);
+        assert_eq!(PipelineError::UnknownDisc("9".into()).exit_code(), 2);
+        assert_eq!(PipelineError::DiscIsDead("3".into()).exit_code(), 2);
         assert_eq!(
-            PipelineError::UnknownDisc(99).to_string(),
+            PipelineError::UnknownDisc("99".into()).to_string(),
             "no disc with ordinal 99"
         );
         assert_eq!(
-            PipelineError::DiscIsDead(3).to_string(),
+            PipelineError::DiscIsDead("3".into()).to_string(),
             "disc 3 is marked dead"
         );
     }
@@ -390,7 +580,7 @@ mod tests {
     /// Verified against the staged Scala launcher.
     #[test]
     fn a_negative_ordinal_is_a_lookup_failure_not_an_argument_error() {
-        let e = PipelineError::UnknownDisc(-1);
+        let e = PipelineError::UnknownDisc("-1".into());
         assert_eq!(e.to_string(), "no disc with ordinal -1");
         assert_eq!(e.exit_code(), 2);
     }
@@ -401,9 +591,9 @@ mod tests {
     /// raises this instead.
     #[test]
     fn marking_a_dead_disc_again_is_exit_2_with_its_own_message() {
-        assert_eq!(PipelineError::DiscAlreadyDead(1).exit_code(), 2);
+        assert_eq!(PipelineError::DiscAlreadyDead("1".into()).exit_code(), 2);
         assert_eq!(
-            PipelineError::DiscAlreadyDead(1).to_string(),
+            PipelineError::DiscAlreadyDead("1".into()).to_string(),
             "disc 1 is already marked dead"
         );
     }
@@ -415,9 +605,9 @@ mod tests {
     #[test]
     fn the_three_disc_errors_read_differently_at_the_same_exit_code() {
         let messages = [
-            PipelineError::UnknownDisc(3).to_string(),
-            PipelineError::DiscIsDead(3).to_string(),
-            PipelineError::DiscAlreadyDead(3).to_string(),
+            PipelineError::UnknownDisc("3".into()).to_string(),
+            PipelineError::DiscIsDead("3".into()).to_string(),
+            PipelineError::DiscAlreadyDead("3".into()).to_string(),
         ];
         assert_eq!(
             messages,
@@ -428,9 +618,9 @@ mod tests {
             ]
         );
         assert!([
-            PipelineError::UnknownDisc(3).exit_code(),
-            PipelineError::DiscIsDead(3).exit_code(),
-            PipelineError::DiscAlreadyDead(3).exit_code(),
+            PipelineError::UnknownDisc("3".into()).exit_code(),
+            PipelineError::DiscIsDead("3".into()).exit_code(),
+            PipelineError::DiscAlreadyDead("3".into()).exit_code(),
         ]
         .iter()
         .all(|c| *c == 2));

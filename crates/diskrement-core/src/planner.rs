@@ -54,12 +54,18 @@ impl std::str::FromStr for DiscStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscState {
     pub ordinal: u32,
+    /// Which copy set the disc belongs to (0 = `A`).
+    pub copy_set: u32,
     pub status: DiscStatus,
     pub usable_bytes: u64,
     pub used_bytes: u64,
 }
 
 impl DiscState {
+    pub fn key(&self) -> crate::model::DiscKey {
+        crate::model::DiscKey::new(self.ordinal, self.copy_set)
+    }
+
     /// Remaining space, saturating at zero.
     ///
     /// Reporting only. The planner decides whether a file fits with an
@@ -74,6 +80,8 @@ impl DiscState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedDisc {
     pub ordinal: u32,
+    /// The copy set this disc belongs to (0 = `A`).
+    pub copy_set: u32,
     pub is_new: bool,
     pub will_finalize: bool,
     pub files: Vec<ScannedFile>,
@@ -82,6 +90,10 @@ pub struct PlannedDisc {
 }
 
 impl PlannedDisc {
+    pub fn key(&self) -> crate::model::DiscKey {
+        crate::model::DiscKey::new(self.ordinal, self.copy_set)
+    }
+
     pub fn added_bytes(&self) -> u64 {
         self.files.iter().map(|f| f.size_bytes).sum()
     }
@@ -138,24 +150,41 @@ impl Bin {
     }
 }
 
-/// Plan the next burn: top off the open disc, then spill onto fresh discs.
-///
-/// Deterministic — the result depends only on the set of placeable files, not
-/// on their order, and not on how they were split between `added` and
-/// `modified`.
+/// Plan the next burn of a single-copy project: top off the open disc, then
+/// spill onto fresh discs. Exactly `plan_set` for set `A`, with the files to
+/// place taken from `added ∪ modified` and the tombstones from `deleted`.
 pub fn plan(changes: &ChangeSet, discs: &[DiscState], new_disc_cap: Capacity) -> BurnPlan {
-    let mut to_place: Vec<ScannedFile> = changes
+    let to_place: Vec<ScannedFile> = changes
         .added
         .iter()
         .chain(changes.modified.iter())
         .cloned()
         .collect();
+    plan_set(0, &to_place, &changes.deleted, discs, new_disc_cap)
+}
+
+/// Plan one copy set: top off that set's newest open disc, then spill onto
+/// fresh discs numbered within the set.
+///
+/// `discs` may hold every set's discs; only those in `copy_set` are
+/// considered. Deterministic — the result depends only on the set of files to
+/// place, not on their order.
+pub fn plan_set(
+    copy_set: u32,
+    to_place: &[ScannedFile],
+    tombstones: &[RelPath],
+    discs: &[DiscState],
+    new_disc_cap: Capacity,
+) -> BurnPlan {
+    let mut to_place: Vec<ScannedFile> = to_place.to_vec();
     to_place.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    let discs: Vec<&DiscState> = discs.iter().filter(|d| d.copy_set == copy_set).collect();
 
     // The newest open disc is the one to top off. A dead or finalized disc is
     // never a candidate, however much room it appears to have.
     let existing_open = discs
         .iter()
+        .copied()
         .filter(|d| d.status == DiscStatus::Open)
         .max_by_key(|d| d.ordinal);
     let max_ordinal = discs.iter().map(|d| d.ordinal).max().unwrap_or(0);
@@ -221,6 +250,7 @@ pub fn plan(changes: &ChangeSet, discs: &[DiscState], new_disc_cap: Capacity) ->
             };
             PlannedDisc {
                 ordinal,
+                copy_set,
                 is_new: b.is_new,
                 will_finalize: i != last_idx,
                 files: b.files,
@@ -234,7 +264,7 @@ pub fn plan(changes: &ChangeSet, discs: &[DiscState], new_disc_cap: Capacity) ->
 
     BurnPlan {
         discs: planned_discs,
-        tombstones: changes.deleted.clone(),
+        tombstones: tombstones.to_vec(),
         oversized,
     }
 }
@@ -261,6 +291,7 @@ mod tests {
     fn disc_state_reports_free_bytes() {
         let d = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 100,
             used_bytes: 30,
@@ -276,6 +307,7 @@ mod tests {
         // `a_zero_byte_file_does_not_fit_an_overfull_disc` below.
         let d = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 100,
             used_bytes: 130,
@@ -288,6 +320,7 @@ mod tests {
         let f = sf("a", 25);
         let pd = PlannedDisc {
             ordinal: 2,
+            copy_set: 0,
             is_new: true,
             will_finalize: false,
             files: vec![f.clone(), f],
@@ -351,6 +384,7 @@ mod tests {
         // open disc 1: 100 usable, 90 used -> 10 free.
         let open = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 100,
             used_bytes: 90,
@@ -414,6 +448,7 @@ mod tests {
         // it keeps its ordinal, and the fresh disc takes the next one.
         let dead = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Dead,
             usable_bytes: 100,
             used_bytes: 10,
@@ -474,6 +509,7 @@ mod tests {
         // open disc, and the up-front oversize filter must know that.
         let open = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 50_000_000_000,
             used_bytes: 0,
@@ -494,6 +530,7 @@ mod tests {
         // neither. This is the second stage of the oversize check.
         let open = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 50_000_000_000,
             used_bytes: 40_000_000_000,
@@ -520,12 +557,14 @@ mod tests {
         let discs = [
             DiscState {
                 ordinal: 2,
+                copy_set: 0,
                 status: DiscStatus::Open,
                 usable_bytes: 100,
                 used_bytes: 100,
             },
             DiscState {
                 ordinal: 5,
+                copy_set: 0,
                 status: DiscStatus::Finalized,
                 usable_bytes: 100,
                 used_bytes: 100,
@@ -548,6 +587,7 @@ mod tests {
         // Open BD-R with only 5 bytes free.
         let open = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: bdr_usable,
             used_bytes: bdr_usable - 5,
@@ -583,6 +623,7 @@ mod tests {
         // existing test covers.
         let overfull = DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 100,
             used_bytes: 130,
@@ -595,6 +636,66 @@ mod tests {
         );
         assert_eq!(disc_paths(&plan.discs[1]), vec!["empty"]);
         assert_eq!(plan.discs[1].ordinal, 2);
+    }
+
+    // --- per copy set ---
+
+    fn state(ordinal: u32, copy_set: u32, status: DiscStatus, used: u64) -> DiscState {
+        DiscState {
+            ordinal,
+            copy_set,
+            status,
+            usable_bytes: 100,
+            used_bytes: used,
+        }
+    }
+
+    #[test]
+    fn plan_set_tops_off_only_its_own_sets_open_disc() {
+        let discs = [
+            state(1, 0, DiscStatus::Open, 10),
+            state(1, 1, DiscStatus::Open, 50),
+        ];
+        let p = plan_set(1, &[sf("a", 10)], &[], &discs, CAP100);
+        assert_eq!(p.discs.len(), 1);
+        assert_eq!((p.discs[0].ordinal, p.discs[0].copy_set), (1, 1));
+        assert!(!p.discs[0].is_new);
+        assert_eq!(p.discs[0].prior_used_bytes, 50);
+    }
+
+    #[test]
+    fn plan_set_numbers_fresh_discs_within_its_own_set() {
+        // Set A already reached disc 3; set B has only disc 1, which is sealed.
+        let discs = [
+            state(3, 0, DiscStatus::Open, 0),
+            state(1, 1, DiscStatus::Finalized, 100),
+        ];
+        let p = plan_set(1, &[sf("a", 10)], &[], &discs, CAP100);
+        assert_eq!((p.discs[0].ordinal, p.discs[0].copy_set), (2, 1));
+        assert!(p.discs[0].is_new);
+    }
+
+    #[test]
+    fn plan_set_stamps_every_planned_disc_with_its_set() {
+        let p = plan_set(2, &[sf("a", 60), sf("b", 60)], &[], &[], CAP100);
+        assert_eq!(p.discs.len(), 2);
+        assert!(p.discs.iter().all(|d| d.copy_set == 2));
+        assert_eq!(p.discs[0].ordinal, 1);
+        assert_eq!(p.discs[1].ordinal, 2);
+    }
+
+    #[test]
+    fn plan_is_plan_set_for_set_a() {
+        let cs = ChangeSet {
+            added: vec![sf("a", 10)],
+            modified: vec![sf("b", 10)],
+            deleted: vec![RelPath("gone".to_string())],
+            ..ChangeSet::empty()
+        };
+        assert_eq!(
+            plan(&cs, &[], CAP100),
+            plan_set(0, &[sf("a", 10), sf("b", 10)], &cs.deleted, &[], CAP100)
+        );
     }
 
     use crate::testutil::{planner_input_strategy, reshuffled_planner_input_strategy};
@@ -610,6 +711,33 @@ mod tests {
     }
 
     proptest! {
+        /// Discs of other sets are invisible to `plan_set`: planning set 1
+        /// against a mixed list equals planning set 0 against its own discs,
+        /// apart from the stamped set.
+        #[test]
+        fn plan_set_ignores_other_sets(
+            (cs, discs, cap) in planner_input_strategy()
+        ) {
+            let to_place: Vec<ScannedFile> = placeable(&cs).into_iter().cloned().collect();
+            let mut mixed: Vec<DiscState> = discs.iter().cloned()
+                .map(|mut d| { d.copy_set = 1; d }).collect();
+            mixed.extend(discs.iter().cloned().map(|mut d| {
+                d.copy_set = 0;
+                d.status = DiscStatus::Open;
+                d
+            }));
+            let own = plan_set(0, &to_place, &[], &discs, cap);
+            let other = plan_set(1, &to_place, &[], &mixed, cap);
+            prop_assert_eq!(own.discs.len(), other.discs.len());
+            for (a, b) in own.discs.iter().zip(other.discs.iter()) {
+                prop_assert_eq!(b.copy_set, 1);
+                prop_assert_eq!(
+                    (a.ordinal, a.is_new, &a.files, a.prior_used_bytes),
+                    (b.ordinal, b.is_new, &b.files, b.prior_used_bytes)
+                );
+            }
+        }
+
         /// 1. Conservation: every placeable file is placed or oversized, once.
         #[test]
         fn every_placeable_file_is_placed_or_oversized_exactly_once(

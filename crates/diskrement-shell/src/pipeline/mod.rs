@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use diskrement_core::{
-    diff, manifest, Capacity, ChangeSet, DiscStatus, DiscType, RelPath, ScannedFile,
-    SessionManifest,
+    diff, manifest, replication, Capacity, DiscArg, DiscContents, DiscKey, DiscState, DiscStatus,
+    DiscType, PlannedDisc, RelPath, ScannedFile, SessionManifest,
 };
 
 use crate::burn::verifier::{DiscExpectation, Verifier};
@@ -22,14 +22,17 @@ use crate::catalog::model::{
     ProjectId, ProjectInit, Session, SessionState, SessionWrite,
 };
 use crate::catalog::Catalog;
-use crate::error::PipelineError;
+use crate::error::{PipelineError, UnrecordedDisc};
 use crate::fs::fingerprint_cache::FingerprintCache;
 use crate::fs::hasher;
 use crate::fs::scanner::{self, parallelism_from_env, ScanOutput};
 use crate::fs::snapshot::{self, SnapshotHandle};
 use crate::progress::ProgressSink;
 
-use reports::{BurnReport, DiscBurn, PlanReport, ScanReport, StatusReport, VerifyReport};
+use reports::{
+    BurnReport, DiscBurn, PlanReport, RemainingEstimate, ScanReport, SetPlan, StatusReport,
+    VerifyReport,
+};
 
 /// The paths a pipeline needs, resolved by the CLI (`ProjectPaths` +
 /// `CachePath` in the Scala wiring). `work_dir` for `scan`/`status` comes from
@@ -191,8 +194,8 @@ impl<'a> Pipeline<'a> {
         })
     }
 
-    /// `plan`: the staged scan plus the catalog view decide the one disc this
-    /// cycle writes (`PipelineLive.plan`). Stages `staged/plan.json` and
+    /// `plan`: the staged scan plus the catalog view decide the disc each copy
+    /// set writes this cycle (`PipelineLive.plan`). Stages `staged/plan.json` and
     /// writes **no catalog rows** — no `PLANNED` state is ever persisted; the
     /// staged plan in the work dir is the recovery unit.
     pub fn plan(
@@ -212,24 +215,35 @@ impl<'a> Pipeline<'a> {
             Capacity::from_disc_type(disc_type, p.margin_percent),
             planning::disc_bytes_from_env(),
         );
-        let report = planning::plan_from(&view, &scanned, &states, disc_type, cap, finalize);
+        let next = self.next_sessions(p.id)?;
+        let report = planning::plan_from(
+            &view,
+            &scanned,
+            &states,
+            disc_type,
+            cap,
+            finalize,
+            p.copies,
+            |disc| next.get(&disc).copied().unwrap_or(1),
+        );
         staged::write_plan(&self.paths.work_dir, &report).map_err(Self::failed)?;
         Ok(report)
     }
 
-    /// `burn`: write the staged plan's one disc, then commit its one session.
+    /// `burn`: write the staged plan's discs in set order, committing each one
+    /// as soon as it is written.
     ///
-    /// The ordering is the design (`PipelineLive.burn`). The disc tree is
-    /// staged **before** anything reaches the live catalog, and the snapshot
+    /// Per disc the ordering is the design (`PipelineLive.burn`): the disc tree
+    /// is staged **before** anything reaches the live catalog, and the snapshot
     /// embedded on the disc is the same update applied to a work-dir copy, so
-    /// the disc knows about its own session. A crash before the commit leaves
-    /// the catalog untouched and the staged plan intact — the staged plan is
-    /// the recovery unit, and no `PLANNED` row is ever persisted.
+    /// the disc knows about its own session — and about every disc this cycle
+    /// already committed. After each commit the staged plan is rewritten to the
+    /// discs still to write, so it stays the recovery unit and no `PLANNED` row
+    /// is ever persisted. A failure after at least one commit is a
+    /// `PartialBurn`; re-running `burn` resumes at the first uncommitted disc.
     ///
-    /// `now` is supplied by the caller rather than read from the clock, as
-    /// `ProjectInit::created_at` already is: it keeps the pipeline
-    /// deterministic and lets the corpus replay compare committed timestamps
-    /// exactly.
+    /// `now` is supplied by the caller rather than read from the clock: it
+    /// keeps the pipeline deterministic.
     pub fn burn(
         &mut self,
         name: &str,
@@ -240,7 +254,12 @@ impl<'a> Pipeline<'a> {
         let scanned = staged::read_scan(&self.paths.work_dir)
             .map_err(Self::failed)?
             .ok_or_else(|| PipelineError::NoStagedScan(name.to_string()))?;
-        let report = staged::read_plan(&self.paths.work_dir)
+        if staged::is_legacy_plan(&self.paths.work_dir) {
+            return Err(PipelineError::StalePlan(
+                "it was staged by an older version of diskrement".to_string(),
+            ));
+        }
+        let mut report = staged::read_plan(&self.paths.work_dir)
             .map_err(Self::failed)?
             .ok_or_else(|| PipelineError::NoStagedPlan(name.to_string()))?;
         if !report.oversized.is_empty() {
@@ -253,80 +272,220 @@ impl<'a> Pipeline<'a> {
             ));
         }
 
+        let mut done: Vec<DiscKey> = Vec::new();
+        let mut written: Vec<DiscBurn> = Vec::new();
+        let mut remaining = RemainingEstimate {
+            more_discs: 0,
+            more_files: 0,
+            more_bytes: 0,
+        };
+        // Once a disc has committed, every failure must say so: the operator
+        // has to know which discs the catalog now holds.
+        let partial = |done: &[DiscKey],
+                       unrecorded: Option<UnrecordedDisc>,
+                       pending: &[SetPlan],
+                       cause: PipelineError| {
+            if done.is_empty() {
+                return cause;
+            }
+            PipelineError::PartialBurn {
+                committed: done.iter().map(|k| k.name(p.copies)).collect(),
+                unrecorded,
+                pending: pending
+                    .iter()
+                    .map(|s| s.disc.key().name(p.copies))
+                    .collect(),
+                cause: Box::new(cause),
+            }
+        };
+        while let Some(sp) = report.sets.first().cloned() {
+            match self.burn_disc(&p, &scanned, &report, &sp, now, burner) {
+                Ok(burned) => {
+                    done.push(sp.disc.key());
+                    written.extend(burned);
+                    remaining = RemainingEstimate {
+                        more_discs: remaining.more_discs.max(sp.remaining.more_discs),
+                        more_files: remaining.more_files.max(sp.remaining.more_files),
+                        more_bytes: remaining.more_bytes.max(sp.remaining.more_bytes),
+                    };
+                    report.sets.remove(0);
+                    if !report.sets.is_empty() {
+                        // The plan on disk still lists the disc just
+                        // committed; a re-run skips it by session ordinal.
+                        staged::write_plan(&self.paths.work_dir, &report)
+                            .map_err(|e| partial(&done, None, &report.sets, Self::failed(e)))?;
+                    }
+                }
+                Err(DiscFailure::Unwritten(e)) => {
+                    return Err(partial(&done, None, &report.sets, e));
+                }
+                Err(DiscFailure::Unrecorded {
+                    cause,
+                    surely_written,
+                }) => {
+                    let name = sp.disc.key().name(p.copies);
+                    let disc = if surely_written {
+                        UnrecordedDisc::written(name)
+                    } else {
+                        UnrecordedDisc::maybe_written(name)
+                    };
+                    return Err(partial(&done, Some(disc), &report.sets[1..], cause));
+                }
+            }
+        }
+
+        snapshot::release(&SnapshotHandle {
+            root: self.paths.work_dir.join("snapshot"),
+        });
+        staged::clear(&self.paths.work_dir)
+            .map_err(|e| partial(&done, None, &[], Self::failed(e)))?;
+        let view = self
+            .catalog
+            .read_view(p.id)
+            .map_err(|e| partial(&done, None, &[], Self::failed(e)))?;
+        Ok(BurnReport {
+            discs: written,
+            remaining,
+            coverage: replication::coverage(&view, p.copies),
+        })
+    }
+
+    /// Write one planned disc and commit its session. `Ok(None)` means the
+    /// catalog already holds the session this plan expected: an earlier run
+    /// committed the disc and stopped before rewriting the staged plan.
+    fn burn_disc(
+        &mut self,
+        p: &Project,
+        scanned: &[ScannedFile],
+        report: &PlanReport,
+        sp: &SetPlan,
+        now: DateTime<Utc>,
+        burner: &Burner<'_>,
+    ) -> Result<Option<DiscBurn>, DiscFailure> {
+        let disc = &sp.disc;
+        let key = disc.key();
+        let disc_name = key.name(p.copies);
+
         // The catalog cannot catch this: deadness is derived from `disc_event`,
         // so the disc row itself still reads OPEN. Without this guard the
         // burner would commit a session onto a disc that no longer physically
         // exists.
-        let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
+        let states = self
+            .catalog
+            .read_disc_states(p.id)
+            .map_err(DiscFailure::unwritten)?;
         if states
             .iter()
-            .any(|s| s.ordinal == report.disc.ordinal && s.status == DiscStatus::Dead)
+            .any(|s| s.key() == key && s.status == DiscStatus::Dead)
         {
-            return Err(PipelineError::StalePlan(format!(
-                "disc {} was marked dead after this plan was staged",
-                report.disc.ordinal
-            )));
+            return Err(DiscFailure::Unwritten(PipelineError::StalePlan(format!(
+                "disc {disc_name} was marked dead after this plan was staged"
+            ))));
         }
 
-        if let Some(detail) = planning::stale_detail(&report, &scanned) {
-            return Err(PipelineError::StalePlan(detail));
+        let sess_ord = self
+            .next_session_ordinal(p.id, key)
+            .map_err(DiscFailure::Unwritten)?;
+        if sess_ord == sp.session_ordinal + 1 {
+            return Ok(None);
+        }
+        if sess_ord != sp.session_ordinal {
+            return Err(DiscFailure::Unwritten(PipelineError::StalePlan(format!(
+                "disc {disc_name} would get session {sess_ord}, but this plan was staged for session {}",
+                sp.session_ordinal
+            ))));
+        }
+
+        if let Some(detail) = planning::stale_detail(disc, &report.tombstones, scanned) {
+            return Err(DiscFailure::Unwritten(PipelineError::StalePlan(detail)));
         }
 
         let snap_root = self.paths.work_dir.join("snapshot");
         if !snap_root.exists() {
-            return Err(PipelineError::SnapshotMissing(name.to_string()));
+            return Err(DiscFailure::Unwritten(PipelineError::SnapshotMissing(
+                p.name.clone(),
+            )));
         }
 
-        let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
-        let change_set = diff::diff(&view, &scanned);
-        let sess_ord = self.next_session_ordinal(p.id, report.disc.ordinal)?;
+        // Classified against the catalog as it stands now — after any disc
+        // this cycle already committed — so a twin's files become copies of
+        // the versions its sibling just recorded.
+        let view = self
+            .catalog
+            .read_view(p.id)
+            .map_err(DiscFailure::unwritten)?;
+        let contents = replication::classify(&view, &disc.files);
+        // A tombstone is written by the first disc to commit; later discs
+        // find the path already deleted. "Still current" is the catalog's
+        // history, not `read_view`: a version whose last live copy died after
+        // `plan` is gone from the view but not deleted, and the manifest
+        // lists its tombstone, so the catalog must record it too.
+        // `fingerprints` is exactly "latest change is not DELETED", unfiltered
+        // by dead discs.
+        let not_deleted = self
+            .catalog
+            .fingerprints(p.id)
+            .map_err(DiscFailure::unwritten)?;
+        let tombstones: Vec<RelPath> = report
+            .tombstones
+            .iter()
+            .filter(|t| not_deleted.contains_key(*t))
+            .cloned()
+            .collect();
         let manifest = manifest::build(
-            name,
+            &p.name,
             sess_ord,
-            &report.disc,
-            &change_set,
+            disc,
+            &contents,
             report.tombstones.clone(),
         );
-        let label = format!("{name} disc {}", report.disc.ordinal);
+        let label = format!("{} disc {disc_name}", p.name);
         let update = CatalogUpdate {
             project_id: p.id,
             finalize_disc_ordinals: Vec::new(),
             discs: vec![disc_write(
                 &label,
-                &report,
+                disc,
+                report.disc_type,
                 sess_ord,
                 now,
-                &change_set,
+                &contents,
+                tombstones,
                 &manifest,
             )],
         };
 
         let tmp_catalog = self.paths.work_dir.join("burn-catalog.sqlite");
         if let Some(parent) = tmp_catalog.parent() {
-            std::fs::create_dir_all(parent).map_err(Self::failed)?;
+            std::fs::create_dir_all(parent).map_err(DiscFailure::unwritten)?;
         }
         let _ = std::fs::remove_file(&tmp_catalog);
         self.catalog
             .snapshot_to(&tmp_catalog)
-            .map_err(Self::failed)?;
+            .map_err(DiscFailure::unwritten)?;
         // Materialize the post-burn state into the snapshot this disc embeds.
         // Applies to the copy only; the live catalog is committed after the
         // disc is staged.
-        Catalog::apply_update_to(&tmp_catalog, &update).map_err(Self::failed)?;
+        Catalog::apply_update_to(&tmp_catalog, &update).map_err(DiscFailure::unwritten)?;
 
-        let pointers = self.catalog.archive_pointers(p.id).map_err(Self::failed)?;
+        let pointers = self
+            .catalog
+            .archive_pointers(p.id)
+            .map_err(DiscFailure::unwritten)?;
         let image = DiscImage {
             staging_dir: self
                 .paths
                 .work_dir
                 .join("staging")
-                .join(format!("disc-{}", report.disc.ordinal)),
-            snapshot_root: snap_root.clone(),
-            files: report.disc.files.clone(),
+                .join(format!("disc-{disc_name}")),
+            snapshot_root: snap_root,
+            files: disc.files.clone(),
             metadata: DiscMetadata {
                 identity: DiscIdentity {
-                    project_name: name.to_string(),
-                    disc_ordinal: report.disc.ordinal,
+                    project_name: p.name.clone(),
+                    disc_ordinal: disc.ordinal,
+                    copy_set: disc.copy_set,
+                    copies: p.copies,
                     session_ordinal: sess_ord,
                     created_at: now,
                 },
@@ -334,49 +493,57 @@ impl<'a> Pipeline<'a> {
                 catalog_snapshot: tmp_catalog.clone(),
                 pointers,
             },
-            close_disc: report.disc.will_finalize,
+            close_disc: disc.will_finalize,
         };
-        let burned = burner.burn(&image)?;
+        let burned = burner.burn(&image).map_err(burner_failure)?;
 
         // The crash-safe commit point: the disc exists, so the catalog may now
         // learn about it. The committed state equals the embedded snapshot.
-        self.catalog.apply_update(&update).map_err(Self::failed)?;
-        snapshot::release(&SnapshotHandle { root: snap_root });
-        staged::clear(&self.paths.work_dir).map_err(Self::failed)?;
+        self.catalog
+            .apply_update(&update)
+            .map_err(|e| DiscFailure::Unrecorded {
+                cause: Self::failed(e),
+                surely_written: true,
+            })?;
         let _ = std::fs::remove_file(&tmp_catalog);
 
-        Ok(BurnReport {
-            disc: DiscBurn {
-                ordinal: report.disc.ordinal,
-                label,
-                finalized: report.disc.will_finalize,
-                staging_dir: burned.staging_dir,
-                image_bytes: burned.image_bytes,
-            },
-            remaining: report.remaining,
-        })
+        Ok(Some(DiscBurn {
+            disc: key,
+            label,
+            finalized: disc.will_finalize,
+            staging_dir: burned.staging_dir,
+            image_bytes: burned.image_bytes,
+        }))
     }
 
-    /// One past the highest session ordinal already committed for this disc
-    /// (`PipelineLive.existingSessions`). Both BURNED and VERIFIED count.
-    fn next_session_ordinal(
-        &self,
-        project: ProjectId,
-        disc_ordinal: u32,
-    ) -> Result<u32, PipelineError> {
-        let mut highest = 0u32;
+    /// One past the highest session ordinal committed on each disc that has
+    /// any (`PipelineLive.existingSessions`). Both BURNED and VERIFIED count.
+    fn next_sessions(&self, project: ProjectId) -> Result<BTreeMap<DiscKey, u32>, PipelineError> {
+        let mut next: BTreeMap<DiscKey, u32> = BTreeMap::new();
         for state in [SessionState::Burned, SessionState::Verified] {
             for s in self
                 .catalog
                 .sessions_by_state(project, state)
                 .map_err(Self::failed)?
             {
-                if s.disc_ordinal == disc_ordinal {
-                    highest = highest.max(s.ordinal);
-                }
+                let n = next.entry(s.disc).or_insert(1);
+                *n = (*n).max(s.ordinal + 1);
             }
         }
-        Ok(highest + 1)
+        Ok(next)
+    }
+
+    /// The session ordinal `disc` gets next: 1 for a disc with none yet.
+    fn next_session_ordinal(
+        &self,
+        project: ProjectId,
+        disc: DiscKey,
+    ) -> Result<u32, PipelineError> {
+        Ok(self
+            .next_sessions(project)?
+            .get(&disc)
+            .copied()
+            .unwrap_or(1))
     }
 
     /// `status`: catalog reads only, never mutates (`PipelineLive.status`).
@@ -397,11 +564,17 @@ impl<'a> Pipeline<'a> {
             .chain(verified.iter())
             .filter_map(|s| s.burned_at)
             .max();
+        // Each set's first open disc, as the single-copy report always showed
+        // the first one it found.
+        let mut open_discs: Vec<DiscKey> = Vec::new();
+        for d in discs.iter().filter(|d| d.status == DiscStatus::Open) {
+            if !open_discs.iter().any(|k| k.copy_set == d.copy_set) {
+                open_discs.push(d.key());
+            }
+        }
         Ok(StatusReport {
-            open_disc_ordinal: discs
-                .iter()
-                .find(|d| d.status == DiscStatus::Open)
-                .map(|d| d.ordinal),
+            open_discs,
+            coverage: replication::coverage(&view, p.copies),
             total_current_files: view.current.len(),
             discs,
             last_burn_at,
@@ -417,13 +590,13 @@ impl<'a> Pipeline<'a> {
     /// as reassurance. A sweep still skips dead discs quietly, which is the
     /// right default.
     ///
-    /// `disc_ordinal` is `i64` rather than `u32` because zio-cli let a
-    /// negative `--disc` reach the domain; the answer is a lookup failure with
-    /// the ordinal echoed back, not an argument error.
+    /// `disc` is the operator's `DiscArg`, whose ordinal stays signed so
+    /// `--disc -1` is answered here, with exit 2, rather than refused by the
+    /// parser.
     pub fn verify(
         &mut self,
         name: &str,
-        disc_ordinal: Option<i64>,
+        disc: Option<DiscArg>,
         verifier: &Verifier<'_>,
     ) -> Result<Vec<VerifyReport>, PipelineError> {
         let p = self.project(name)?;
@@ -433,26 +606,30 @@ impl<'a> Pipeline<'a> {
             .sessions_by_state(p.id, SessionState::Burned)
             .map_err(Self::failed)?;
 
-        if let Some(o) = disc_ordinal {
-            match states.iter().find(|s| i64::from(s.ordinal) == o) {
-                None => return Err(PipelineError::UnknownDisc(o)),
-                Some(s) if s.status == DiscStatus::Dead => {
-                    return Err(PipelineError::DiscIsDead(o))
+        let wanted = match disc {
+            Some(arg) => {
+                let key = resolve_disc(&p, arg, &states)?;
+                if states
+                    .iter()
+                    .any(|s| s.key() == key && s.status == DiscStatus::Dead)
+                {
+                    return Err(PipelineError::DiscIsDead(key.name(p.copies)));
                 }
-                Some(_) => {}
+                Some(key)
             }
-        }
+            None => None,
+        };
 
-        let targets: Vec<u32> = states
+        let targets: Vec<DiscKey> = states
             .iter()
             .filter(|s| s.status != DiscStatus::Dead)
-            .map(|s| s.ordinal)
-            .filter(|o| disc_ordinal.is_none_or(|want| want == i64::from(*o)))
+            .map(DiscState::key)
+            .filter(|k| wanted.is_none_or(|w| w == *k))
             .collect();
 
         let mut reports = Vec::with_capacity(targets.len());
-        for ordinal in targets {
-            reports.push(self.verify_disc(&p, ordinal, &sessions, verifier)?);
+        for disc in targets {
+            reports.push(self.verify_disc(&p, disc, &sessions, verifier)?);
         }
         Ok(reports)
     }
@@ -468,21 +645,22 @@ impl<'a> Pipeline<'a> {
     fn verify_disc(
         &mut self,
         p: &Project,
-        ordinal: u32,
+        disc: DiscKey,
         sessions: &[Session],
         verifier: &Verifier<'_>,
     ) -> Result<VerifyReport, PipelineError> {
         let latest_session = self
             .catalog
-            .placements_for_disc(p.id, ordinal)
+            .placements_for_disc(p.id, disc)
             .map_err(Self::failed)?;
         let recorded = self
             .catalog
-            .disc_recorded_contents(p.id, ordinal)
+            .disc_recorded_contents(p.id, disc)
             .map_err(Self::failed)?;
         let expectation = DiscExpectation {
             project_name: p.name.clone(),
-            disc_ordinal: ordinal,
+            disc,
+            disc_name: disc.name(p.copies),
             latest_session,
             visible: recorded.visible,
             superseded: recorded.superseded,
@@ -492,17 +670,17 @@ impl<'a> Pipeline<'a> {
         if !outcome.skipped && outcome.mismatches.is_empty() {
             if let Some(session) = sessions
                 .iter()
-                .filter(|s| s.disc_ordinal == ordinal)
+                .filter(|s| s.disc == disc)
                 .max_by_key(|s| s.ordinal)
             {
                 self.catalog
-                    .mark_verified(p.id, ordinal, session.ordinal)
+                    .mark_verified(p.id, disc, session.ordinal)
                     .map_err(Self::failed)?;
             }
         }
 
         Ok(VerifyReport {
-            disc_ordinal: ordinal,
+            disc,
             files_checked: outcome.files_checked,
             mismatches: outcome.mismatches,
             skipped: outcome.skipped,
@@ -563,11 +741,9 @@ impl<'a> Pipeline<'a> {
     /// exit 2, so they are caught here, against the *derived* disc states —
     /// `disc.status` never says `DEAD`.
     ///
-    /// `disc_ordinal` is `u32` where `verify`'s is `i64`: zio-cli let a
-    /// negative `--disc` reach the domain, but `disc mark-dead`'s ordinal is
-    /// validated in the parser (`Commands.scala`), because mark-dead is
-    /// irreversible and a silently wrapped ordinal would destroy a different
-    /// disc than the one named.
+    /// `disc` was validated by the parser as a positive ordinal with an
+    /// optional set letter: mark-dead is irreversible, so a malformed argument
+    /// never reaches the catalog.
     ///
     /// `at` comes from the caller, as `burn`'s `now` does: the pipeline reads
     /// no clock, which is what lets the corpus replay compare the committed
@@ -575,22 +751,79 @@ impl<'a> Pipeline<'a> {
     pub fn mark_dead(
         &mut self,
         name: &str,
-        disc_ordinal: u32,
+        disc: DiscArg,
         at: DateTime<Utc>,
     ) -> Result<LostReport, PipelineError> {
         let p = self.project(name)?;
         let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
-        match states.iter().find(|s| s.ordinal == disc_ordinal) {
-            None => return Err(PipelineError::UnknownDisc(i64::from(disc_ordinal))),
-            Some(s) if s.status == DiscStatus::Dead => {
-                return Err(PipelineError::DiscAlreadyDead(disc_ordinal))
-            }
-            Some(_) => {}
+        let key = resolve_disc(&p, disc, &states)?;
+        if states
+            .iter()
+            .any(|s| s.key() == key && s.status == DiscStatus::Dead)
+        {
+            return Err(PipelineError::DiscAlreadyDead(key.name(p.copies)));
         }
-        self.catalog
-            .mark_dead(p.id, disc_ordinal, &at)
-            .map_err(Self::failed)
+        self.catalog.mark_dead(p.id, key, &at).map_err(Self::failed)
     }
+}
+
+/// Why one disc of a burn failed: before its media was touched, or after —
+/// the disc exists (or may) but its commit did not land, so the catalog does
+/// not know it.
+///
+/// There is deliberately no `From<PipelineError>`: every failure in
+/// `burn_disc` picks its side explicitly, so a new `?` after the burner runs
+/// cannot silently claim the disc was never written.
+enum DiscFailure {
+    Unwritten(PipelineError),
+    Unrecorded {
+        cause: PipelineError,
+        surely_written: bool,
+    },
+}
+
+impl DiscFailure {
+    /// An unexpected failure before the burner touched any media.
+    fn unwritten(e: impl std::error::Error + 'static) -> Self {
+        DiscFailure::Unwritten(Pipeline::failed(e))
+    }
+}
+
+/// Which side of the media write a burner failure falls on. Exhaustive on
+/// purpose: a new `BurnError` variant must be classified here.
+fn burner_failure(e: crate::burn::BurnError) -> DiscFailure {
+    use crate::burn::BurnError as B;
+    match e {
+        // xorriso ran: a non-zero exit usually means the media was touched
+        // (a BD-R is likely spent), and a failed post-burn check comes after
+        // xorriso exited 0 with a session on the disc.
+        B::BurnFailed { .. } | B::PostBurnCheckFailed(_) => DiscFailure::Unrecorded {
+            cause: PipelineError::Burn(e),
+            surely_written: false,
+        },
+        // Staging, tool and device checks, media inspection and the operator
+        // prompt all run before anything is written.
+        B::HashMismatch { .. }
+        | B::SourceFileMissing(_)
+        | B::Io(_)
+        | B::ToolMissing(_)
+        | B::ToolTooOld(_)
+        | B::DeviceNotFound(_)
+        | B::DevicePermissionDenied(_)
+        | B::NoMedia(_)
+        | B::InsufficientCapacity { .. }
+        | B::MountFailed(_)
+        | B::Aborted => DiscFailure::Unwritten(PipelineError::Burn(e)),
+    }
+}
+
+/// The disc `arg` names in this project, or `UnknownDisc` echoing the
+/// argument. A bare ordinal means set A; a letter past the project's last set,
+/// or an ordinal no disc has, is unknown.
+fn resolve_disc(p: &Project, arg: DiscArg, states: &[DiscState]) -> Result<DiscKey, PipelineError> {
+    arg.resolve(p.copies)
+        .filter(|k| states.iter().any(|s| s.key() == *k))
+        .ok_or_else(|| PipelineError::UnknownDisc(arg.to_string()))
 }
 
 /// `getFileStore` equality via `st_dev` (`PipelineLive.sameFilesystem`): both
@@ -602,38 +835,34 @@ fn same_filesystem(source: &Path, work: &Path) -> std::io::Result<(u64, u64)> {
     ))
 }
 
-/// `PipelineLive.toDiscWrite`: split the disc's files into added vs modified
-/// using the change set, and stamp every one with its `/data/`-rooted disc
-/// path. `copy_index` is 0 until `copies > 1` is activated.
+/// The catalog write for one disc: its files split by commit-time
+/// classification and stamped with their `/data/`-rooted disc path, plus the
+/// tombstones still current in the catalog.
+#[allow(clippy::too_many_arguments)]
 fn disc_write(
     label: &str,
-    report: &PlanReport,
+    disc: &PlannedDisc,
+    disc_type: DiscType,
     sess_ord: u32,
     now: DateTime<Utc>,
-    cs: &ChangeSet,
+    contents: &DiscContents,
+    tombstones: Vec<RelPath>,
     manifest: &SessionManifest,
 ) -> DiscWrite {
-    let added_paths: std::collections::HashSet<&RelPath> =
-        cs.added.iter().map(|f| &f.rel_path).collect();
-    let (added, modified): (Vec<&ScannedFile>, Vec<&ScannedFile>) = report
-        .disc
-        .files
-        .iter()
-        .partition(|f| added_paths.contains(&f.rel_path));
     let fw = |f: &ScannedFile| FileWrite {
         rel_path: f.rel_path.clone(),
         content_hash: f.content_hash.clone(),
         size_bytes: f.size_bytes,
         mtime: f.mtime,
         disc_path: format!("/data/{}", f.rel_path.0),
-        copy_index: 0,
     };
     DiscWrite {
-        ordinal: report.disc.ordinal,
-        is_new: report.disc.is_new,
-        disc_type: report.disc_type,
-        usable_bytes: report.disc.usable_bytes,
-        status: if report.disc.will_finalize {
+        ordinal: disc.ordinal,
+        copy_set: disc.copy_set,
+        is_new: disc.is_new,
+        disc_type,
+        usable_bytes: disc.usable_bytes,
+        status: if disc.will_finalize {
             DiscStatus::Finalized
         } else {
             DiscStatus::Open
@@ -643,9 +872,10 @@ fn disc_write(
             ordinal: sess_ord,
             burned_at: now,
             manifest_hash: json::manifest_hash(manifest),
-            added: added.into_iter().map(fw).collect(),
-            modified: modified.into_iter().map(fw).collect(),
-            deleted: report.tombstones.clone(),
+            added: contents.added.iter().map(fw).collect(),
+            modified: contents.modified.iter().map(fw).collect(),
+            copied: contents.copied.iter().map(fw).collect(),
+            deleted: tombstones,
         },
     }
 }
@@ -716,7 +946,7 @@ mod tests {
         let r = e.pipeline.status("p").unwrap();
         assert!(r.discs.is_empty());
         assert_eq!(r.total_current_files, 0);
-        assert_eq!(r.open_disc_ordinal, None);
+        assert!(r.open_discs.is_empty());
         assert_eq!(r.last_burn_at, None);
     }
 
@@ -930,8 +1160,8 @@ mod tests {
         e.pipeline.init(&project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
         let report = e.pipeline.plan("p", None, false).unwrap();
-        assert_eq!(report.disc.ordinal, 1);
-        assert_eq!(report.disc.files.len(), 1);
+        assert_eq!(report.sets[0].disc.ordinal, 1);
+        assert_eq!(report.sets[0].disc.files.len(), 1);
         assert_eq!(report.disc_type, DiscType::BdR);
         let staged_report = staged::read_plan(&e.work).unwrap().unwrap();
         assert_eq!(staged_report, report);
@@ -945,7 +1175,7 @@ mod tests {
         e.pipeline.scan("p", false, false).unwrap();
         let report = e.pipeline.plan("p", None, false).unwrap();
         assert_eq!(
-            report.disc.usable_bytes,
+            report.sets[0].disc.usable_bytes,
             diskrement_core::Capacity::from_disc_type(DiscType::BdR, 2.0).usable_bytes
         );
     }
@@ -959,7 +1189,7 @@ mod tests {
         let report = e.pipeline.plan("p", Some(DiscType::Dvd), false).unwrap();
         assert_eq!(report.disc_type, DiscType::Dvd);
         assert_eq!(
-            report.disc.usable_bytes,
+            report.sets[0].disc.usable_bytes,
             diskrement_core::Capacity::from_disc_type(DiscType::Dvd, 2.0).usable_bytes
         );
     }
@@ -971,13 +1201,15 @@ mod tests {
         e.pipeline.init(&project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
         assert!(
-            !e.pipeline
-                .plan("p", None, false)
-                .unwrap()
+            !e.pipeline.plan("p", None, false).unwrap().sets[0]
                 .disc
                 .will_finalize
         );
-        assert!(e.pipeline.plan("p", None, true).unwrap().disc.will_finalize);
+        assert!(
+            e.pipeline.plan("p", None, true).unwrap().sets[0]
+                .disc
+                .will_finalize
+        );
     }
 
     #[test]
@@ -988,11 +1220,11 @@ mod tests {
         e.pipeline.init(&tiny_project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
         let report = e.pipeline.plan("p", None, false).unwrap();
-        assert_eq!(report.disc.files.len(), 1);
-        assert!(report.disc.will_finalize);
-        assert_eq!(report.remaining.more_discs, 1);
-        assert_eq!(report.remaining.more_files, 1);
-        assert_eq!(report.remaining.more_bytes, 200_000);
+        assert_eq!(report.sets[0].disc.files.len(), 1);
+        assert!(report.sets[0].disc.will_finalize);
+        assert_eq!(report.sets[0].remaining.more_discs, 1);
+        assert_eq!(report.sets[0].remaining.more_files, 1);
+        assert_eq!(report.sets[0].remaining.more_bytes, 200_000);
     }
 
     #[test]
@@ -1015,7 +1247,7 @@ mod tests {
         e.pipeline.scan("p", false, false).unwrap();
         e.pipeline.plan("p", None, false).unwrap();
         let second = e.pipeline.plan("p", None, true).unwrap();
-        assert!(second.disc.will_finalize);
+        assert!(second.sets[0].disc.will_finalize);
         assert_eq!(staged::read_plan(&e.work).unwrap().unwrap(), second);
         assert_eq!(staged::read_scan(&e.work).unwrap().unwrap().len(), 1);
     }
@@ -1062,7 +1294,7 @@ mod tests {
 mod burn_tests {
     use super::*;
     use chrono::{TimeZone as _, Utc};
-    use diskrement_core::{DiscType, RelPath, ScannedFile};
+    use diskrement_core::{DiscKey, DiscType, RelPath, ScannedFile, SetCoverage};
 
     use crate::burn::{simulated::SimulatedBurner, Burner};
     use crate::catalog::model::ProjectInit;
@@ -1083,6 +1315,11 @@ mod burn_tests {
     /// A project whose snapshot already holds `files`, with `scan.json` and
     /// `plan.json` staged — the state `burn` expects to find.
     fn staged_env(files: &[(&str, &[u8])], finalize: bool) -> Env {
+        staged_env_with(files, finalize, 1)
+    }
+
+    /// `staged_env` for a project keeping `copies` copies.
+    fn staged_env_with(files: &[(&str, &[u8])], finalize: bool, copies: u32) -> Env {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
         let work = root.join("work");
@@ -1112,7 +1349,7 @@ mod burn_tests {
                 work_dir: work.display().to_string(),
                 default_disc_type: DiscType::BdR,
                 margin_percent: 2.0,
-                copies: 1,
+                copies,
                 created_at: now(),
             })
             .unwrap();
@@ -1125,6 +1362,8 @@ mod burn_tests {
             DiscType::BdR,
             diskrement_core::Capacity::new(1_000_000),
             finalize,
+            copies,
+            |_| 1,
         );
         staged::write_plan(&work, &report).unwrap();
 
@@ -1156,9 +1395,9 @@ mod burn_tests {
         let mut env = staged_env(&[("a.bin", b"aaaa")], false);
         let report = run_burn(&mut env).unwrap();
 
-        assert_eq!(report.disc.ordinal, 1);
-        assert_eq!(report.disc.label, "p disc 1");
-        assert!(!report.disc.finalized);
+        assert_eq!(report.discs[0].disc.ordinal, 1);
+        assert_eq!(report.discs[0].label, "p disc 1");
+        assert!(!report.discs[0].finalized);
         assert!(env.work.join("staging/disc-1/data/a.bin").is_file());
         assert!(env
             .work
@@ -1170,7 +1409,7 @@ mod burn_tests {
             .sessions_by_state(ProjectId(1), SessionState::Burned)
             .unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].disc_ordinal, 1);
+        assert_eq!(sessions[0].disc.ordinal, 1);
         assert_eq!(sessions[0].ordinal, 1);
     }
 
@@ -1319,13 +1558,15 @@ mod burn_tests {
             DiscType::BdR,
             diskrement_core::Capacity::new(1_000_000),
             false,
+            1,
+            |_| 1,
         );
-        report.disc.ordinal = 1;
-        report.disc.is_new = false;
+        report.sets[0].disc.ordinal = 1;
+        report.sets[0].disc.is_new = false;
         staged::write_plan(&env.work, &report).unwrap();
 
         env.catalog
-            .mark_dead(ProjectId(1), 1, &now())
+            .mark_dead(ProjectId(1), DiscKey::new(1, 0), &now())
             .expect("marking disc 1 dead");
 
         let err = run_burn(&mut env).unwrap_err();
@@ -1395,7 +1636,7 @@ mod burn_tests {
     fn a_finalizing_plan_marks_the_disc_finalized() {
         let mut env = staged_env(&[("a.bin", b"aaaa")], true);
         let report = run_burn(&mut env).unwrap();
-        assert!(report.disc.finalized);
+        assert!(report.discs[0].finalized);
 
         let states = env.catalog.read_disc_states(ProjectId(1)).unwrap();
         assert_eq!(states.len(), 1);
@@ -1419,17 +1660,18 @@ mod burn_tests {
             mtime: now(),
         }];
         staged::write_scan(&env.work, &scanned).unwrap();
-        let view = env.catalog.read_view(ProjectId(1)).unwrap();
-        let states = env.catalog.read_disc_states(ProjectId(1)).unwrap();
-        let report = crate::pipeline::planning::plan_from(
-            &view,
-            &scanned,
-            &states,
-            DiscType::BdR,
-            diskrement_core::Capacity::new(1_000_000),
-            false,
-        );
-        staged::write_plan(&env.work, &report).unwrap();
+        // The pipeline's own `plan`, so the staged plan records session 2.
+        let sink = NoopSink;
+        Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &sink,
+        )
+        .plan("p", None, false)
+        .unwrap();
 
         run_burn(&mut env).unwrap();
         let sessions = env
@@ -1438,7 +1680,7 @@ mod burn_tests {
             .unwrap();
         let mut ordinals: Vec<u32> = sessions
             .iter()
-            .filter(|s| s.disc_ordinal == 1)
+            .filter(|s| s.disc.ordinal == 1)
             .map(|s| s.ordinal)
             .collect();
         ordinals.sort_unstable();
@@ -1452,6 +1694,360 @@ mod burn_tests {
         let mut env = staged_env(&[("a.bin", b"aaaa")], false);
         std::fs::remove_dir_all(&env.source).unwrap();
         run_burn(&mut env).expect("burn works from the snapshot alone");
+    }
+
+    #[test]
+    fn a_two_copy_burn_writes_twins_and_the_second_holds_copies() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa"), ("b.bin", b"bbbb")], false, 2);
+        let report = run_burn(&mut env).unwrap();
+        assert_eq!(
+            report
+                .discs
+                .iter()
+                .map(|d| d.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p disc 1A", "p disc 1B"]
+        );
+        assert!(env.work.join("staging/disc-1A/data/a.bin").is_file());
+        assert!(env.work.join("staging/disc-1B/data/a.bin").is_file());
+        let count = |t: &str| -> i64 {
+            env.catalog
+                .raw_connection_for_tests()
+                .query_row(&format!("select count(*) from {t}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            count("file_version"),
+            2,
+            "1B recorded copies, not new versions"
+        );
+        assert_eq!(count("placement"), 4);
+        assert_eq!(
+            report.coverage,
+            vec![SetCoverage::default(), SetCoverage::default()]
+        );
+        assert!(
+            staged::read_plan(&env.work).unwrap().is_none(),
+            "staged state cleared"
+        );
+    }
+
+    /// A regular file where 1B's staging directory goes makes the stager fail
+    /// on 1B only.
+    fn block_disc(env: &Env, name: &str) -> std::path::PathBuf {
+        let blocker = env.work.join(format!("staging/disc-{name}"));
+        std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        blocker
+    }
+
+    #[test]
+    fn a_failure_on_the_second_set_keeps_the_first_and_resumes_at_the_second() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        let blocker = block_disc(&env, "1B");
+
+        let err = run_burn(&mut env).unwrap_err();
+        assert!(matches!(err, PipelineError::PartialBurn { .. }), "{err}");
+        assert_eq!(err.exit_code(), 6);
+        assert!(
+            err.to_string()
+                .ends_with("1A committed; 1B not written (re-run burn)"),
+            "{err}"
+        );
+
+        let staged = staged::read_plan(&env.work)
+            .unwrap()
+            .expect("plan survives");
+        assert_eq!(staged.sets.len(), 1);
+        assert_eq!(staged.sets[0].disc.copy_set, 1);
+        assert!(
+            env.work.join("snapshot").exists(),
+            "the snapshot survives too"
+        );
+
+        std::fs::remove_file(&blocker).unwrap();
+        let report = run_burn(&mut env).unwrap();
+        assert_eq!(
+            report
+                .discs
+                .iter()
+                .map(|d| d.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p disc 1B"]
+        );
+        let sessions = env
+            .catalog
+            .sessions_by_state(ProjectId(1), SessionState::Burned)
+            .unwrap();
+        assert_eq!(
+            sessions.iter().map(|s| s.disc).collect::<Vec<_>>(),
+            vec![DiscKey::new(1, 0), DiscKey::new(1, 1)]
+        );
+    }
+
+    #[test]
+    fn a_disc_committed_before_the_plan_was_rewritten_is_skipped() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        let original = std::fs::read(staged::plan_path(&env.work)).unwrap();
+        let blocker = block_disc(&env, "1B");
+        run_burn(&mut env).unwrap_err();
+
+        // Simulate the crash window: 1A is committed, but the plan on disk
+        // still lists both sets.
+        std::fs::write(staged::plan_path(&env.work), original).unwrap();
+        std::fs::remove_file(&blocker).unwrap();
+
+        let report = run_burn(&mut env).unwrap();
+        assert_eq!(report.discs.len(), 1, "1A skipped, 1B written");
+        assert_eq!(report.discs[0].disc, DiscKey::new(1, 1));
+        let on_1a = env
+            .catalog
+            .sessions_by_state(ProjectId(1), SessionState::Burned)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.disc == DiscKey::new(1, 0))
+            .count();
+        assert_eq!(on_1a, 1, "1A was not burned twice");
+    }
+
+    /// Stage a fresh cycle over `files`: the snapshot holds them, `scan.json`
+    /// lists them, and the pipeline's own `plan` stages the plan.
+    fn restage(env: &mut Env, files: &[(&str, &[u8])]) -> PlanReport {
+        let snapshot = env.work.join("snapshot");
+        let _ = std::fs::remove_dir_all(&snapshot);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let mut scanned = Vec::new();
+        for (rel, body) in files {
+            let abs = snapshot.join(rel);
+            std::fs::write(&abs, body).unwrap();
+            scanned.push(ScannedFile {
+                rel_path: RelPath((*rel).to_string()),
+                content_hash: crate::fs::hasher::hash(&abs).unwrap(),
+                size_bytes: body.len() as u64,
+                mtime: now(),
+            });
+        }
+        staged::write_scan(&env.work, &scanned).unwrap();
+        let sink = NoopSink;
+        Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &sink,
+        )
+        .plan("p", None, false)
+        .unwrap()
+    }
+
+    /// `(copy set, session ordinal)` of every DELETED change record of `path`.
+    fn deletions_of(env: &Env, path: &str) -> Vec<(u32, u32)> {
+        let conn = env.catalog.raw_connection_for_tests();
+        let mut stmt = conn
+            .prepare(
+                "select d.copy_set, s.ordinal from change_record cr
+                   join file_version fv on fv.id = cr.file_version_id
+                   join session s on s.id = cr.session_id
+                   join disc d on d.id = s.disc_id
+                  where cr.kind = 'DELETED' and fv.rel_path = ?1
+                  order by cr.id",
+            )
+            .unwrap();
+        stmt.query_map([path], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn manifest_deleted(env: &Env, disc: &str) -> Vec<String> {
+        let raw = std::fs::read_to_string(
+            env.work
+                .join(format!("staging/disc-{disc}/.diskrement/manifest.json")),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        v["deleted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_two_copy_deletion_is_recorded_once_on_set_a_and_listed_by_both_discs() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa"), ("gone.bin", b"gggg")], false, 2);
+        run_burn(&mut env).unwrap();
+
+        let plan = restage(&mut env, &[("a.bin", b"aaaa"), ("b.bin", b"bbbb")]);
+        assert_eq!(plan.sets.len(), 2, "both sets take b.bin");
+        assert_eq!(plan.tombstones, vec![RelPath("gone.bin".into())]);
+        run_burn(&mut env).unwrap();
+
+        assert_eq!(
+            deletions_of(&env, "gone.bin"),
+            vec![(0, 2)],
+            "one DELETED record, on 1A's second session"
+        );
+        assert_eq!(manifest_deleted(&env, "1A"), vec!["gone.bin"]);
+        assert_eq!(manifest_deleted(&env, "1B"), vec!["gone.bin"]);
+    }
+
+    /// A tombstoned path whose current version lost its last live copy
+    /// between `plan` and `burn` is still current in the catalog: the
+    /// deletion must be recorded, as the disc's manifest says it is.
+    #[test]
+    fn a_tombstone_whose_version_lost_its_last_copy_is_still_recorded() {
+        let mut env = staged_env(&[("a.bin", b"aaaa"), ("gone.bin", b"gggg")], true);
+        run_burn(&mut env).unwrap();
+
+        let plan = restage(&mut env, &[("a.bin", b"aaaa"), ("b.bin", b"bbbb")]);
+        assert_eq!(plan.sets[0].disc.key(), DiscKey::new(2, 0));
+        assert_eq!(plan.tombstones, vec![RelPath("gone.bin".into())]);
+        env.catalog
+            .mark_dead(ProjectId(1), DiscKey::new(1, 0), &now())
+            .unwrap();
+
+        run_burn(&mut env).unwrap();
+        assert_eq!(deletions_of(&env, "gone.bin"), vec![(0, 1)]);
+        assert_eq!(manifest_deleted(&env, "2"), vec!["gone.bin"]);
+    }
+
+    fn partial_parts(err: &PipelineError) -> (Vec<String>, Option<UnrecordedDisc>, Vec<String>) {
+        match err {
+            PipelineError::PartialBurn {
+                committed,
+                unrecorded,
+                pending,
+                ..
+            } => (committed.clone(), unrecorded.clone(), pending.clone()),
+            other => panic!("expected PartialBurn, got {other}"),
+        }
+    }
+
+    #[test]
+    fn a_plan_rewrite_failure_after_a_commit_is_a_partial_burn_that_resumes() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        // A directory where the rewrite's temp file goes makes it fail.
+        let tmp = env.work.join("staged/plan.json.tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let err = run_burn(&mut env).unwrap_err();
+        assert_eq!(
+            partial_parts(&err),
+            (vec!["1A".to_string()], None, vec!["1B".to_string()])
+        );
+        assert_eq!(err.exit_code(), 5);
+        assert!(err.to_string().contains("(re-run burn)"), "{err}");
+
+        std::fs::remove_dir(&tmp).unwrap();
+        let report = run_burn(&mut env).unwrap();
+        assert_eq!(
+            report.discs.iter().map(|d| d.disc).collect::<Vec<_>>(),
+            vec![DiscKey::new(1, 1)],
+            "1A is not burned twice"
+        );
+    }
+
+    #[test]
+    fn a_cleanup_failure_after_every_disc_committed_names_them_all() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        // Something foreign in `staged/` makes `clear` refuse.
+        std::fs::write(env.work.join("staged/foreign"), b"x").unwrap();
+
+        let err = run_burn(&mut env).unwrap_err();
+        assert_eq!(
+            partial_parts(&err),
+            (vec!["1A".to_string(), "1B".to_string()], None, vec![])
+        );
+        assert!(!err.to_string().contains("not written"), "{err}");
+    }
+
+    #[test]
+    fn a_commit_failure_after_the_disc_was_written_says_so() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        // A temp trigger lives on the live connection only, so the embedded
+        // snapshot copy still builds and the burner writes 1B; the live
+        // commit of 1B then fails.
+        env.catalog
+            .raw_connection_for_tests()
+            .execute_batch(
+                "create temp trigger refuse_1b before insert on disc
+                   when new.copy_set = 1
+                 begin select raise(abort, 'refused for the test'); end;",
+            )
+            .unwrap();
+
+        let err = run_burn(&mut env).unwrap_err();
+        assert_eq!(
+            partial_parts(&err),
+            (
+                vec!["1A".to_string()],
+                Some(UnrecordedDisc::written("1B")),
+                vec![]
+            )
+        );
+        assert!(env.work.join("staging/disc-1B/data/a.bin").is_file());
+        let text = err.to_string();
+        assert!(text.contains("1B written but not recorded"), "{text}");
+        assert!(!text.contains("not written"), "{text}");
+    }
+
+    #[test]
+    fn a_plan_staged_by_an_older_build_is_stale_not_corrupt() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        std::fs::write(
+            staged::plan_path(&env.work),
+            r#"{"disc":{"ordinal":1,"isNew":true,"willFinalize":false,"files":[],
+                "priorUsedBytes":0,"usableBytes":100},"discType":"BD_R","tombstones":[],
+                "remaining":{"moreDiscs":0,"moreFiles":0,"moreBytes":0},"oversized":[]}"#,
+        )
+        .unwrap();
+        let err = run_burn(&mut env).unwrap_err();
+        assert!(matches!(err, PipelineError::StalePlan(_)), "{err}");
+        assert!(!err.to_string().contains("reset"), "{err}");
+    }
+
+    /// The real burner is the only one that can fail after touching media, so
+    /// the classification is pinned on the error variants directly.
+    #[test]
+    fn a_burner_failure_after_xorriso_ran_may_have_written_the_disc() {
+        use crate::burn::BurnError as B;
+        let maybe = |e: B| {
+            matches!(
+                burner_failure(e),
+                DiscFailure::Unrecorded {
+                    surely_written: false,
+                    ..
+                }
+            )
+        };
+        assert!(maybe(B::BurnFailed {
+            exit_code: 5,
+            output_tail: vec![],
+        }));
+        assert!(maybe(B::PostBurnCheckFailed("unreadable".into())));
+
+        let unwritten = |e: B| matches!(burner_failure(e), DiscFailure::Unwritten(_));
+        assert!(unwritten(B::Aborted));
+        assert!(unwritten(B::ToolMissing("x".into())));
+        assert!(unwritten(B::ToolTooOld("1.4".into())));
+        assert!(unwritten(B::DeviceNotFound("/dev/sr9".into())));
+        assert!(unwritten(B::DevicePermissionDenied("/dev/sr0".into())));
+        assert!(unwritten(B::NoMedia("/dev/sr0".into())));
+        assert!(unwritten(B::InsufficientCapacity {
+            needed_bytes: 2,
+            free_bytes: 1,
+        }));
+        assert!(unwritten(B::MountFailed("m".into())));
+        assert!(unwritten(B::SourceFileMissing(RelPath("a".into()))));
+        assert!(unwritten(B::Io(std::io::Error::other("staging"))));
+        assert!(unwritten(B::HashMismatch {
+            rel_path: RelPath("a".into()),
+            expected: diskrement_core::ContentHash("x".into()),
+            actual: diskrement_core::ContentHash("y".into()),
+        }));
     }
 }
 
@@ -1523,6 +2119,8 @@ mod verify_tests {
             DiscType::BdR,
             diskrement_core::Capacity::new(1_000_000),
             finalize,
+            1,
+            |_| 1,
         );
         staged::write_plan(&work, &report).unwrap();
 
@@ -1558,7 +2156,14 @@ mod verify_tests {
             },
             &NoopSink,
         );
-        pipeline.verify("p", disc, &verifier)
+        pipeline.verify(
+            "p",
+            disc.map(|o| DiscArg {
+                ordinal: o,
+                copy_set: None,
+            }),
+            &verifier,
+        )
     }
 
     fn verified_discs(env: &Env) -> Vec<u32> {
@@ -1566,7 +2171,7 @@ mod verify_tests {
             .sessions_by_state(ProjectId(1), SessionState::Verified)
             .unwrap()
             .iter()
-            .map(|s| s.disc_ordinal)
+            .map(|s| s.disc.ordinal)
             .collect()
     }
 
@@ -1575,7 +2180,7 @@ mod verify_tests {
         let mut env = burned_env(&[("a.txt", b"aaa")], false);
         let reports = run_verify(&mut env, None).unwrap();
         assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0].disc_ordinal, 1);
+        assert_eq!(reports[0].disc, DiscKey::new(1, 0));
         assert_eq!(reports[0].files_checked, 1);
         assert!(reports[0].mismatches.is_empty());
         assert!(!reports[0].skipped);
@@ -1624,7 +2229,7 @@ mod verify_tests {
         let mut env = burned_env(&[("a.txt", b"aaa")], false);
         let reports = run_verify(&mut env, Some(1)).unwrap();
         assert_eq!(
-            reports.iter().map(|r| r.disc_ordinal).collect::<Vec<_>>(),
+            reports.iter().map(|r| r.disc.ordinal).collect::<Vec<_>>(),
             vec![1]
         );
     }
@@ -1723,7 +2328,7 @@ mod verify_tests {
             .sessions_by_state(ProjectId(1), SessionState::Burned)
             .unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].disc_ordinal, 1);
+        assert_eq!(sessions[0].disc.ordinal, 1);
     }
 
     #[test]
@@ -1749,7 +2354,7 @@ mod verify_tests {
             .history("p", &RelPath("a.txt".to_string()))
             .unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].disc_ordinal, 1);
+        assert_eq!(entries[0].disc.ordinal, 1);
         assert_eq!(entries[0].session_ordinal, 1);
         assert_eq!(entries[0].size_bytes, 3);
         assert_eq!(
@@ -1897,7 +2502,7 @@ mod mark_dead_tests {
         pipeline.burn("p", burned_at, &burner).unwrap();
     }
 
-    fn run_mark_dead(env: &mut Env, ordinal: u32) -> Result<LostReport, PipelineError> {
+    fn run_mark_dead(env: &mut Env, disc: &str) -> Result<LostReport, PipelineError> {
         let work = env.work.clone();
         let scan_cache = env.scan_cache.clone();
         let mut pipeline = Pipeline::new(
@@ -1908,7 +2513,7 @@ mod mark_dead_tests {
             },
             &NoopSink,
         );
-        pipeline.mark_dead("p", ordinal, at(500))
+        pipeline.mark_dead("p", disc.parse().unwrap(), at(500))
     }
 
     fn run_plan(env: &mut Env) -> Result<PlanReport, PipelineError> {
@@ -1925,7 +2530,7 @@ mod mark_dead_tests {
         pipeline.plan("p", None, false)
     }
 
-    fn run_verify(env: &mut Env, disc: Option<i64>) -> Result<Vec<VerifyReport>, PipelineError> {
+    fn run_verify(env: &mut Env, disc: Option<&str>) -> Result<Vec<VerifyReport>, PipelineError> {
         let work = env.work.clone();
         let scan_cache = env.scan_cache.clone();
         let verifier = Verifier::Staging(StagingVerifier::new(work.join("staging")));
@@ -1937,7 +2542,7 @@ mod mark_dead_tests {
             },
             &NoopSink,
         );
-        pipeline.verify("p", disc, &verifier)
+        pipeline.verify("p", disc.map(|d| d.parse().unwrap()), &verifier)
     }
 
     /// The stored `disc.status` column for one ordinal, read straight out of
@@ -1958,8 +2563,11 @@ mod mark_dead_tests {
     fn an_ordinal_no_disc_has_is_an_unknown_disc_error() {
         let mut e = env();
         cycle(&mut e, &[("a.txt", b"aaa")], at(10));
-        let err = run_mark_dead(&mut e, 9).unwrap_err();
-        assert!(matches!(err, PipelineError::UnknownDisc(9)), "{err:?}");
+        let err = run_mark_dead(&mut e, "9").unwrap_err();
+        assert!(
+            matches!(err, PipelineError::UnknownDisc(ref s) if s == "9"),
+            "{err:?}"
+        );
         assert_eq!(err.to_string(), "no disc with ordinal 9");
         assert_eq!(err.exit_code(), 2);
     }
@@ -1971,10 +2579,13 @@ mod mark_dead_tests {
     fn marking_the_same_disc_twice_is_exit_2_and_appends_no_second_event() {
         let mut e = env();
         cycle(&mut e, &[("a.txt", b"aaa")], at(10));
-        run_mark_dead(&mut e, 1).expect("the first mark-dead succeeds");
+        run_mark_dead(&mut e, "1").expect("the first mark-dead succeeds");
 
-        let err = run_mark_dead(&mut e, 1).unwrap_err();
-        assert!(matches!(err, PipelineError::DiscAlreadyDead(1)), "{err:?}");
+        let err = run_mark_dead(&mut e, "1").unwrap_err();
+        assert!(
+            matches!(err, PipelineError::DiscAlreadyDead(ref s) if s == "1"),
+            "{err:?}"
+        );
         assert_eq!(err.exit_code(), 2);
 
         let events: i64 = e
@@ -2003,7 +2614,9 @@ mod mark_dead_tests {
             },
             &NoopSink,
         );
-        let err = pipeline.mark_dead("nosuch", 1, at(500)).unwrap_err();
+        let err = pipeline
+            .mark_dead("nosuch", "1".parse().unwrap(), at(500))
+            .unwrap_err();
         assert!(matches!(err, PipelineError::ProjectNotFound(_)), "{err:?}");
     }
 
@@ -2016,7 +2629,7 @@ mod mark_dead_tests {
         cycle(&mut e, &[("a.txt", b"aaa")], at(10));
         assert_eq!(stored_status(&e, 1), "OPEN");
 
-        run_mark_dead(&mut e, 1).expect("mark-dead succeeds");
+        run_mark_dead(&mut e, "1").expect("mark-dead succeeds");
 
         assert_eq!(
             stored_status(&e, 1),
@@ -2041,8 +2654,8 @@ mod mark_dead_tests {
         // A second session on the same open disc supersedes b.txt in place.
         cycle(&mut e, &[("a.txt", b"aaa"), ("b.txt", b"bbbb")], at(20));
 
-        let report = run_mark_dead(&mut e, 1).expect("mark-dead succeeds");
-        assert_eq!(report.disc_ordinal, 1);
+        let report = run_mark_dead(&mut e, "1").expect("mark-dead succeeds");
+        assert_eq!(report.disc, DiscKey::new(1, 0));
         assert_eq!(
             report
                 .lost
@@ -2084,7 +2697,7 @@ mod mark_dead_tests {
                 .map(|d| d.status),
             Some(DiscStatus::Dead)
         );
-        assert_eq!(status.open_disc_ordinal, None);
+        assert!(status.open_discs.is_empty());
         assert_eq!(
             status.total_current_files, 0,
             "the view drops versions whose only copy is dead"
@@ -2093,10 +2706,11 @@ mod mark_dead_tests {
         // The recovery cycle plans both live files onto a brand-new disc 2.
         stage(&e, &[("a.txt", b"aaa"), ("b.txt", b"bbbb")]);
         let plan = run_plan(&mut e).expect("plan succeeds");
-        assert!(plan.disc.is_new);
-        assert_eq!(plan.disc.ordinal, 2);
+        assert!(plan.sets[0].disc.is_new);
+        assert_eq!(plan.sets[0].disc.ordinal, 2);
         assert_eq!(
-            plan.disc
+            plan.sets[0]
+                .disc
                 .files
                 .iter()
                 .map(|f| f.rel_path.as_str())
@@ -2109,7 +2723,7 @@ mod mark_dead_tests {
         // The sweep skips the dead disc silently and checks only disc 2.
         let reports = run_verify(&mut e, None).expect("verify succeeds");
         assert_eq!(
-            reports.iter().map(|r| r.disc_ordinal).collect::<Vec<_>>(),
+            reports.iter().map(|r| r.disc.ordinal).collect::<Vec<_>>(),
             vec![2]
         );
         assert!(reports
@@ -2117,8 +2731,11 @@ mod mark_dead_tests {
             .all(|r| !r.skipped && r.mismatches.is_empty()));
 
         // Naming the dead disc, though, is an assertion of intent and an error.
-        let named = run_verify(&mut e, Some(1)).unwrap_err();
-        assert!(matches!(named, PipelineError::DiscIsDead(1)), "{named:?}");
+        let named = run_verify(&mut e, Some("1")).unwrap_err();
+        assert!(
+            matches!(named, PipelineError::DiscIsDead(ref s) if s == "1"),
+            "{named:?}"
+        );
     }
 
     /// LOST is per physical copy, not per content hash (CLAUDE.md). b@2 and
@@ -2129,7 +2746,7 @@ mod mark_dead_tests {
         let mut e = env();
         cycle(&mut e, &[("b.txt", b"bbb")], at(10));
         cycle(&mut e, &[("b.txt", b"bbbb")], at(20));
-        run_mark_dead(&mut e, 1).expect("mark-dead succeeds");
+        run_mark_dead(&mut e, "1").expect("mark-dead succeeds");
         cycle(&mut e, &[("b.txt", b"bbbb")], at(30));
 
         let history = e
@@ -2140,7 +2757,7 @@ mod mark_dead_tests {
         assert_eq!(
             history
                 .iter()
-                .map(|h| (h.disc_ordinal, h.session_ordinal, h.status))
+                .map(|h| (h.disc.ordinal, h.session_ordinal, h.status))
                 .collect::<Vec<_>>(),
             vec![
                 (1, 1, VersionStatus::Lost),
@@ -2152,5 +2769,151 @@ mod mark_dead_tests {
             history[1].content_hash, history[2].content_hash,
             "the last two versions share a hash — LOST is about the copy, not the bytes"
         );
+    }
+}
+
+#[cfg(test)]
+mod copies_tests {
+    use super::*;
+    use crate::burn::simulated::SimulatedBurner;
+    use crate::burn::verifier::StagingVerifier;
+    use crate::progress::NoopSink;
+    use chrono::TimeZone;
+    use diskrement_core::{DiscArg, DiscKey, DiscType};
+
+    struct Env {
+        _dir: tempfile::TempDir,
+        catalog: Catalog,
+        work: PathBuf,
+        source: PathBuf,
+    }
+
+    fn at(offset: i64) -> chrono::DateTime<Utc> {
+        Utc.timestamp_opt(1_757_000_000 + offset, 0).unwrap()
+    }
+
+    fn paths(env: &Env) -> PipelinePaths {
+        PipelinePaths {
+            work_dir: env.work.clone(),
+            scan_cache: env.work.join("scancache.sqlite"),
+        }
+    }
+
+    /// A two-copy project with `a.bin` burned to 1A and 1B.
+    fn burned_twice() -> Env {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (source, work) = (dir.path().join("src"), dir.path().join("work"));
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(source.join("a.bin"), b"aaaa").unwrap();
+        let mut env = Env {
+            catalog: Catalog::open(&dir.path().join("cat.sqlite")).unwrap(),
+            _dir: dir,
+            work,
+            source,
+        };
+        let pi = ProjectInit {
+            name: "p".into(),
+            source_root: env.source.display().to_string(),
+            work_dir: env.work.display().to_string(),
+            default_disc_type: DiscType::BdR,
+            margin_percent: 2.0,
+            copies: 2,
+            created_at: at(0),
+        };
+        let p = paths(&env);
+        let mut pipeline = Pipeline::new(&mut env.catalog, p, &NoopSink);
+        pipeline.init(&pi).unwrap();
+        pipeline.scan("p", false, false).unwrap();
+        pipeline.plan("p", None, false).unwrap();
+        let burner = Burner::Simulated(SimulatedBurner::new(&NoopSink, 2));
+        pipeline.burn("p", at(1), &burner).unwrap();
+        env
+    }
+
+    fn pipeline(env: &mut Env) -> Pipeline<'_> {
+        let p = paths(env);
+        Pipeline::new(&mut env.catalog, p, &NoopSink)
+    }
+
+    fn staging_verifier(env: &Env) -> Verifier<'static> {
+        Verifier::Staging(StagingVerifier::new(env.work.join("staging")))
+    }
+
+    #[test]
+    fn status_reports_each_sets_open_disc_and_full_coverage() {
+        let mut env = burned_twice();
+        let s = pipeline(&mut env).status("p").unwrap();
+        assert_eq!(s.open_discs, vec![DiscKey::new(1, 0), DiscKey::new(1, 1)]);
+        assert!(s.coverage.iter().all(|c| c.missing_files == 0));
+    }
+
+    #[test]
+    fn marking_one_twin_dead_degrades_and_status_shows_the_gap() {
+        let mut env = burned_twice();
+        let report = pipeline(&mut env)
+            .mark_dead("p", "1B".parse::<DiscArg>().unwrap(), at(2))
+            .unwrap();
+        assert_eq!(report.disc, DiscKey::new(1, 1));
+        assert!(report.lost.is_empty() && report.reburn.is_empty());
+        assert_eq!(report.degraded.len(), 1);
+        let s = pipeline(&mut env).status("p").unwrap();
+        assert_eq!(s.coverage[1].missing_files, 1);
+    }
+
+    #[test]
+    fn verify_names_a_disc_by_set_and_refuses_a_letter_past_the_last_set() {
+        let mut env = burned_twice();
+        let verifier = staging_verifier(&env);
+        let one = pipeline(&mut env)
+            .verify("p", Some("1B".parse().unwrap()), &verifier)
+            .unwrap();
+        assert_eq!(
+            one.iter().map(|r| r.disc).collect::<Vec<_>>(),
+            vec![DiscKey::new(1, 1)]
+        );
+        assert!(one[0].mismatches.is_empty() && !one[0].skipped);
+
+        let err = pipeline(&mut env)
+            .verify("p", Some("1C".parse().unwrap()), &verifier)
+            .unwrap_err();
+        assert!(
+            matches!(err, PipelineError::UnknownDisc(ref s) if s == "1C"),
+            "{err}"
+        );
+    }
+
+    /// The sweep visits each twin once under its own key — before Task 13 it
+    /// verified 1A twice and the second `mark_verified` failed — and marks
+    /// both VERIFIED; a repeat sweep is a clean no-op.
+    #[test]
+    fn a_sweep_verifies_both_twins_once_each_and_a_repeat_is_a_no_op() {
+        let mut env = burned_twice();
+        let verifier = staging_verifier(&env);
+        let reports = pipeline(&mut env).verify("p", None, &verifier).unwrap();
+        assert_eq!(
+            reports.iter().map(|r| r.disc).collect::<Vec<_>>(),
+            vec![DiscKey::new(1, 0), DiscKey::new(1, 1)]
+        );
+        assert!(reports
+            .iter()
+            .all(|r| !r.skipped && r.mismatches.is_empty() && r.files_checked == 1));
+
+        let verified = env
+            .catalog
+            .sessions_by_state(ProjectId(1), SessionState::Verified)
+            .unwrap();
+        let mut keys: Vec<DiscKey> = verified.iter().map(|s| s.disc).collect();
+        keys.sort();
+        assert_eq!(keys, vec![DiscKey::new(1, 0), DiscKey::new(1, 1)]);
+        assert!(env
+            .catalog
+            .sessions_by_state(ProjectId(1), SessionState::Burned)
+            .unwrap()
+            .is_empty());
+
+        let again = pipeline(&mut env).verify("p", None, &verifier).unwrap();
+        assert_eq!(again.len(), 2);
+        assert!(again.iter().all(|r| !r.skipped && r.mismatches.is_empty()));
     }
 }

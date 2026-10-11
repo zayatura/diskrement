@@ -39,7 +39,9 @@ be "improved":
 
 ## Tests
 
-Unit tests live beside their code. The four files under `tests/` are the
-cross-implementation compatibility suite and consume the P0 fixture corpus:
-`timestamps.rs` (the wire format), `fixture_schema.rs` (the DDL),
-`fixture_catalog.rs` (reads), `fixture_replay.rs` (writes).
+Unit tests live beside their code. The files under `tests/` use the frozen
+`fixtures/` corpus (V2 catalogs and staged discs) as input: `timestamps.rs`
+(the wire format), `fixture_catalog.rs` (V2 catalogs migrate and read) and
+`fixture_verify.rs` (staged discs the verifier must accept).
+`xorriso_image.rs` runs the real `xorriso` against `stdio:` image files and
+skips when it is not installed.

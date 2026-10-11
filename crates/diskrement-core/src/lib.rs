@@ -5,13 +5,14 @@
 //! planning, and manifest models (spec §5.3).
 //!
 //! Functions are reached through their modules — `diff::diff`, `planner::plan`,
-//! `manifest::build` — mirroring the Scala `Diff.diff` / `Planner.plan` /
+//! `manifest::build`, `replication::shortfall` — mirroring the Scala `Diff.diff` / `Planner.plan` /
 //! `ManifestBuilder.build`. Types are re-exported here for convenience.
 
 pub mod diff;
 pub mod manifest;
 pub mod model;
 pub mod planner;
+pub mod replication;
 
 #[cfg(test)]
 // Helpers land in the task that first needs them, which is sometimes one task
@@ -22,8 +23,12 @@ mod testutil;
 
 pub use diff::ChangeSet;
 pub use manifest::{ManifestChangeKind, ManifestEntry, SessionManifest};
-pub use model::{Capacity, CatalogEntry, CatalogView, ContentHash, DiscType, RelPath, ScannedFile};
+pub use model::{
+    set_letter, Capacity, CatalogEntry, CatalogView, ContentHash, DiscArg, DiscKey, DiscType,
+    RelPath, ScannedFile, MAX_COPIES,
+};
 pub use planner::{BurnPlan, DiscState, DiscStatus, PlannedDisc};
+pub use replication::{DiscContents, SetCoverage};
 
 #[cfg(test)]
 mod tests {

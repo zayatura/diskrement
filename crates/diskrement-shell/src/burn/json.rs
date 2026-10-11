@@ -2,9 +2,9 @@
 //!
 //! Two encodings live here and they are not interchangeable. The **compact**
 //! encoding is hashed into `session.manifest_hash`, so its field order and its
-//! whitespace are part of the catalog's content; the **pretty** encoding is
-//! what lands on the disc, and it reproduces zio-json's `toJsonPretty` exactly
-//! so the corpus's `manifest.json` and `pointers.json` stay byte oracles.
+//! whitespace are catalog content; the **pretty** encoding is what lands on
+//! the disc, in zio-json's `toJsonPretty` layout, kept so discs burned before
+//! and after the Rust rewrite read the same.
 
 use std::io;
 
@@ -106,11 +106,21 @@ pub fn to_pretty<T: Serialize>(value: &T) -> String {
 
 // --- project.json -------------------------------------------------------
 
+fn one() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectJson {
     pub project_name: String,
     pub disc_ordinal: u32,
+    /// Absent on discs written before copy sets existed: those are set A of a
+    /// single-copy project.
+    #[serde(default)]
+    pub copy_set: u32,
+    #[serde(default = "one")]
+    pub copies: u32,
     pub session_ordinal: u32,
     pub created_at: String,
 }
@@ -120,6 +130,8 @@ impl ProjectJson {
         ProjectJson {
             project_name: id.project_name.clone(),
             disc_ordinal: id.disc_ordinal,
+            copy_set: id.copy_set,
+            copies: id.copies,
             session_ordinal: id.session_ordinal,
             created_at: time::format(&id.created_at),
         }
@@ -131,6 +143,8 @@ impl ProjectJson {
         Ok(DiscIdentity {
             project_name: self.project_name.clone(),
             disc_ordinal: self.disc_ordinal,
+            copy_set: self.copy_set,
+            copies: self.copies,
             session_ordinal: self.session_ordinal,
             created_at,
         })
@@ -170,9 +184,14 @@ impl ManifestEntryJson {
 pub struct ManifestJson {
     pub project_name: String,
     pub disc_ordinal: u32,
+    /// Absent on discs written before copy sets existed: those are set A.
+    #[serde(default)]
+    pub copy_set: u32,
     pub session_ordinal: u32,
     pub added: Vec<ManifestEntryJson>,
     pub modified: Vec<ManifestEntryJson>,
+    #[serde(default)]
+    pub copied: Vec<ManifestEntryJson>,
     pub deleted: Vec<String>,
 }
 
@@ -181,25 +200,26 @@ impl ManifestJson {
         ManifestJson {
             project_name: m.project_name.clone(),
             disc_ordinal: m.disc_ordinal,
+            copy_set: m.copy_set,
             session_ordinal: m.session_ordinal,
             added: m.added.iter().map(ManifestEntryJson::from).collect(),
             modified: m.modified.iter().map(ManifestEntryJson::from).collect(),
+            copied: m.copied.iter().map(ManifestEntryJson::from).collect(),
             deleted: m.deleted.iter().map(|p| p.0.clone()).collect(),
         }
     }
 
-    /// The inverse, for the corpus oracle and `DiscReader`.
+    /// The inverse, for `DiscReader` and the scenario oracle.
     pub fn to_manifest(&self) -> Result<SessionManifest, String> {
+        let entries = |v: &[ManifestEntryJson]| v.iter().map(ManifestEntryJson::to_entry).collect();
         Ok(SessionManifest {
             project_name: self.project_name.clone(),
             disc_ordinal: self.disc_ordinal,
+            copy_set: self.copy_set,
             session_ordinal: self.session_ordinal,
-            added: self.added.iter().map(ManifestEntryJson::to_entry).collect(),
-            modified: self
-                .modified
-                .iter()
-                .map(ManifestEntryJson::to_entry)
-                .collect(),
+            added: entries(&self.added),
+            modified: entries(&self.modified),
+            copied: entries(&self.copied),
             deleted: self.deleted.iter().map(|p| RelPath(p.clone())).collect(),
         })
     }
@@ -223,6 +243,8 @@ pub struct ArchivePointerJson {
     pub content_hash: String,
     pub size_bytes: u64,
     pub disc_ordinal: u32,
+    #[serde(default)]
+    pub copy_set: u32,
     pub session_ordinal: u32,
     pub disc_path: String,
     pub kind: String,
@@ -235,6 +257,7 @@ impl ArchivePointerJson {
             content_hash: p.content_hash.0.clone(),
             size_bytes: p.size_bytes,
             disc_ordinal: p.disc_ordinal,
+            copy_set: p.copy_set,
             session_ordinal: p.session_ordinal,
             disc_path: p.disc_path.clone(),
             // `ManifestChangeKind.toString` — the frozen uppercase spelling
@@ -268,6 +291,7 @@ mod tests {
         SessionManifest {
             project_name: "p".to_string(),
             disc_ordinal: 3,
+            copy_set: 1,
             session_ordinal: 1,
             added: Vec::new(),
             modified: vec![ManifestEntry {
@@ -277,35 +301,52 @@ mod tests {
                 ),
                 size_bytes: 800,
             }],
+            copied: Vec::new(),
             deleted: vec![RelPath("b.bin".to_string())],
         }
     }
 
-    /// Byte-for-byte `fixtures/discs/disc-3/.diskrement/manifest.json`, which
-    /// is zio-json `toJsonPretty` output: two-space indent, `" : "` separator,
-    /// `[]` for an empty array, no trailing newline.
+    /// zio-json `toJsonPretty` layout: two-space indent, `" : "`, `[]` for an
+    /// empty array, no trailing newline. `copySet` follows `discOrdinal` and
+    /// `copied` follows `modified`.
     #[test]
-    fn pretty_output_matches_zio_json() {
+    fn pretty_output_has_the_disc_layout() {
         let expected = "{\n  \"projectName\" : \"p\",\n  \"discOrdinal\" : 3,\n  \
-             \"sessionOrdinal\" : 1,\n  \"added\" : [],\n  \"modified\" : [\n    {\n      \
+             \"copySet\" : 1,\n  \"sessionOrdinal\" : 1,\n  \"added\" : [],\n  \
+             \"modified\" : [\n    {\n      \
              \"relPath\" : \"a.bin\",\n      \"contentHash\" : \
              \"e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77\",\n      \
-             \"sizeBytes\" : 800\n    }\n  ],\n  \"deleted\" : [\n    \"b.bin\"\n  ]\n}";
+             \"sizeBytes\" : 800\n    }\n  ],\n  \"copied\" : [],\n  \"deleted\" : [\n    \
+             \"b.bin\"\n  ]\n}";
         assert_eq!(to_pretty(&ManifestJson::from(&manifest())), expected);
     }
 
     /// The compact encoding is what the manifest hash is taken over, so its
-    /// field order and its lack of whitespace are both contract.
+    /// field order and its lack of whitespace are both catalog content.
     #[test]
-    fn compact_output_has_scala_field_order_and_no_whitespace() {
+    fn compact_output_has_a_fixed_field_order_and_no_whitespace() {
         let compact = serde_json::to_string(&ManifestJson::from(&manifest())).unwrap();
         assert_eq!(
             compact,
-            "{\"projectName\":\"p\",\"discOrdinal\":3,\"sessionOrdinal\":1,\
+            "{\"projectName\":\"p\",\"discOrdinal\":3,\"copySet\":1,\"sessionOrdinal\":1,\
              \"added\":[],\"modified\":[{\"relPath\":\"a.bin\",\"contentHash\":\
              \"e148cf0e8c66a7c18ea6be52a5215dd2a770d74b6c014d51d1e1e0463e882e77\",\
-             \"sizeBytes\":800}],\"deleted\":[\"b.bin\"]}"
+             \"sizeBytes\":800}],\"copied\":[],\"deleted\":[\"b.bin\"]}"
         );
+    }
+
+    /// A manifest written before copy sets existed has neither field; it reads
+    /// as set A with no copies.
+    #[test]
+    fn a_manifest_without_copy_fields_reads_as_set_a() {
+        let old = "{\"projectName\":\"p\",\"discOrdinal\":3,\"sessionOrdinal\":1,\
+                   \"added\":[],\"modified\":[],\"deleted\":[]}";
+        let m = serde_json::from_str::<ManifestJson>(old)
+            .unwrap()
+            .to_manifest()
+            .unwrap();
+        assert_eq!(m.copy_set, 0);
+        assert!(m.copied.is_empty());
     }
 
     #[test]
@@ -321,6 +362,8 @@ mod tests {
         let id = DiscIdentity {
             project_name: "p".to_string(),
             disc_ordinal: 1,
+            copy_set: 0,
+            copies: 1,
             session_ordinal: 1,
             created_at: Utc.timestamp_opt(1_757_100_066, 623_959_846).unwrap(),
         };
@@ -338,11 +381,41 @@ mod tests {
         let p = ProjectJson {
             project_name: "p".to_string(),
             disc_ordinal: 1,
+            copy_set: 0,
+            copies: 1,
             session_ordinal: 1,
             created_at: "not a timestamp".to_string(),
         };
         let err = p.to_identity().unwrap_err();
         assert!(err.starts_with("bad createdAt in project.json:"), "{err}");
+    }
+
+    #[test]
+    fn project_json_records_the_copy_set_and_copies() {
+        let id = DiscIdentity {
+            project_name: "p".to_string(),
+            disc_ordinal: 2,
+            copy_set: 1,
+            copies: 2,
+            session_ordinal: 1,
+            created_at: Utc.timestamp_opt(1_757_100_066, 0).unwrap(),
+        };
+        let rendered = to_pretty(&ProjectJson::from(&id));
+        assert!(rendered.contains("\"copySet\" : 1"), "{rendered}");
+        assert!(rendered.contains("\"copies\" : 2"), "{rendered}");
+        let parsed: ProjectJson = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed.to_identity().unwrap(), id);
+    }
+
+    #[test]
+    fn a_project_json_without_copy_fields_is_set_a_of_one() {
+        let old = "{\"projectName\":\"p\",\"discOrdinal\":1,\"sessionOrdinal\":1,\
+                   \"createdAt\":\"2026-08-30T10:00:00Z\"}";
+        let id = serde_json::from_str::<ProjectJson>(old)
+            .unwrap()
+            .to_identity()
+            .unwrap();
+        assert_eq!((id.copy_set, id.copies), (0, 1));
     }
 
     #[test]
@@ -358,6 +431,7 @@ mod tests {
             content_hash: ContentHash("aa".to_string()),
             size_bytes: 4,
             disc_ordinal: 1,
+            copy_set: 0,
             session_ordinal: 2,
             disc_path: "/data/a.bin".to_string(),
             kind: ManifestChangeKind::Deleted,
@@ -368,6 +442,7 @@ mod tests {
             rendered.contains("\"discPath\" : \"/data/a.bin\""),
             "{rendered}"
         );
+        assert!(rendered.contains("\"copySet\" : 0"), "{rendered}");
     }
 
     #[test]

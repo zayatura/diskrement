@@ -4,10 +4,8 @@
 //! Rust was written and is the reference for every compatibility test (spec §4). It is
 //! read-only in the strongest sense available: see `open_fixture`.
 
-// The comparison helpers are re-exported from the library's `testutil` module.
-// Test binaries that include `support` but never touch those re-exports would
-// otherwise fail on an unused import; the corpus-specific helpers below stay
-// dead-code-allowed for the same reason.
+// Test binaries that include `support` but never use every helper would
+// otherwise fail on dead code or unused imports.
 #![allow(dead_code, unused_imports)]
 
 use std::path::{Path, PathBuf};
@@ -113,5 +111,3 @@ pub fn fixture_work_copy(rel: &str) -> (tempfile::TempDir, PathBuf) {
     copy_tree(&fixtures_dir().join(rel), &dest);
     (dir, dest)
 }
-
-pub use diskrement_shell::testutil::{assert_dumps_match, dump_catalog, CATALOG_TABLES};

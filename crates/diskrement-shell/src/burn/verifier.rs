@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use diskrement_core::{ContentHash, RelPath};
+use diskrement_core::{ContentHash, DiscKey, RelPath};
 
 use crate::burn::cmd::Exec;
 use crate::burn::media::{MediaInspector, MediaStatus};
@@ -29,7 +29,9 @@ use crate::fs::scanner::relativize;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscExpectation {
     pub project_name: String,
-    pub disc_ordinal: u32,
+    pub disc: DiscKey,
+    /// `DiscKey::name` for this project: the staging directory and the prompt.
+    pub disc_name: String,
     pub latest_session: BTreeMap<RelPath, ContentHash>,
     pub visible: BTreeMap<RelPath, ContentHash>,
     pub superseded: Vec<SupersededVersion>,
@@ -63,7 +65,7 @@ impl StagingVerifier {
     pub fn verify(&self, exp: &DiscExpectation) -> Result<VerifyOutcome, BurnError> {
         let data_dir = self
             .staging_root
-            .join(format!("disc-{}", exp.disc_ordinal))
+            .join(format!("disc-{}", exp.disc_name))
             .join("data");
         if !data_dir.exists() {
             return Ok(VerifyOutcome {
@@ -149,13 +151,12 @@ impl<'a> DiscVerifier<'a> {
     fn await_disc(&self, exp: &DiscExpectation) -> Result<bool, BurnError> {
         let prompt = format!(
             "Insert disc {} of '{}' into {} to verify it (or decline to skip this disc).",
-            exp.disc_ordinal,
+            exp.disc_name,
             exp.project_name,
             self.device.xorriso_address()
         );
-        let matches = |id: &DiscIdentity| {
-            id.project_name == exp.project_name && id.disc_ordinal == exp.disc_ordinal
-        };
+        let matches =
+            |id: &DiscIdentity| id.project_name == exp.project_name && id.disc() == exp.disc;
         loop {
             if !self.operator.confirm_insert(&prompt) {
                 return Ok(false);
@@ -274,7 +275,8 @@ mod tests {
     fn expectation(pairs: &[(&str, &[u8])], ordinal: u32) -> DiscExpectation {
         DiscExpectation {
             project_name: "p".to_string(),
-            disc_ordinal: ordinal,
+            disc: DiscKey::new(ordinal, 0),
+            disc_name: ordinal.to_string(),
             latest_session: pairs
                 .iter()
                 .map(|(rel, body)| (RelPath((*rel).to_string()), sha(body)))
@@ -309,7 +311,8 @@ mod tests {
         );
 
         let absent = DiscExpectation {
-            disc_ordinal: 9,
+            disc: DiscKey::new(9, 0),
+            disc_name: "9".to_string(),
             ..expectation(&[], 9)
         };
         assert_eq!(
@@ -409,7 +412,8 @@ mod tests {
         fn expectation() -> DiscExpectation {
             DiscExpectation {
                 project_name: "photos".to_string(),
-                disc_ordinal: 1,
+                disc: DiscKey::new(1, 0),
+                disc_name: "1".to_string(),
                 latest_session: BTreeMap::new(),
                 visible: BTreeMap::new(),
                 superseded: Vec::new(),

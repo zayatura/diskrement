@@ -9,7 +9,7 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use diskrement_core::{ContentHash, DiscState, DiscStatus, ManifestChangeKind, RelPath};
+use diskrement_core::{ContentHash, DiscKey, DiscState, DiscStatus, ManifestChangeKind, RelPath};
 use diskrement_shell::catalog::model::{
     ArchivePointer, FileHistoryEntry, SessionState, VersionStatus,
 };
@@ -101,6 +101,7 @@ fn the_catalog_after_the_first_burn_reports_one_full_disc() {
         cat.read_disc_states(project.id).expect("states"),
         vec![DiscState {
             ordinal: 1,
+            copy_set: 0,
             status: DiscStatus::Finalized,
             usable_bytes: 1000,
             used_bytes: 800,
@@ -111,7 +112,7 @@ fn the_catalog_after_the_first_burn_reports_one_full_disc() {
         .sessions_by_state(project.id, SessionState::Burned)
         .expect("sessions");
     assert_eq!(burned.len(), 1);
-    assert_eq!((burned[0].disc_ordinal, burned[0].ordinal), (1, 1));
+    assert_eq!((burned[0].disc.ordinal, burned[0].ordinal), (1, 1));
     assert_eq!(
         burned[0].burned_at.map(|at| time::format(&at)).as_deref(),
         Some("2026-09-05T20:01:06.623959846Z")
@@ -139,18 +140,21 @@ fn a_marked_dead_disc_reads_dead_without_its_row_having_changed() {
         vec![
             DiscState {
                 ordinal: 1,
+                copy_set: 0,
                 status: DiscStatus::Finalized,
                 usable_bytes: 1000,
                 used_bytes: 800,
             },
             DiscState {
                 ordinal: 2,
+                copy_set: 0,
                 status: DiscStatus::Open,
                 usable_bytes: 1000,
                 used_bytes: 800,
             },
             DiscState {
                 ordinal: 3,
+                copy_set: 0,
                 status: DiscStatus::Dead,
                 usable_bytes: 1000,
                 used_bytes: 800,
@@ -208,21 +212,21 @@ fn file_history_reports_lost_per_physical_copy() {
             FileHistoryEntry {
                 content_hash: hash(A1),
                 size_bytes: 800,
-                disc_ordinal: 1,
+                disc: DiscKey::new(1, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Superseded,
             },
             FileHistoryEntry {
                 content_hash: hash(A2),
                 size_bytes: 800,
-                disc_ordinal: 3,
+                disc: DiscKey::new(3, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Lost,
             },
             FileHistoryEntry {
                 content_hash: hash(A2),
                 size_bytes: 800,
-                disc_ordinal: 4,
+                disc: DiscKey::new(4, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Current,
             },
@@ -235,7 +239,7 @@ fn file_history_reports_lost_per_physical_copy() {
         vec![FileHistoryEntry {
             content_hash: hash(B1),
             size_bytes: 800,
-            disc_ordinal: 2,
+            disc: DiscKey::new(2, 0),
             session_ordinal: 1,
             status: VersionStatus::Deleted,
         }]
@@ -258,6 +262,7 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
                 content_hash: hash(A1),
                 size_bytes: 800,
                 disc_ordinal: 1,
+                copy_set: 0,
                 session_ordinal: 1,
                 disc_path: "/data/a.bin".to_string(),
                 kind: ManifestChangeKind::Added,
@@ -267,6 +272,7 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
                 content_hash: hash(A2),
                 size_bytes: 800,
                 disc_ordinal: 3,
+                copy_set: 0,
                 session_ordinal: 1,
                 disc_path: "/data/a.bin".to_string(),
                 kind: ManifestChangeKind::Modified,
@@ -276,6 +282,7 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
                 content_hash: hash(B1),
                 size_bytes: 800,
                 disc_ordinal: 2,
+                copy_set: 0,
                 session_ordinal: 1,
                 disc_path: "/data/b.bin".to_string(),
                 kind: ManifestChangeKind::Deleted,
@@ -286,17 +293,19 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
     // Disc 4's last session is the `plan --finalize` seal, which placed no
     // files — so the per-session view is empty while the whole-disc view is not.
     assert!(cat
-        .placements_for_disc(project.id, 4)
+        .placements_for_disc(project.id, DiscKey::new(4, 0))
         .expect("placements")
         .is_empty());
     assert_eq!(
-        cat.disc_recorded_contents(project.id, 4)
+        cat.disc_recorded_contents(project.id, DiscKey::new(4, 0))
             .expect("contents")
             .visible,
         BTreeMap::from([(rel("a.bin"), hash(A2))])
     );
 
-    let disc3 = cat.disc_recorded_contents(project.id, 3).expect("contents");
+    let disc3 = cat
+        .disc_recorded_contents(project.id, DiscKey::new(3, 0))
+        .expect("contents");
     assert_eq!(disc3.visible, BTreeMap::from([(rel("a.bin"), hash(A2))]));
     assert!(disc3.superseded.is_empty());
 
@@ -304,5 +313,76 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
         .sessions_by_state(project.id, SessionState::Verified)
         .expect("sessions");
     assert_eq!(verified.len(), 1);
-    assert_eq!((verified[0].disc_ordinal, verified[0].ordinal), (1, 1));
+    assert_eq!((verified[0].disc.ordinal, verified[0].ordinal), (1, 1));
+}
+
+/// A V2 catalog the Scala build wrote migrates to V3 in place: every disc keeps
+/// its id, ordinal and status, lands in set A, and nothing dangles.
+#[test]
+fn a_v2_catalog_migrates_to_v3_keeping_every_disc_id() {
+    let before: Vec<(i64, i64, String)> = {
+        let conn = support::open_fixture("catalog/11-after-finalize.sqlite");
+        let mut stmt = conn
+            .prepare("select id, ordinal, status from disc order by id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert!(!before.is_empty(), "the fixture has discs");
+
+    let (_dir, cat) = open("catalog/11-after-finalize.sqlite");
+    let conn = cat.raw_connection_for_tests();
+    let after: Vec<(i64, i64, String, i64)> = {
+        let mut stmt = conn
+            .prepare("select id, ordinal, status, copy_set from disc order by id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(
+        after
+            .iter()
+            .map(|(i, o, s, _)| (*i, *o, s.clone()))
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert!(after.iter().all(|(_, _, _, set)| *set == 0));
+
+    let version: i64 = conn
+        .query_row("select version from schema_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    let dangling: i64 = conn
+        .query_row("select count(*) from pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(dangling, 0);
+
+    // The rebuilt table's AUTOINCREMENT sequence is at least the highest old
+    // id, so a disc inserted after the migration can never reuse an id that
+    // a session or disc_event row might once have referenced.
+    let max_old = before.iter().map(|(i, _, _)| *i).max().unwrap();
+    let seq: i64 = conn
+        .query_row(
+            "select seq from sqlite_sequence where name = 'disc'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        seq >= max_old,
+        "disc sequence {seq} below old max id {max_old}"
+    );
+    conn.execute(
+        "insert into disc (project_id, ordinal, disc_type, usable_bytes, status, label, copy_set)
+         values (1, 99, 'BD_R', 1, 'OPEN', 'x', 1)",
+        [],
+    )
+    .unwrap();
+    assert!(conn.last_insert_rowid() > max_old);
 }

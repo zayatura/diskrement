@@ -234,7 +234,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 &sink,
             );
             let report = pipeline.burn(&name, chrono::Utc::now(), &burner)?;
-            say(&render::burn_report(&report));
+            say(&render::burn_report(&report, p.copies));
             Ok(0)
         }
         Command::Reset { name } => {
@@ -273,7 +273,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 &NoopSink,
             );
             let reports = pipeline.verify(&name, disc, &verifier)?;
-            say(&render::verify_report(&reports));
+            say(&render::verify_report(&reports, p.copies));
             // Result-driven: corruption found is a successful run with a bad
             // outcome, so it does not travel the error ladder.
             Ok(render::verify_exit(&reports))
@@ -291,11 +291,11 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             );
             let rel = diskrement_core::RelPath(rel_path);
             let entries = pipeline.history(&name, &rel)?;
-            say(&render::history(&rel, &entries));
+            say(&render::history(&rel, &entries, p.copies));
             Ok(0)
         }
         Command::Disc {
-            command: args::DiscCommand::MarkDead { name, ordinal, yes },
+            command: args::DiscCommand::MarkDead { name, disc, yes },
         } => {
             // The project lookup comes first (`Runner.withProject` resolves
             // the project before `Prompt.confirm`), so an unknown project
@@ -303,10 +303,17 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             let mut catalog = open_catalog(&resolved.catalog)?;
             let p = find_or_fail(&catalog, &name)?;
 
+            // Name the disc as it will be resolved (a bare `1` is 1A at
+            // copies>1). An argument that does not resolve is echoed as typed;
+            // the pipeline then reports the unknown disc.
+            let shown = disc
+                .resolve(p.copies)
+                .map(|k| k.name(p.copies))
+                .unwrap_or_else(|| disc.to_string());
             if !prompt::confirm(
                 &format!(
-                    "Mark disc {ordinal} of {name} DEAD? Superseded versions on it are \
-                     lost forever; its live files will re-plan."
+                    "Mark disc {shown} of {name} DEAD? Superseded versions held only \
+                     on it are lost forever; its live files will re-plan."
                 ),
                 yes,
             ) {
@@ -322,8 +329,8 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 },
                 &NoopSink,
             );
-            let report = pipeline.mark_dead(&name, ordinal, chrono::Utc::now())?;
-            say(&render::mark_dead(&report));
+            let report = pipeline.mark_dead(&name, disc, chrono::Utc::now())?;
+            say(&render::mark_dead(&report, p.copies));
             Ok(0)
         }
     }

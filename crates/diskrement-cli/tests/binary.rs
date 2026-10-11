@@ -395,6 +395,51 @@ fn burned_project() -> Fixture {
     }
 }
 
+mod copies {
+    use super::*;
+
+    #[test]
+    fn copies_outside_one_to_twenty_six_is_a_usage_error() {
+        for n in ["0", "27"] {
+            let p = project();
+            base(&p)
+                .args(["init", "p", "--source"])
+                .arg(&p.source)
+                .arg("--work-dir")
+                .arg(&p.work)
+                .args(["--copies", n])
+                .assert()
+                .failure()
+                .code(1);
+        }
+    }
+
+    /// At copies=2 a bare `1` means 1A, and the prompt must say so before
+    /// anything irreversible happens. A child with no stdin declines.
+    #[test]
+    fn mark_dead_confirms_with_the_resolved_disc_name() {
+        let p = project();
+        base(&p)
+            .args(["init", "p", "--source"])
+            .arg(&p.source)
+            .arg("--work-dir")
+            .arg(&p.work)
+            .args(["--copies", "2"])
+            .assert()
+            .success();
+
+        base(&p)
+            .args(["disc", "mark-dead", "p", "1"])
+            .assert()
+            .success()
+            .stdout(contains(
+                "Mark disc 1A of p DEAD? Superseded versions held only on it are \
+                 lost forever; its live files will re-plan.",
+            ))
+            .stdout(contains("Aborted."));
+    }
+}
+
 mod burn {
     use super::*;
 
@@ -565,6 +610,15 @@ mod verify_history_reset {
             .failure()
             .code(2)
             .stderr(contains("no disc with ordinal 99"));
+    }
+
+    #[test]
+    fn a_set_letter_past_the_projects_copies_is_an_unknown_disc() {
+        let f = burned_project();
+        run(&f, &["verify", "p", "--disc", "1B"])
+            .failure()
+            .code(2)
+            .stderr(contains("no disc with ordinal 1B"));
     }
 
     /// The parser must not turn a negative ordinal into an argument error:
@@ -758,7 +812,7 @@ mod mark_dead {
 
     /// The disc becomes DEAD in `status` — the one place the CLI shows the
     /// derived state — while the row behind it is untouched (asserted in the
-    /// shell's `fixture_mark_dead` and `mark_dead_tests`, which can see SQL).
+    /// shell's pipeline `mark_dead_tests`, which can see SQL).
     #[test]
     fn status_reports_the_disc_dead_and_drops_its_files_from_the_view() {
         let f = two_session_disc();
@@ -827,8 +881,8 @@ mod mark_dead {
             .assert()
             .success()
             .stdout(
-                "Mark disc 1 of p DEAD? Superseded versions on it are lost forever; \
-                 its live files will re-plan. [y/N] Aborted.\n",
+                "Mark disc 1 of p DEAD? Superseded versions held only on it are lost \
+                 forever; its live files will re-plan. [y/N] Aborted.\n",
             );
 
         run(&f, &["status", "p"])

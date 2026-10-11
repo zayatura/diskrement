@@ -1,14 +1,15 @@
-//! The pure half of `plan` (`PipelineLive.plan`): everything between reading
-//! the staged scan and writing `staged/plan.json`.
-//!
-//! No filesystem, no catalog, no clock. `Pipeline::plan` is the thin edge
-//! around this — which is what lets the fixture oracle re-plan the harvested
-//! scenario straight out of `fixtures/`, with no environment variable and no
-//! temporary catalog.
+//! The pure half of `plan`: everything between reading the staged scan and
+//! writing `staged/plan.json`. No filesystem, no catalog, no clock —
+//! `Pipeline::plan` is the thin edge around this.
 
-use diskrement_core::{diff, planner, Capacity, CatalogView, DiscState, DiscType, ScannedFile};
+use std::collections::{HashMap, HashSet};
 
-use crate::pipeline::reports::{PlanReport, RemainingEstimate};
+use diskrement_core::{
+    diff, planner, replication, Capacity, CatalogView, DiscKey, DiscState, DiscType, PlannedDisc,
+    RelPath, ScannedFile,
+};
+
+use crate::pipeline::reports::{PlanReport, RemainingEstimate, SetPlan};
 
 /// `DISKREMENT_DISC_BYTES`, the test-only capacity override.
 ///
@@ -37,18 +38,24 @@ pub fn effective_capacity(normal: Capacity, override_bytes: Option<u64>) -> Capa
     }
 }
 
-/// Diff, plan, and reduce the full multi-disc plan to the **one disc this
-/// cycle writes** (`PipelineLive.plan`).
+/// Diff once, plan every copy set, and reduce each set's full plan to the
+/// **one disc that set writes this cycle**.
 ///
-/// One disc per cycle: burn the first disc that actually carries new files.
-/// The planner keeps the existing open disc first by contract; when a new file
-/// cannot top it off, that open disc is an empty finalizing placeholder — skip
-/// it so this cycle writes the new disc instead of wasting a cycle on an empty
-/// session. The skipped disc stays open. When no disc has files (a no-op scan,
-/// or an explicit `--finalize` of an empty open disc), keep the head as-is.
+/// Per set: burn the first disc that actually carries files. The planner
+/// keeps a set's open disc first by contract; when a new file cannot top it
+/// off, that open disc is an empty finalizing placeholder — skip it so this
+/// cycle writes the new disc instead of wasting a cycle on an empty session.
+/// The skipped disc stays open.
 ///
-/// `tombstones` are the whole scan's deletions, not one disc's: on a
-/// cross-cycle spill they attach to the session actually written this cycle.
+/// A set with nothing to place is left out, unless `finalize` and it has an
+/// open disc to seal. If that leaves no set at all (a no-op scan, or a
+/// deletion-only one), the plan holds set A's head as-is, so the tombstones
+/// still have a session to ride on — exactly the single-copy behaviour.
+///
+/// `next_session` returns the session ordinal an existing disc gets next; it
+/// is recorded per set so `burn` can tell a disc it already committed from one
+/// it has not.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_from(
     view: &CatalogView,
     scanned: &[ScannedFile],
@@ -56,50 +63,115 @@ pub fn plan_from(
     disc_type: DiscType,
     cap: Capacity,
     finalize: bool,
+    copies: u32,
+    next_session: impl Fn(DiscKey) -> u32,
 ) -> PlanReport {
     let changes = diff::diff(view, scanned);
-    let full = planner::plan(&changes, states, cap);
-    // `Planner::plan` always returns at least one disc, so both the index and
-    // the `idx + 1` slice below are in range.
-    let idx = full
-        .discs
+    let new_files: Vec<ScannedFile> = changes
+        .added
         .iter()
-        .position(|d| !d.files.is_empty())
-        .unwrap_or(0);
-    let mut disc = full.discs[idx].clone();
-    // The planner already seals this disc iff the plan spilled; `--finalize`
-    // forces a seal even when everything fit.
-    disc.will_finalize = disc.will_finalize || finalize;
-    let tail = &full.discs[idx + 1..];
-    let remaining = RemainingEstimate {
-        more_discs: tail.len(),
-        more_files: tail.iter().map(|d| d.files.len()).sum(),
-        more_bytes: tail
-            .iter()
-            .flat_map(|d| d.files.iter())
-            .map(|f| f.size_bytes)
-            .sum(),
-    };
+        .chain(changes.modified.iter())
+        .cloned()
+        .collect();
+    let catch_up = replication::shortfall(view, &changes, copies);
+
+    let mut sets = Vec::new();
+    let mut oversized: Vec<ScannedFile> = Vec::new();
+    let mut set_a_discs: Vec<PlannedDisc> = Vec::new();
+    for (copy_set, extra) in (0..copies).zip(catch_up.iter()) {
+        let to_place: Vec<ScannedFile> = new_files.iter().chain(extra.iter()).cloned().collect();
+        let full = planner::plan_set(copy_set, &to_place, &changes.deleted, states, cap);
+        for f in full.oversized {
+            if !oversized.iter().any(|o| o.rel_path == f.rel_path) {
+                oversized.push(f);
+            }
+        }
+        // `plan_set` always returns at least one disc.
+        let chosen = match full.discs.iter().position(|d| !d.files.is_empty()) {
+            Some(i) => Some(i),
+            None if finalize && !full.discs[0].is_new => Some(0),
+            None => None,
+        };
+        if let Some(i) = chosen {
+            sets.push(set_plan(&full.discs, i, finalize, extra, &next_session));
+        }
+        if copy_set == 0 {
+            set_a_discs = full.discs;
+        }
+    }
+    if sets.is_empty() {
+        sets.push(set_plan(
+            &set_a_discs,
+            0,
+            finalize,
+            &catch_up[0],
+            &next_session,
+        ));
+    }
+    oversized.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
     PlanReport {
-        disc,
+        copies,
+        sets,
         disc_type,
-        tombstones: full.tombstones,
-        remaining,
-        oversized: full.oversized,
+        tombstones: changes.deleted,
+        oversized,
     }
 }
 
-/// Why `report` no longer describes `scanned`, or `None` if it still does.
+/// One set's chosen disc, with what spills behind it.
+fn set_plan(
+    discs: &[PlannedDisc],
+    idx: usize,
+    finalize: bool,
+    catch_up: &[ScannedFile],
+    next_session: &impl Fn(DiscKey) -> u32,
+) -> SetPlan {
+    let mut disc = discs[idx].clone();
+    // The planner already seals this disc iff the plan spilled; `--finalize`
+    // forces a seal even when everything fit.
+    disc.will_finalize = disc.will_finalize || finalize;
+    let tail = &discs[idx + 1..];
+    let catch_up_paths: HashSet<&RelPath> = catch_up.iter().map(|f| &f.rel_path).collect();
+    SetPlan {
+        catch_up: disc
+            .files
+            .iter()
+            .filter(|f| catch_up_paths.contains(&f.rel_path))
+            .count(),
+        session_ordinal: if disc.is_new {
+            1
+        } else {
+            next_session(disc.key())
+        },
+        remaining: RemainingEstimate {
+            more_discs: tail.len(),
+            more_files: tail.iter().map(|d| d.files.len()).sum(),
+            more_bytes: tail
+                .iter()
+                .flat_map(|d| d.files.iter())
+                .map(|f| f.size_bytes)
+                .sum(),
+        },
+        disc,
+    }
+}
+
+/// Why `disc` no longer describes `scanned`, or `None` if it still does.
 ///
 /// `scan --force` re-stages the scan without touching the plan, so the two
-/// can drift apart. The plan is stale when a file it places is missing from
-/// the scan or has a different hash or size there, or when a path it
+/// can drift apart. The disc is stale when a file it places is missing from
+/// the scan or has a different hash or size there, or when a path the cycle
 /// tombstones is present again. A file the scan added that the plan does not
 /// place is not staleness: the next cycle picks it up.
-pub fn stale_detail(report: &PlanReport, scanned: &[ScannedFile]) -> Option<String> {
-    let by_path: std::collections::HashMap<&diskrement_core::RelPath, &ScannedFile> =
+pub fn stale_detail(
+    disc: &PlannedDisc,
+    tombstones: &[RelPath],
+    scanned: &[ScannedFile],
+) -> Option<String> {
+    let by_path: HashMap<&RelPath, &ScannedFile> =
         scanned.iter().map(|f| (&f.rel_path, f)).collect();
-    for planned in &report.disc.files {
+    for planned in &disc.files {
         let what = match by_path.get(&planned.rel_path) {
             None => "is gone from",
             Some(f) if f.content_hash != planned.content_hash => "changed in",
@@ -111,8 +183,7 @@ pub fn stale_detail(report: &PlanReport, scanned: &[ScannedFile]) -> Option<Stri
             planned.rel_path
         ));
     }
-    report
-        .tombstones
+    tombstones
         .iter()
         .find(|t| by_path.contains_key(t))
         .map(|t| format!("{t} is back in the staged scan after this plan tombstoned it"))
@@ -122,8 +193,9 @@ pub fn stale_detail(report: &PlanReport, scanned: &[ScannedFile]) -> Option<Stri
 mod tests {
     use super::*;
     // `CatalogView::from_scanned` is core's own helper for "the view that
-    // results from recording exactly these files", which is what a
-    // no-change or partial-change scenario needs here.
+    // results from recording exactly these files". It leaves every
+    // `live_sets` empty, so a scenario where the files are already burned
+    // uses `live_in` below to put them on a live disc in the right sets.
     use diskrement_core::{
         Capacity, CatalogView, ContentHash, DiscState, DiscStatus, DiscType, RelPath, ScannedFile,
     };
@@ -187,13 +259,15 @@ mod tests {
             DiscType::BdR,
             Capacity::new(1_000),
             false,
+            1,
+            |_| 1,
         );
-        assert_eq!(report.disc.ordinal, 1);
-        assert!(report.disc.is_new);
-        assert!(!report.disc.will_finalize);
-        assert_eq!(report.disc.files.len(), 2);
+        assert_eq!(report.sets[0].disc.ordinal, 1);
+        assert!(report.sets[0].disc.is_new);
+        assert!(!report.sets[0].disc.will_finalize);
+        assert_eq!(report.sets[0].disc.files.len(), 2);
         assert_eq!(
-            report.remaining,
+            report.sets[0].remaining,
             RemainingEstimate {
                 more_discs: 0,
                 more_files: 0,
@@ -214,11 +288,16 @@ mod tests {
             DiscType::BdR,
             Capacity::new(1_000),
             false,
+            1,
+            |_| 1,
         );
-        assert_eq!(report.disc.files.len(), 1);
-        assert!(report.disc.will_finalize, "a spilled disc is sealed");
+        assert_eq!(report.sets[0].disc.files.len(), 1);
+        assert!(
+            report.sets[0].disc.will_finalize,
+            "a spilled disc is sealed"
+        );
         assert_eq!(
-            report.remaining,
+            report.sets[0].remaining,
             RemainingEstimate {
                 more_discs: 1,
                 more_files: 1,
@@ -237,6 +316,8 @@ mod tests {
             DiscType::BdR,
             Capacity::new(1_000),
             false,
+            1,
+            |_| 1,
         );
         let sealed = plan_from(
             &CatalogView::empty(),
@@ -245,9 +326,11 @@ mod tests {
             DiscType::BdR,
             Capacity::new(1_000),
             true,
+            1,
+            |_| 1,
         );
-        assert!(!open.disc.will_finalize);
-        assert!(sealed.disc.will_finalize);
+        assert!(!open.sets[0].disc.will_finalize);
+        assert!(sealed.sets[0].disc.will_finalize);
     }
 
     #[test]
@@ -256,23 +339,26 @@ mod tests {
         let files = vec![file("a.bin", 300)];
         let states = [DiscState {
             ordinal: 4,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 1_000,
             used_bytes: 300,
         }];
         let report = plan_from(
-            &CatalogView::from_scanned(&files),
+            &live_in(&files, &[0]),
             &files,
             &states,
             DiscType::BdR,
             Capacity::new(1_000),
             true,
+            1,
+            |_| 1,
         );
-        assert_eq!(report.disc.ordinal, 4);
-        assert!(report.disc.files.is_empty());
-        assert!(!report.disc.is_new);
-        assert!(report.disc.will_finalize);
-        assert_eq!(report.remaining.more_discs, 0);
+        assert_eq!(report.sets[0].disc.ordinal, 4);
+        assert!(report.sets[0].disc.files.is_empty());
+        assert!(!report.sets[0].disc.is_new);
+        assert!(report.sets[0].disc.will_finalize);
+        assert_eq!(report.sets[0].remaining.more_discs, 0);
     }
 
     #[test]
@@ -285,23 +371,29 @@ mod tests {
         files.sort_by(|x, y| x.rel_path.cmp(&y.rel_path));
         let states = [DiscState {
             ordinal: 2,
+            copy_set: 0,
             status: DiscStatus::Open,
             usable_bytes: 1_000,
             used_bytes: 800,
         }];
         let report = plan_from(
-            &CatalogView::from_scanned(&[existing]),
+            &live_in(&[existing], &[0]),
             &files,
             &states,
             DiscType::BdR,
             Capacity::new(1_000),
             false,
+            1,
+            |_| 1,
         );
-        assert_eq!(report.disc.ordinal, 3, "a fresh disc, not the open one");
-        assert!(report.disc.is_new);
-        assert_eq!(report.disc.files.len(), 1);
-        assert_eq!(report.disc.files[0].rel_path.as_str(), "b.bin");
-        assert_eq!(report.remaining.more_discs, 0);
+        assert_eq!(
+            report.sets[0].disc.ordinal, 3,
+            "a fresh disc, not the open one"
+        );
+        assert!(report.sets[0].disc.is_new);
+        assert_eq!(report.sets[0].disc.files.len(), 1);
+        assert_eq!(report.sets[0].disc.files[0].rel_path.as_str(), "b.bin");
+        assert_eq!(report.sets[0].remaining.more_discs, 0);
     }
 
     #[test]
@@ -314,11 +406,13 @@ mod tests {
             DiscType::BdR,
             Capacity::new(1_000),
             false,
+            1,
+            |_| 1,
         );
         assert_eq!(report.oversized.len(), 1);
         assert_eq!(report.oversized[0].rel_path.as_str(), "big.bin");
-        assert_eq!(report.disc.files.len(), 1);
-        assert_eq!(report.disc.files[0].rel_path.as_str(), "small.bin");
+        assert_eq!(report.sets[0].disc.files.len(), 1);
+        assert_eq!(report.sets[0].disc.files[0].rel_path.as_str(), "small.bin");
     }
 
     #[test]
@@ -331,6 +425,8 @@ mod tests {
             DiscType::BdR,
             Capacity::new(1_000),
             false,
+            1,
+            |_| 1,
         );
         assert_eq!(report.tombstones.len(), 1);
         assert_eq!(report.tombstones[0].as_str(), "gone.bin");
@@ -343,16 +439,18 @@ mod tests {
         // is safe — this test is what keeps that assumption honest.
         let files = vec![file("a.bin", 300)];
         let report = plan_from(
-            &CatalogView::from_scanned(&files),
+            &live_in(&files, &[0]),
             &files,
             &[],
             DiscType::BdR,
             Capacity::new(1_000),
             false,
+            1,
+            |_| 1,
         );
-        assert!(report.disc.files.is_empty());
+        assert!(report.sets[0].disc.files.is_empty());
         assert!(report.tombstones.is_empty());
-        assert_eq!(report.remaining.more_discs, 0);
+        assert_eq!(report.sets[0].remaining.more_discs, 0);
     }
 
     fn plan_of(scanned: &[ScannedFile]) -> PlanReport {
@@ -363,13 +461,19 @@ mod tests {
             DiscType::BdR,
             Capacity::new(1_000_000),
             false,
+            1,
+            |_| 1,
         )
     }
 
     #[test]
     fn a_plan_matching_its_scan_is_not_stale() {
         let scanned = vec![file("a", 10), file("b", 20)];
-        assert_eq!(stale_detail(&plan_of(&scanned), &scanned), None);
+        let report = plan_of(&scanned);
+        assert_eq!(
+            stale_detail(&report.sets[0].disc, &report.tombstones, &scanned),
+            None
+        );
     }
 
     #[test]
@@ -377,7 +481,11 @@ mod tests {
         let scanned = vec![file("a", 10)];
         let report = plan_of(&scanned);
         assert_eq!(
-            stale_detail(&report, &[file("a", 10), file("new", 5)]),
+            stale_detail(
+                &report.sets[0].disc,
+                &report.tombstones,
+                &[file("a", 10), file("new", 5)]
+            ),
             None
         );
     }
@@ -385,7 +493,132 @@ mod tests {
     #[test]
     fn a_planned_file_gone_from_the_scan_makes_the_plan_stale() {
         let report = plan_of(&[file("a", 10), file("b", 20)]);
-        let detail = stale_detail(&report, &[file("b", 20)]).expect("stale");
+        let detail = stale_detail(&report.sets[0].disc, &report.tombstones, &[file("b", 20)])
+            .expect("stale");
         assert!(detail.contains("a is gone"), "{detail}");
+    }
+
+    fn plan1(
+        view: &CatalogView,
+        files: &[ScannedFile],
+        states: &[DiscState],
+        finalize: bool,
+    ) -> PlanReport {
+        plan_from(
+            view,
+            files,
+            states,
+            DiscType::BdR,
+            Capacity::new(1_000),
+            finalize,
+            1,
+            |_| 1,
+        )
+    }
+
+    fn plan2(
+        view: &CatalogView,
+        files: &[ScannedFile],
+        states: &[DiscState],
+        finalize: bool,
+    ) -> PlanReport {
+        plan_from(
+            view,
+            files,
+            states,
+            DiscType::BdR,
+            Capacity::new(1_000),
+            finalize,
+            2,
+            |_| 7,
+        )
+    }
+
+    fn live_in(files: &[ScannedFile], sets: &[u32]) -> CatalogView {
+        let mut view = CatalogView::from_scanned(files);
+        for e in view.current.values_mut() {
+            e.live_sets = sets.iter().copied().collect();
+        }
+        view
+    }
+
+    fn open(ordinal: u32, copy_set: u32, used: u64) -> DiscState {
+        DiscState {
+            ordinal,
+            copy_set,
+            status: DiscStatus::Open,
+            usable_bytes: 1_000,
+            used_bytes: used,
+        }
+    }
+
+    #[test]
+    fn a_fresh_two_copy_project_plans_twin_new_discs() {
+        let files = vec![file("a.bin", 300), file("b.bin", 300)];
+        let report = plan2(&CatalogView::empty(), &files, &[], false);
+        assert_eq!(report.copies, 2);
+        assert_eq!(report.sets.len(), 2);
+        for (set, sp) in report.sets.iter().enumerate() {
+            assert_eq!(sp.disc.key(), diskrement_core::DiscKey::new(1, set as u32));
+            assert!(sp.disc.is_new);
+            assert_eq!(sp.disc.files, files);
+            assert_eq!(sp.catch_up, 0);
+            assert_eq!(
+                sp.session_ordinal, 1,
+                "a new disc always starts at session 1"
+            );
+        }
+    }
+
+    #[test]
+    fn a_set_missing_a_copy_gets_it_as_catch_up_and_the_full_set_writes_nothing() {
+        let files = vec![file("a.bin", 300)];
+        let view = live_in(&files, &[0]);
+        let report = plan2(&view, &files, &[open(1, 0, 300)], false);
+        assert_eq!(report.sets.len(), 1, "set A has nothing to do");
+        let sp = &report.sets[0];
+        assert_eq!(sp.disc.key(), diskrement_core::DiscKey::new(1, 1));
+        assert_eq!(sp.catch_up, 1);
+        assert_eq!(sp.disc.files, files);
+    }
+
+    #[test]
+    fn an_existing_open_disc_records_the_session_it_will_receive() {
+        let files = vec![file("a.bin", 300), file("n.bin", 10)];
+        let view = live_in(&files[..1], &[0, 1]);
+        let report = plan2(&view, &files, &[open(1, 0, 300), open(1, 1, 300)], false);
+        assert!(report.sets.iter().all(|sp| sp.session_ordinal == 7));
+    }
+
+    #[test]
+    fn finalize_with_nothing_to_place_seals_every_sets_open_disc() {
+        let files = vec![file("a.bin", 300)];
+        let view = live_in(&files, &[0, 1]);
+        let report = plan2(&view, &files, &[open(1, 0, 300), open(1, 1, 300)], true);
+        assert_eq!(report.sets.len(), 2);
+        assert!(report
+            .sets
+            .iter()
+            .all(|sp| sp.disc.will_finalize && sp.disc.files.is_empty()));
+    }
+
+    #[test]
+    fn a_deletion_only_cycle_still_plans_one_set_a_disc_for_its_tombstones() {
+        let kept = vec![file("a.bin", 300)];
+        let view = live_in(&[file("a.bin", 300), file("gone.bin", 10)], &[0, 1]);
+        let report = plan2(&view, &kept, &[open(1, 0, 310), open(1, 1, 310)], false);
+        assert_eq!(report.sets.len(), 1);
+        assert_eq!(
+            report.sets[0].disc.key(),
+            diskrement_core::DiscKey::new(1, 0)
+        );
+        assert_eq!(report.tombstones, vec![RelPath("gone.bin".into())]);
+    }
+
+    #[test]
+    fn a_single_copy_plan_has_exactly_one_set() {
+        let report = plan1(&CatalogView::empty(), &[file("a.bin", 300)], &[], false);
+        assert_eq!(report.copies, 1);
+        assert_eq!(report.sets.len(), 1);
     }
 }

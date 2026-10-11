@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use diskrement_core::RelPath;
+use diskrement_core::{DiscKey, RelPath};
 use diskrement_shell::burn::cmd::{self, CmdOutput, Exec};
 use diskrement_shell::burn::media::{MediaInspector, MediaStatus};
 use diskrement_shell::burn::reader::DiscReader;
@@ -199,7 +199,8 @@ fn two_tier_verification_passes_clean_mismatches_tampered_and_skips_declined() {
 
     let expectation = DiscExpectation {
         project_name: "photos".to_string(),
-        disc_ordinal: 1,
+        disc: DiscKey::new(1, 0),
+        disc_name: "1".to_string(),
         latest_session: BTreeMap::new(),
         visible: BTreeMap::from([
             (RelPath("a.txt".to_string()), sha256("v2")),
@@ -277,7 +278,8 @@ fn a_file_missing_from_the_disc_is_a_mismatch() {
     let outcome = DiscVerifier::new(BurnDevice::ImageFile(iso), &exec, &operator)
         .verify(&DiscExpectation {
             project_name: "photos".to_string(),
-            disc_ordinal: 1,
+            disc: DiscKey::new(1, 0),
+            disc_name: "1".to_string(),
             latest_session: BTreeMap::new(),
             visible: BTreeMap::from([
                 (RelPath("only.txt".to_string()), sha256("here")),

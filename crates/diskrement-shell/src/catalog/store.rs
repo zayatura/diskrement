@@ -18,7 +18,7 @@ use super::model::{
 use super::time;
 use super::Catalog;
 use crate::error::{is_unique_violation, CatalogError};
-use diskrement_core::{ContentHash, DiscStatus, DiscType, ManifestChangeKind, RelPath};
+use diskrement_core::{ContentHash, DiscKey, DiscStatus, DiscType, ManifestChangeKind, RelPath};
 
 impl Catalog {
     /// Insert a project row, returning its new id.
@@ -100,8 +100,8 @@ impl Catalog {
     /// as it was.
     pub fn apply_update(&mut self, u: &CatalogUpdate) -> Result<(), CatalogError> {
         self.tx(|tx| {
-            for ordinal in &u.finalize_disc_ordinals {
-                finalize_disc(tx, u.project_id, *ordinal)?;
+            for disc in &u.finalize_disc_ordinals {
+                finalize_disc(tx, u.project_id, *disc)?;
             }
             for disc in &u.discs {
                 write_disc(tx, u.project_id, disc)?;
@@ -117,7 +117,7 @@ impl Catalog {
     pub fn mark_verified(
         &mut self,
         project: ProjectId,
-        disc_ordinal: u32,
+        disc: DiscKey,
         session_ordinal: u32,
     ) -> Result<(), CatalogError> {
         self.tx(|tx| {
@@ -126,34 +126,45 @@ impl Catalog {
                     "update session set state = 'VERIFIED'
                      where state = 'BURNED' and ordinal = ?1
                        and disc_id = (select id from disc
-                                      where project_id = ?2 and ordinal = ?3)",
-                    params![session_ordinal as i64, project.0, disc_ordinal as i64],
+                                      where project_id = ?2 and ordinal = ?3
+                                        and copy_set = ?4)",
+                    params![
+                        session_ordinal as i64,
+                        project.0,
+                        disc.ordinal as i64,
+                        disc.copy_set as i64
+                    ],
                 )
                 .map_err(CatalogError::from_sqlite)?;
             if updated == 0 {
                 return Err(CatalogError::IllegalStatusTransition(format!(
-                    "no BURNED session {session_ordinal} on disc {disc_ordinal}"
+                    "no BURNED session {session_ordinal} on disc {} (set {})",
+                    disc.ordinal, disc.copy_set
                 )));
             }
             Ok(())
         })
     }
 
-    /// Append a MARKED_DEAD event for `disc_ordinal` and record its casualties.
+    /// Append a MARKED_DEAD event for `disc` and report what it cost. A
+    /// version whose only live copy was on this disc becomes REBURN (current;
+    /// the next cycle re-writes it from source) or LOST (superseded or
+    /// deleted; gone). A version with another live copy is not written to
+    /// `lost_version`: if current and no live copy remains in `disc`'s copy
+    /// set, it is reported as degraded (the next cycle restores that set's
+    /// copy); a current version still covered within its own set is not
+    /// reported at all; a non-current one is counted as a superseded survivor.
     ///
-    /// Every version whose only copy was on this disc becomes either REBURN
-    /// (the path's current version — the next scan/plan/burn re-writes it from
-    /// source) or LOST (a superseded or deleted version — permanently gone).
     /// The `disc` row itself is never touched: dead-ness is derived from
     /// `disc_event` at read time.
     pub fn mark_dead(
         &mut self,
         project: ProjectId,
-        disc_ordinal: u32,
+        disc: DiscKey,
         at: &DateTime<Utc>,
     ) -> Result<LostReport, CatalogError> {
         self.tx(|tx| {
-            let disc_id = disc_id_by_ordinal(tx, project, disc_ordinal)?;
+            let disc_id = disc_id(tx, project, disc)?;
             let already: i64 = tx
                 .query_row(
                     "select count(*) from disc_event
@@ -164,11 +175,12 @@ impl Catalog {
                 .map_err(CatalogError::from_sqlite)?;
             if already > 0 {
                 return Err(CatalogError::IllegalStatusTransition(format!(
-                    "disc {disc_ordinal} is already dead"
+                    "disc {} (set {}) is already dead",
+                    disc.ordinal, disc.copy_set
                 )));
             }
 
-            let casualties = dead_disc_versions(tx, project, disc_id)?;
+            let versions = disc_versions(tx, project, disc_id)?;
 
             tx.execute(
                 "insert into disc_event (disc_id, kind, at) values (?1, 'MARKED_DEAD', ?2)",
@@ -177,41 +189,47 @@ impl Catalog {
             .map_err(CatalogError::from_sqlite)?;
             let event_id = tx.last_insert_rowid();
 
-            for casualty in &casualties {
-                let fate = if casualty.is_current {
-                    "REBURN"
-                } else {
-                    "LOST"
-                };
+            for v in versions.iter().filter(|v| !v.has_other_live_copy) {
+                let fate = if v.is_current { "REBURN" } else { "LOST" };
                 tx.execute(
                     "insert into lost_version (event_id, file_version_id, fate)
                      values (?1, ?2, ?3)",
-                    params![event_id, casualty.file_version_id, fate],
+                    params![event_id, v.file_version_id, fate],
                 )
                 .map_err(CatalogError::from_sqlite)?;
             }
 
+            let live_entry = |v: &DiscVersion| ReburnEntry {
+                rel_path: v.rel_path.clone(),
+                content_hash: v.content_hash.clone(),
+                size_bytes: v.size_bytes,
+            };
             Ok(LostReport {
-                disc_ordinal,
-                lost: casualties
+                disc,
+                lost: versions
                     .iter()
-                    .filter(|c| !c.is_current)
-                    .map(|c| LostVersionEntry {
-                        rel_path: c.rel_path.clone(),
-                        content_hash: c.content_hash.clone(),
-                        size_bytes: c.size_bytes,
-                        session_ordinal: c.session_ordinal,
+                    .filter(|v| !v.has_other_live_copy && !v.is_current)
+                    .map(|v| LostVersionEntry {
+                        rel_path: v.rel_path.clone(),
+                        content_hash: v.content_hash.clone(),
+                        size_bytes: v.size_bytes,
+                        session_ordinal: v.session_ordinal,
                     })
                     .collect(),
-                reburn: casualties
+                reburn: versions
                     .iter()
-                    .filter(|c| c.is_current)
-                    .map(|c| ReburnEntry {
-                        rel_path: c.rel_path.clone(),
-                        content_hash: c.content_hash.clone(),
-                        size_bytes: c.size_bytes,
-                    })
+                    .filter(|v| !v.has_other_live_copy && v.is_current)
+                    .map(live_entry)
                     .collect(),
+                degraded: versions
+                    .iter()
+                    .filter(|v| v.is_current && v.has_other_live_copy && !v.has_other_live_same_set)
+                    .map(live_entry)
+                    .collect(),
+                superseded_survivors: versions
+                    .iter()
+                    .filter(|v| v.has_other_live_copy && !v.is_current)
+                    .count(),
             })
         })
     }
@@ -241,41 +259,43 @@ impl Catalog {
     }
 }
 
+fn disc_id(tx: &Transaction<'_>, project: ProjectId, disc: DiscKey) -> Result<i64, CatalogError> {
+    tx.query_row(
+        "select id from disc where project_id = ?1 and ordinal = ?2 and copy_set = ?3",
+        params![project.0, disc.ordinal as i64, disc.copy_set as i64],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(CatalogError::from_sqlite)?
+    .ok_or_else(|| {
+        CatalogError::ConstraintViolation(format!(
+            "no disc with ordinal {} in copy set {}",
+            disc.ordinal, disc.copy_set
+        ))
+    })
+}
+
 /// Flip a pre-existing OPEN disc to FINALIZED. Anything else is an illegal
 /// transition — including a disc that is already FINALIZED.
 fn finalize_disc(
     tx: &Transaction<'_>,
     project: ProjectId,
-    ordinal: u32,
+    disc: DiscKey,
 ) -> Result<(), CatalogError> {
     let updated = tx
         .execute(
             "update disc set status = 'FINALIZED'
-             where project_id = ?1 and ordinal = ?2 and status = 'OPEN'",
-            params![project.0, ordinal as i64],
+             where project_id = ?1 and ordinal = ?2 and copy_set = ?3 and status = 'OPEN'",
+            params![project.0, disc.ordinal as i64, disc.copy_set as i64],
         )
         .map_err(CatalogError::from_sqlite)?;
     if updated == 0 {
         return Err(CatalogError::IllegalStatusTransition(format!(
-            "disc {ordinal} is not OPEN"
+            "disc {} (set {}) is not OPEN",
+            disc.ordinal, disc.copy_set
         )));
     }
     Ok(())
-}
-
-fn disc_id_by_ordinal(
-    tx: &Transaction<'_>,
-    project: ProjectId,
-    ordinal: u32,
-) -> Result<i64, CatalogError> {
-    tx.query_row(
-        "select id from disc where project_id = ?1 and ordinal = ?2",
-        params![project.0, ordinal as i64],
-        |row| row.get::<_, i64>(0),
-    )
-    .optional()
-    .map_err(CatalogError::from_sqlite)?
-    .ok_or_else(|| CatalogError::ConstraintViolation(format!("no disc with ordinal {ordinal}")))
 }
 
 /// Insert or find the disc row, insert its session, then write the session's
@@ -285,8 +305,8 @@ fn disc_id_by_ordinal(
 fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result<(), CatalogError> {
     let disc_id = if d.is_new {
         tx.execute(
-            "insert into disc (project_id, ordinal, disc_type, usable_bytes, status, label)
-             values (?1, ?2, ?3, ?4, ?5, ?6)",
+            "insert into disc (project_id, ordinal, disc_type, usable_bytes, status, label, copy_set)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 project.0,
                 d.ordinal as i64,
@@ -294,12 +314,13 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
                 d.usable_bytes as i64,
                 d.status.as_str(),
                 d.label,
+                d.copy_set as i64,
             ],
         )
         .map_err(CatalogError::from_sqlite)?;
         tx.last_insert_rowid()
     } else {
-        let id = disc_id_by_ordinal(tx, project, d.ordinal)?;
+        let id = disc_id(tx, project, DiscKey::new(d.ordinal, d.copy_set))?;
         if d.status == DiscStatus::Finalized {
             let updated = tx
                 .execute(
@@ -309,8 +330,8 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
                 .map_err(CatalogError::from_sqlite)?;
             if updated == 0 {
                 return Err(CatalogError::IllegalStatusTransition(format!(
-                    "disc {} is not OPEN",
-                    d.ordinal
+                    "disc {} (set {}) is not OPEN",
+                    d.ordinal, d.copy_set
                 )));
             }
         }
@@ -338,6 +359,7 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
             file,
             ManifestChangeKind::Added,
             &d.session.burned_at,
+            d.copy_set,
         )?;
     }
     for file in &d.session.modified {
@@ -348,7 +370,11 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
             file,
             ManifestChangeKind::Modified,
             &d.session.burned_at,
+            d.copy_set,
         )?;
+    }
+    for file in &d.session.copied {
+        write_copy(tx, project, session_id, disc_id, d.copy_set, file)?;
     }
     for path in &d.session.deleted {
         write_tombstone(tx, project, session_id, path)?;
@@ -363,6 +389,7 @@ fn write_file(
     f: &FileWrite,
     kind: ManifestChangeKind,
     first_seen_at: &DateTime<Utc>,
+    copy_set: u32,
 ) -> Result<(), CatalogError> {
     tx.execute(
         "insert into file_version
@@ -383,18 +410,75 @@ fn write_file(
     tx.execute(
         "insert into placement (file_version_id, session_id, disc_path, copy_index)
          values (?1, ?2, ?3, ?4)",
-        params![
-            file_version_id,
-            session_id,
-            f.disc_path,
-            f.copy_index as i64
-        ],
+        params![file_version_id, session_id, f.disc_path, copy_set as i64],
     )
     .map_err(CatalogError::from_sqlite)?;
 
     tx.execute(
         "insert into change_record (session_id, file_version_id, kind) values (?1, ?2, ?3)",
         params![session_id, file_version_id, kind.as_str()],
+    )
+    .map_err(CatalogError::from_sqlite)?;
+    Ok(())
+}
+
+/// Place another copy of a path's current version on this disc: one
+/// `placement` row and nothing else.
+///
+/// The version must still be current and carry the same hash — the pipeline
+/// classified the file against the live catalog a moment ago, so anything else
+/// is a bug — and must not already be on this disc, where a second copy would
+/// protect nothing.
+fn write_copy(
+    tx: &Transaction<'_>,
+    project: ProjectId,
+    session_id: i64,
+    disc_id: i64,
+    copy_set: u32,
+    f: &FileWrite,
+) -> Result<(), CatalogError> {
+    let current: Option<(i64, String, String)> = tx
+        .query_row(
+            "select fv.id, fv.content_hash, l.kind
+             from (select cr.file_version_id as fvid, cr.kind as kind
+                   from change_record cr
+                   join file_version fv on fv.id = cr.file_version_id
+                   where fv.project_id = ?1 and fv.rel_path = ?2
+                   order by cr.id desc limit 1) l
+             join file_version fv on fv.id = l.fvid",
+            params![project.0, f.rel_path.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(CatalogError::from_sqlite)?;
+    let file_version_id = match current {
+        Some((id, hash, kind)) if kind != "DELETED" && hash == f.content_hash.as_str() => id,
+        _ => {
+            return Err(CatalogError::ConstraintViolation(format!(
+                "cannot copy {}: no current version with hash {}",
+                f.rel_path, f.content_hash
+            )))
+        }
+    };
+    let already_here: bool = tx
+        .query_row(
+            "select exists (select 1 from placement p
+                            join session s on s.id = p.session_id
+                            where p.file_version_id = ?1 and s.disc_id = ?2)",
+            params![file_version_id, disc_id],
+            |row| row.get(0),
+        )
+        .map_err(CatalogError::from_sqlite)?;
+    if already_here {
+        return Err(CatalogError::ConstraintViolation(format!(
+            "{} already has a copy on this disc",
+            f.rel_path
+        )));
+    }
+    tx.execute(
+        "insert into placement (file_version_id, session_id, disc_path, copy_index)
+         values (?1, ?2, ?3, ?4)",
+        params![file_version_id, session_id, f.disc_path, copy_set as i64],
     )
     .map_err(CatalogError::from_sqlite)?;
     Ok(())
@@ -437,39 +521,55 @@ fn write_tombstone(
     }
 }
 
-/// One version that dies with the disc.
-struct Casualty {
+/// One version placed on the dying disc.
+struct DiscVersion {
     file_version_id: i64,
     rel_path: RelPath,
     content_hash: ContentHash,
     size_bytes: u64,
     session_ordinal: u32,
     is_current: bool,
+    /// Another disc that is not dead also holds this version.
+    has_other_live_copy: bool,
+    /// Such a disc is in the dying disc's own copy set, so that set still
+    /// covers the version and nothing needs restoring.
+    has_other_live_same_set: bool,
 }
 
-/// Versions placed on the dying disc that have no copy on any other live disc,
-/// flagged with whether each is its path's current version.
+/// Every version placed on the dying disc, flagged with whether it is its
+/// path's current version, whether a live copy survives elsewhere, and
+/// whether one survives in the dying disc's own copy set.
 ///
-/// Grouped by version: a version with several placements on this disc (a later
-/// session, or copies>1) is one casualty, not one per placement —
-/// `lost_version` is append-only.
-///
-/// The "no copy on another live disc" filter is correct for the lost/reburn
-/// split under copies>1. Restoring a lost *copy* is a separate concern that
-/// lands with copies>1: at copies=2, a version whose disc-1 copy dies while
-/// disc 3 lives is correctly not a casualty, and nothing re-plans a
-/// replacement — `read_view` is a path->entry map with no copy count, so
-/// redundancy silently degrades 2 -> 1. Ported as-is (spec §1).
-fn dead_disc_versions(
+/// Grouped by version: a version with several placements on this disc (a
+/// later session re-placing it) is one row, because `lost_version` is
+/// append-only and one event costs a version once.
+fn disc_versions(
     tx: &Transaction<'_>,
     project: ProjectId,
     disc_id: i64,
-) -> Result<Vec<Casualty>, CatalogError> {
+) -> Result<Vec<DiscVersion>, CatalogError> {
     let mut stmt = tx
         .prepare(
             "select fv.id, fv.rel_path, fv.content_hash, fv.size_bytes,
                     min(s.ordinal) as sess_ord,
-                    max(case when cur.fvid is not null then 1 else 0 end) as is_current
+                    max(case when cur.fvid is not null then 1 else 0 end) as is_current,
+                    exists (
+                      select 1 from placement p2
+                      join session s2 on s2.id = p2.session_id
+                      join disc d2 on d2.id = s2.disc_id
+                      where p2.file_version_id = fv.id and d2.id <> ?2
+                        and not exists (select 1 from disc_event e
+                                        where e.disc_id = d2.id and e.kind = 'MARKED_DEAD')
+                    ) as other_live,
+                    exists (
+                      select 1 from placement p2
+                      join session s2 on s2.id = p2.session_id
+                      join disc d2 on d2.id = s2.disc_id
+                      where p2.file_version_id = fv.id and d2.id <> ?2
+                        and d2.copy_set = (select copy_set from disc where id = ?2)
+                        and not exists (select 1 from disc_event e
+                                        where e.disc_id = d2.id and e.kind = 'MARKED_DEAD')
+                    ) as other_live_same_set
              from placement p
              join session s on s.id = p.session_id
              join file_version fv on fv.id = p.file_version_id
@@ -484,13 +584,6 @@ fn dead_disc_versions(
                ) c where c.rn = 1 and c.kind <> 'DELETED'
              ) cur on cur.fvid = fv.id
              where s.disc_id = ?2
-               and not exists (
-                 select 1 from placement p2
-                 join session s2 on s2.id = p2.session_id
-                 join disc d2 on d2.id = s2.disc_id
-                 where p2.file_version_id = fv.id and d2.id <> ?2
-                   and not exists (select 1 from disc_event e
-                                   where e.disc_id = d2.id and e.kind = 'MARKED_DEAD'))
              group by fv.id, fv.rel_path, fv.content_hash, fv.size_bytes
              order by fv.rel_path, sess_ord",
         )
@@ -498,13 +591,15 @@ fn dead_disc_versions(
 
     let rows = stmt
         .query_map(params![project.0, disc_id], |row| {
-            Ok(Casualty {
+            Ok(DiscVersion {
                 file_version_id: row.get::<_, i64>(0)?,
                 rel_path: RelPath(row.get::<_, String>(1)?),
                 content_hash: ContentHash(row.get::<_, String>(2)?),
                 size_bytes: row.get::<_, i64>(3)? as u64,
                 session_ordinal: row.get::<_, i64>(4)? as u32,
                 is_current: row.get::<_, i64>(5)? == 1,
+                has_other_live_copy: row.get::<_, i64>(6)? == 1,
+                has_other_live_same_set: row.get::<_, i64>(7)? == 1,
             })
         })
         .map_err(CatalogError::from_sqlite)?;
@@ -590,6 +685,7 @@ mod tests {
         let mut bad = update(pid, 1, 1, vec![fw("a", "h-a", 10)], vec![], vec![]);
         bad.discs.push(DiscWrite {
             ordinal: 99,
+            copy_set: 0,
             is_new: false,
             disc_type: diskrement_core::DiscType::BdR,
             usable_bytes: 100,
@@ -601,6 +697,7 @@ mod tests {
                 manifest_hash: "m2".to_string(),
                 added: vec![],
                 modified: vec![],
+                copied: Vec::new(),
                 deleted: vec![],
             },
         });
@@ -626,7 +723,7 @@ mod tests {
 
         let seal = CatalogUpdate {
             project_id: pid,
-            finalize_disc_ordinals: vec![1],
+            finalize_disc_ordinals: vec![DiscKey::new(1, 0)],
             discs: vec![],
         };
         cat.apply_update(&seal).expect("sealing an OPEN disc works");
@@ -675,13 +772,14 @@ mod tests {
         cat.apply_update(&update(pid, 1, 1, vec![fw("a", "h", 10)], vec![], vec![]))
             .expect("burn");
 
-        cat.mark_verified(pid, 1, 1).expect("verification recorded");
+        cat.mark_verified(pid, DiscKey::new(1, 0), 1)
+            .expect("verification recorded");
 
         let verified = cat
             .sessions_by_state(pid, SessionState::Verified)
             .expect("query succeeds");
         assert_eq!(verified.len(), 1);
-        assert_eq!((verified[0].disc_ordinal, verified[0].ordinal), (1, 1));
+        assert_eq!((verified[0].disc.ordinal, verified[0].ordinal), (1, 1));
         assert!(cat
             .sessions_by_state(pid, SessionState::Burned)
             .expect("query succeeds")
@@ -693,7 +791,7 @@ mod tests {
         let (_dir, mut cat) = temp_catalog();
         let pid = cat.create_project(&project_init("p")).expect("project");
         let err = cat
-            .mark_verified(pid, 1, 1)
+            .mark_verified(pid, DiscKey::new(1, 0), 1)
             .expect_err("there is no such session");
         assert!(
             matches!(err, CatalogError::IllegalStatusTransition(_)),
@@ -730,9 +828,9 @@ mod tests {
         pid
     }
 
-    /// Put a's version on disc 2 as well, with a raw extra placement — exactly
-    /// what copies>1 will eventually do for real. No public method can express
-    /// this yet, so the test writes the row itself.
+    /// Put a's version on disc 2 (set 0) as well, with a raw extra placement:
+    /// a second live copy in the *same* copy set as disc 1. `copy_index` is
+    /// the disc's copy set, so 0.
     fn also_place_a_on_disc_2(cat: &crate::catalog::Catalog) {
         cat.raw_connection_for_tests()
             .execute(
@@ -740,7 +838,7 @@ mod tests {
                  select (select id from file_version where rel_path = 'a'),
                         (select s.id from session s join disc d on d.id = s.disc_id
                          where d.ordinal = 2),
-                        '/data/a', 1",
+                        '/data/a', 0",
                 [],
             )
             .expect("the extra placement inserts");
@@ -768,9 +866,11 @@ mod tests {
     fn mark_dead_splits_versions_into_lost_and_reburn_and_records_both() {
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
-        let report = cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        let report = cat
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
 
-        assert_eq!(report.disc_ordinal, 1);
+        assert_eq!(report.disc, DiscKey::new(1, 0));
         assert_eq!(
             report
                 .lost
@@ -795,6 +895,7 @@ mod tests {
             cat.read_disc_states(pid).expect("states read"),
             vec![diskrement_core::DiscState {
                 ordinal: 1,
+                copy_set: 0,
                 status: diskrement_core::DiscStatus::Dead,
                 usable_bytes: 1_000_000,
                 used_bytes: 55,
@@ -818,7 +919,8 @@ mod tests {
         // assertion above.
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
-        cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
 
         let conn = cat.raw_connection_for_tests();
         let status: String = conn
@@ -847,7 +949,9 @@ mod tests {
             .expect("disc 2 exists");
         also_place_a_on_disc_2(&cat);
 
-        let report = cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        let report = cat
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
         assert_eq!(
             report
                 .reburn
@@ -864,6 +968,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b"]
         );
+        // a's other copy is on 2A, in the same set: still covered, not degraded.
+        assert!(report.degraded.is_empty());
         // Nothing was recorded against a: its bytes still exist on live disc 2.
         assert_eq!(
             fates(&cat),
@@ -882,7 +988,9 @@ mod tests {
             .expect("disc 2 exists");
         also_place_a_on_disc_2(&cat);
 
-        let second = cat.mark_dead(pid, 2, &dead_at()).expect("disc 2 dies");
+        let second = cat
+            .mark_dead(pid, DiscKey::new(2, 0), &dead_at())
+            .expect("disc 2 dies");
         // While disc 1 lived, a's copy there kept it off disc 2's casualty list.
         assert_eq!(
             second
@@ -894,7 +1002,9 @@ mod tests {
         );
         assert!(second.lost.is_empty());
 
-        let first = cat.mark_dead(pid, 1, &dead_at2()).expect("disc 1 dies");
+        let first = cat
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at2())
+            .expect("disc 1 dies");
         // Now that disc 2 is dead too, a's only surviving copy is gone.
         assert_eq!(
             first
@@ -928,7 +1038,9 @@ mod tests {
         ))
         .expect("delete a");
 
-        let report = cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        let report = cat
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
         assert_eq!(
             report
                 .lost
@@ -972,12 +1084,14 @@ mod tests {
                  select (select max(id) from file_version where rel_path = 'b'),
                         (select s.id from session s join disc d on d.id = s.disc_id
                          where d.ordinal = 1 and s.ordinal = 1),
-                        '/data/b', 1",
+                        '/data/b', 0",
                 [],
             )
             .expect("the extra placement inserts");
 
-        let report = cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        let report = cat
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
         assert_eq!(
             report
                 .reburn
@@ -1008,15 +1122,20 @@ mod tests {
     fn marking_a_dead_disc_again_fails_and_so_does_an_unknown_ordinal() {
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
-        cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
 
-        let duplicate = cat.mark_dead(pid, 1, &dead_at()).expect_err("already dead");
+        let duplicate = cat
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect_err("already dead");
         assert!(
             matches!(duplicate, CatalogError::IllegalStatusTransition(_)),
             "expected IllegalStatusTransition, got {duplicate:?}"
         );
 
-        let unknown = cat.mark_dead(pid, 9, &dead_at()).expect_err("no such disc");
+        let unknown = cat
+            .mark_dead(pid, DiscKey::new(9, 0), &dead_at())
+            .expect_err("no such disc");
         assert!(
             matches!(unknown, CatalogError::ConstraintViolation(_)),
             "expected ConstraintViolation, got {unknown:?}"
@@ -1037,7 +1156,8 @@ mod tests {
             vec!["a", "b"]
         );
 
-        cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
         assert!(cat.read_view(pid).expect("view reads").current.is_empty());
     }
 
@@ -1048,7 +1168,8 @@ mod tests {
         cat.apply_update(&update(pid, 2, 1, vec![fw("c", "c1", 5)], vec![], vec![]))
             .expect("disc 2 exists");
         also_place_a_on_disc_2(&cat);
-        cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
 
         // a survives on live disc 2; b@b2 is disc-1-only and drops; c is native
         // to disc 2.
@@ -1067,7 +1188,8 @@ mod tests {
     fn file_history_marks_dead_disc_versions_lost() {
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
-        cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
 
         let history = cat
             .file_history(pid, &RelPath("b".to_string()))
@@ -1088,7 +1210,8 @@ mod tests {
         // has the file and it is about to be re-burned.
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
-        cat.mark_dead(pid, 1, &dead_at()).expect("disc 1 dies");
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .expect("disc 1 dies");
 
         let history = cat
             .file_history(pid, &RelPath("a".to_string()))
@@ -1175,7 +1298,6 @@ mod tests {
             size_bytes: f.size_bytes,
             mtime: ts(),
             disc_path: format!("/data/{}", f.rel_path.as_str()),
-            copy_index: 0,
         };
         update(
             project,
@@ -1239,5 +1361,280 @@ mod tests {
                 .collect();
             prop_assert_eq!(actual, expected);
         }
+    }
+
+    use diskrement_core::DiscKey;
+
+    fn copy_update(
+        project: crate::catalog::model::ProjectId,
+        ordinal: u32,
+        copy_set: u32,
+        session: u32,
+        copied: Vec<crate::catalog::model::FileWrite>,
+    ) -> CatalogUpdate {
+        let mut u =
+            crate::catalog::testutil::update(project, ordinal, session, vec![], vec![], vec![]);
+        u.discs[0].copy_set = copy_set;
+        u.discs[0].session.copied = copied;
+        u
+    }
+
+    #[test]
+    fn a_copy_placement_adds_one_placement_and_no_version_or_change() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = cat
+            .create_project(&crate::catalog::testutil::project_init("p"))
+            .unwrap();
+        cat.apply_update(&crate::catalog::testutil::update(
+            p,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+            vec![],
+            vec![],
+        ))
+        .unwrap();
+        let count = |t| crate::catalog::testutil::count(&cat, t);
+        let before = (
+            count("file_version"),
+            count("change_record"),
+            count("placement"),
+        );
+
+        cat.apply_update(&copy_update(
+            p,
+            1,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+        ))
+        .unwrap();
+
+        let count = |t| crate::catalog::testutil::count(&cat, t);
+        assert_eq!(count("file_version"), before.0);
+        assert_eq!(count("change_record"), before.1);
+        assert_eq!(count("placement"), before.2 + 1);
+        let copy_index: i64 = cat
+            .raw_connection_for_tests()
+            .query_row(
+                "select copy_index from placement order by id desc limit 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(copy_index, 1, "copy_index is the disc's copy set");
+        let view = cat.read_view(p).unwrap();
+        assert_eq!(
+            view.current[&RelPath("a".into())].live_sets,
+            std::collections::BTreeSet::from([0, 1])
+        );
+    }
+
+    #[test]
+    fn a_copy_of_a_hash_that_is_not_current_is_refused_and_rolls_back() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = cat
+            .create_project(&crate::catalog::testutil::project_init("p"))
+            .unwrap();
+        cat.apply_update(&crate::catalog::testutil::update(
+            p,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+            vec![],
+            vec![],
+        ))
+        .unwrap();
+        let discs_before = crate::catalog::testutil::count(&cat, "disc");
+        let err = cat
+            .apply_update(&copy_update(
+                p,
+                1,
+                1,
+                1,
+                vec![crate::catalog::testutil::fw("a", "other", 4)],
+            ))
+            .unwrap_err();
+        assert!(matches!(err, CatalogError::ConstraintViolation(_)), "{err}");
+        assert_eq!(crate::catalog::testutil::count(&cat, "disc"), discs_before);
+    }
+
+    #[test]
+    fn a_second_copy_on_the_same_disc_is_refused() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = cat
+            .create_project(&crate::catalog::testutil::project_init("p"))
+            .unwrap();
+        cat.apply_update(&crate::catalog::testutil::update(
+            p,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+            vec![],
+            vec![],
+        ))
+        .unwrap();
+        // Session 2 of the same disc 1A tries to place `a` again.
+        let mut again = copy_update(p, 1, 0, 2, vec![crate::catalog::testutil::fw("a", "ha", 4)]);
+        again.discs[0].is_new = false;
+        let err = cat.apply_update(&again).unwrap_err();
+        assert!(matches!(err, CatalogError::ConstraintViolation(_)), "{err}");
+    }
+
+    #[test]
+    fn finalizing_and_verifying_touch_only_the_named_set() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = cat
+            .create_project(&crate::catalog::testutil::project_init("p"))
+            .unwrap();
+        cat.apply_update(&crate::catalog::testutil::update(
+            p,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+            vec![],
+            vec![],
+        ))
+        .unwrap();
+        cat.apply_update(&copy_update(
+            p,
+            1,
+            1,
+            1,
+            vec![crate::catalog::testutil::fw("a", "ha", 4)],
+        ))
+        .unwrap();
+
+        cat.mark_verified(p, DiscKey::new(1, 1), 1).unwrap();
+        cat.apply_update(&CatalogUpdate {
+            project_id: p,
+            finalize_disc_ordinals: vec![DiscKey::new(1, 1)],
+            discs: vec![],
+        })
+        .unwrap();
+
+        let states = cat.read_disc_states(p).unwrap();
+        assert_eq!(states[0].status, DiscStatus::Open, "1A untouched");
+        assert_eq!(states[1].status, DiscStatus::Finalized, "1B sealed");
+        let verified = cat
+            .sessions_by_state(p, crate::catalog::model::SessionState::Verified)
+            .unwrap();
+        assert_eq!(
+            verified.iter().map(|s| s.disc).collect::<Vec<_>>(),
+            vec![DiscKey::new(1, 1)]
+        );
+    }
+
+    #[test]
+    fn a_current_version_whose_set_lost_its_last_copy_is_degraded_not_reburned() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = seed(&mut cat);
+        // 1B holds a copy of a@a1, written through the copy-placement path.
+        cat.apply_update(&copy_update(p, 1, 1, 1, vec![fw("a", "a1", 10)]))
+            .expect("1B is burned");
+        // `a` is current (a@a1, never modified) and lives in sets 0 and 1.
+        let before = cat.read_view(p).unwrap();
+        let a = &before.current[&RelPath("a".into())];
+        assert_eq!(a.content_hash.as_str(), "a1");
+        assert_eq!(a.live_sets, std::collections::BTreeSet::from([0, 1]));
+
+        let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
+        assert_eq!(report.disc, DiscKey::new(1, 0));
+        assert!(report.reburn.iter().all(|r| r.rel_path.as_str() != "a"));
+        assert!(report.lost.iter().all(|l| l.rel_path.as_str() != "a"));
+        assert_eq!(
+            report
+                .degraded
+                .iter()
+                .map(|d| (d.rel_path.as_str(), d.content_hash.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("a", "a1")]
+        );
+        assert_eq!(report.superseded_survivors, 0);
+        // Degraded is derived: nothing about `a` is written to lost_version.
+        assert!(fates(&cat).iter().all(|(path, _)| path != "a"));
+    }
+
+    #[test]
+    fn a_current_version_still_covered_in_its_own_set_is_not_degraded() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = seed(&mut cat);
+        cat.apply_update(&update(p, 2, 1, vec![fw("c", "c1", 5)], vec![], vec![]))
+            .expect("disc 2 exists");
+        also_place_a_on_disc_2(&cat);
+
+        let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
+        // Set 0 still holds a@a1 on 2A: nothing to restore, nothing lost.
+        assert!(report.degraded.is_empty());
+        assert!(report.reburn.iter().all(|r| r.rel_path.as_str() != "a"));
+        assert!(report.lost.iter().all(|l| l.rel_path.as_str() != "a"));
+        assert_eq!(report.superseded_survivors, 0);
+        assert!(fates(&cat).iter().all(|(path, _)| path != "a"));
+    }
+
+    #[test]
+    fn a_superseded_version_with_another_live_copy_is_a_survivor_not_lost() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = seed(&mut cat);
+        cat.apply_update(&update(p, 2, 1, vec![fw("c", "c1", 5)], vec![], vec![]))
+            .expect("disc 2 exists");
+        // b@b1 is superseded by b@b2; give it a copy on live disc 2A (set 0,
+        // so copy_index 0). The copy path refuses a non-current hash, so the
+        // row is written raw.
+        cat.raw_connection_for_tests()
+            .execute(
+                "insert into placement (file_version_id, session_id, disc_path, copy_index)
+                 select (select min(id) from file_version where rel_path = 'b'),
+                        (select s.id from session s join disc d on d.id = s.disc_id
+                         where d.ordinal = 2),
+                        '/data/b', 0",
+                [],
+            )
+            .expect("the extra placement inserts");
+
+        let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
+        assert!(report.lost.is_empty());
+        assert!(report.degraded.is_empty());
+        assert_eq!(report.superseded_survivors, 1);
+        assert_eq!(
+            fates(&cat),
+            vec![
+                ("a".to_string(), "REBURN".to_string()),
+                ("b".to_string(), "REBURN".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_copy_project_never_reports_degraded_versions() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = seed(&mut cat);
+        let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
+        assert!(report.degraded.is_empty());
+        assert_eq!(report.superseded_survivors, 0);
+    }
+
+    #[test]
+    fn live_sets_lists_both_sets_until_one_copy_dies() {
+        let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
+        let p = cat
+            .create_project(&crate::catalog::testutil::project_init("p"))
+            .unwrap();
+        cat.apply_update(&update(p, 1, 1, vec![fw("a", "ha", 4)], vec![], vec![]))
+            .unwrap();
+        cat.apply_update(&copy_update(p, 1, 1, 1, vec![fw("a", "ha", 4)]))
+            .unwrap();
+        let live = |cat: &crate::catalog::Catalog| {
+            cat.read_view(p).unwrap().current[&RelPath("a".into())]
+                .live_sets
+                .clone()
+        };
+        assert_eq!(live(&cat), std::collections::BTreeSet::from([0, 1]));
+
+        let report = cat.mark_dead(p, DiscKey::new(1, 1), &dead_at()).unwrap();
+        assert_eq!(live(&cat), std::collections::BTreeSet::from([0]));
+        // 1A still holds `a`, so losing 1B degrades it rather than reburning.
+        assert!(report.reburn.is_empty());
+        assert_eq!(report.degraded.len(), 1);
     }
 }

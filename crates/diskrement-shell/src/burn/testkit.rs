@@ -82,6 +82,8 @@ pub fn identity(session_ordinal: u32) -> DiscIdentity {
     DiscIdentity {
         project_name: "photos".to_string(),
         disc_ordinal: 1,
+        copy_set: 0,
+        copies: 1,
         session_ordinal,
         created_at: ts(),
     }
@@ -128,9 +130,11 @@ pub fn image_of(
             manifest: SessionManifest {
                 project_name: "photos".to_string(),
                 disc_ordinal: 1,
+                copy_set: 0,
                 session_ordinal,
                 added: Vec::new(),
                 modified: Vec::new(),
+                copied: Vec::new(),
                 deleted: Vec::new(),
             },
             catalog_snapshot,

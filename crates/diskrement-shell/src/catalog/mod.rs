@@ -62,10 +62,9 @@ impl Catalog {
     }
 
     /// Direct access to the underlying connection, for tests that need raw
-    /// SQL: schema comparison, logical row dumps, and the extra placements a
-    /// copies>1 scenario needs but no public method can yet express. Not part
-    /// of the operational API — every caller in `src/` goes through a named
-    /// method.
+    /// SQL: schema assertions, row counts, and the occasional placement a test
+    /// inserts by hand. Not part of the operational API — every caller in
+    /// `src/` goes through a named method.
     #[doc(hidden)]
     pub fn raw_connection_for_tests(&self) -> &Connection {
         &self.conn
@@ -77,13 +76,13 @@ mod tests {
     use super::testutil::temp_catalog;
 
     #[test]
-    fn a_fresh_database_migrates_to_version_2_with_every_domain_table() {
+    fn a_fresh_database_migrates_to_version_3_with_every_domain_table() {
         let (_dir, cat) = temp_catalog();
         let version: i64 = cat
             .conn
             .query_row("select max(version) from schema_version", [], |r| r.get(0))
             .expect("schema_version is populated");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         let mut stmt = cat
             .conn
@@ -125,7 +124,7 @@ mod tests {
             .expect("versions are integers")
             .map(|r| r.expect("readable row"))
             .collect();
-        assert_eq!(versions, vec![2], "the version table must hold one row");
+        assert_eq!(versions, vec![3], "the version table must hold one row");
     }
 
     #[test]
@@ -169,5 +168,69 @@ mod tests {
             [],
         );
         assert!(err.is_err(), "the disc table must refuse a DEAD status");
+    }
+
+    #[test]
+    fn disc_ordinals_are_unique_per_copy_set_not_per_project() {
+        let (_dir, cat) = temp_catalog();
+        cat.conn
+            .execute(
+                "insert into project (name, source_root, work_dir, default_disc_type,
+                                      margin_percent, copies, created_at)
+                 values ('p', '/src', '/work', 'BD_R', 2.0, 2, '2026-06-01T00:00:00Z')",
+                [],
+            )
+            .expect("project inserts");
+        let insert = |set: i64| {
+            cat.conn.execute(
+                "insert into disc (project_id, ordinal, disc_type, usable_bytes, status, label, copy_set)
+                 values (1, 1, 'BD_R', 100, 'OPEN', 'd', ?1)",
+                [set],
+            )
+        };
+        insert(0).expect("1A inserts");
+        insert(1).expect("1B inserts beside 1A");
+        assert!(insert(1).is_err(), "a second 1B must be refused");
+        assert!(insert(-1).is_err(), "a negative copy set must be refused");
+    }
+
+    #[test]
+    fn the_migration_leaves_foreign_keys_on() {
+        let (_dir, cat) = temp_catalog();
+        let on: i64 = cat
+            .conn
+            .query_row("pragma foreign_keys", [], |r| r.get(0))
+            .expect("pragma readable");
+        assert_eq!(on, 1);
+    }
+
+    #[test]
+    fn foreign_keys_into_disc_still_name_disc_after_the_rebuild() {
+        // The V3 rebuild drops `disc` and renames `disc_v3` over it; the
+        // tables that reference it must still point at `disc`, not at a
+        // vanished or renamed table.
+        let (_dir, cat) = temp_catalog();
+        for table in ["session", "disc_event"] {
+            let targets: Vec<String> = cat
+                .conn
+                .prepare(&format!(
+                    "select \"table\" from pragma_foreign_key_list('{table}')"
+                ))
+                .expect("pragma readable")
+                .query_map([], |r| r.get(0))
+                .expect("rows")
+                .map(|r| r.expect("readable row"))
+                .collect();
+            assert_eq!(targets, vec!["disc".to_string()], "{table}");
+        }
+        let stray: i64 = cat
+            .conn
+            .query_row(
+                "select count(*) from sqlite_master where sql like '%disc_v3%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("sqlite_master readable");
+        assert_eq!(stray, 0);
     }
 }
