@@ -78,12 +78,24 @@ pub fn version() -> Vec<String> {
 }
 
 /// An ISO volume id: uppercase, `[A-Z0-9_]`, at most 32 characters.
+///
+/// Truncation shortens the project name, never the `_DISC_<name>` suffix, so
+/// twins (1A and 1B) of a long-named project still get distinct volume ids.
 pub fn volid(project_name: &str, disc_name: &str) -> String {
-    format!("{project_name}_DISC_{disc_name}")
-        .to_uppercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .take(32)
+    const MAX: usize = 32;
+    let clean = |s: &str| -> Vec<char> {
+        s.to_uppercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect()
+    };
+    let suffix = clean(&format!("_DISC_{disc_name}"));
+    let room = MAX.saturating_sub(suffix.len());
+    clean(project_name)
+        .into_iter()
+        .take(room)
+        .chain(suffix)
+        .take(MAX)
         .collect()
 }
 
@@ -219,12 +231,25 @@ mod tests {
         );
     }
 
-    /// An ISO volume id is uppercase `[A-Z0-9_]`, at most 32 characters.
     #[test]
     fn the_volume_id_carries_the_set_letter() {
         assert_eq!(volid("photos", "3B"), "PHOTOS_DISC_3B");
     }
 
+    /// Truncation eats the project name, never the disc name: twins must
+    /// never share a volume id.
+    #[test]
+    fn a_long_project_name_keeps_the_twins_volids_distinct() {
+        let project = "a fairly long project name here";
+        assert_eq!(project.len(), 31);
+        let (a, b) = (volid(project, "1A"), volid(project, "1B"));
+        assert_ne!(a, b);
+        assert!(a.len() <= 32 && b.len() <= 32, "{a} / {b}");
+        assert!(a.ends_with("_DISC_1A"), "{a}");
+        assert!(b.ends_with("_DISC_1B"), "{b}");
+    }
+
+    /// An ISO volume id is uppercase `[A-Z0-9_]`, at most 32 characters.
     #[test]
     fn volid_uppercases_replaces_and_truncates() {
         assert_eq!(volid("my photos!", "3"), "MY_PHOTOS__DISC_3");

@@ -22,7 +22,7 @@ pub mod testkit;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use diskrement_core::{ContentHash, DiscKey, RelPath, ScannedFile, SessionManifest};
+use diskrement_core::{ContentHash, DiscKey, RelPath, ScannedFile, SessionManifest, MAX_COPIES};
 
 use crate::catalog::model::ArchivePointer;
 
@@ -46,7 +46,15 @@ impl DiscIdentity {
     }
 
     /// `3` or `3B` — see `DiscKey::name`.
+    ///
+    /// Identities are also read off media, where a corrupt `project.json` can
+    /// carry a copy set with no letter (`>= MAX_COPIES`). `DiscKey::name`
+    /// panics on that; here it renders as `<ordinal>?<copy set>` (`3?26`), so
+    /// the burner describes the wrong disc and re-prompts instead of dying.
     pub fn disc_name(&self) -> String {
+        if self.copies > 1 && self.copy_set >= MAX_COPIES {
+            return format!("{}?{}", self.disc_ordinal, self.copy_set);
+        }
         self.disc().name(self.copies)
     }
 
@@ -226,6 +234,18 @@ mod tests {
     fn twins_are_different_discs() {
         assert!(!id(1, 0, 2).same_disc(&id(1, 1, 2)));
         assert!(id(1, 1, 2).same_disc(&id(1, 1, 2)));
+    }
+
+    /// A corrupt `project.json` read off media must not panic the burner:
+    /// it is just the wrong disc, to be described and re-prompted.
+    #[test]
+    fn a_copy_set_without_a_letter_still_has_a_name() {
+        assert_eq!(id(3, 26, 2).disc_name(), "3?26");
+        assert_eq!(id(3, u32::MAX, 2).disc_name(), format!("3?{}", u32::MAX));
+        assert_eq!(
+            id(1, 30, 2).to_string(),
+            "DiscIdentity(photos,1?30,2,2026-08-30T10:00:00Z)"
+        );
     }
 
     #[test]
