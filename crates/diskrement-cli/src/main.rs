@@ -272,14 +272,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 },
                 &NoopSink,
             );
-            let reports = pipeline.verify(
-                &name,
-                disc.map(|o| diskrement_core::DiscArg {
-                    ordinal: o,
-                    copy_set: None,
-                }),
-                &verifier,
-            )?;
+            let reports = pipeline.verify(&name, disc, &verifier)?;
             say(&render::verify_report(&reports, p.copies));
             // Result-driven: corruption found is a successful run with a bad
             // outcome, so it does not travel the error ladder.
@@ -302,7 +295,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             Ok(0)
         }
         Command::Disc {
-            command: args::DiscCommand::MarkDead { name, ordinal, yes },
+            command: args::DiscCommand::MarkDead { name, disc, yes },
         } => {
             // The project lookup comes first (`Runner.withProject` resolves
             // the project before `Prompt.confirm`), so an unknown project
@@ -312,7 +305,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
 
             if !prompt::confirm(
                 &format!(
-                    "Mark disc {ordinal} of {name} DEAD? Superseded versions on it are \
+                    "Mark disc {disc} of {name} DEAD? Superseded versions on it are \
                      lost forever; its live files will re-plan."
                 ),
                 yes,
@@ -329,14 +322,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 },
                 &NoopSink,
             );
-            let report = pipeline.mark_dead(
-                &name,
-                diskrement_core::DiscArg {
-                    ordinal: i64::from(ordinal),
-                    copy_set: None,
-                },
-                chrono::Utc::now(),
-            )?;
+            let report = pipeline.mark_dead(&name, disc, chrono::Utc::now())?;
             say(&render::mark_dead(&report, p.copies));
             Ok(0)
         }

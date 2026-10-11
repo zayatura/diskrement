@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use diskrement_core::DiscType;
+use diskrement_core::{DiscArg, DiscType};
 
 /// The burn backend, as a flag. zio-cli's `Options.enumeration` rejected an
 /// unknown value as an argument error and clap's `ValueEnum` does the same.
@@ -50,7 +50,8 @@ pub enum Command {
         disc_type: DiscType,
         #[arg(long, default_value_t = 2.0)]
         margin: f64,
-        #[arg(long, default_value_t = 1)]
+        /// How many copies of every file to keep, each on its own disc series (1–26, one letter per set).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=26))]
         copies: u32,
     },
     /// Snapshot the source and stage a diff.
@@ -83,15 +84,15 @@ pub enum Command {
     Reset { name: String },
     /// Re-hash burned disc(s) against the catalog.
     ///
-    /// `allow_negative_numbers` and the `i64` type are deliberate: zio-cli let
-    /// `--disc -1` reach the domain, which answers with exit 2. Rejecting it
-    /// here would be exit 1, and the exit ladder is contract (spec §3.2).
+    /// `allow_negative_numbers` is deliberate: `--disc -1` must reach the
+    /// domain, which answers with exit 2. Rejecting it here would be exit 1,
+    /// and the exit ladder is contract (spec §3.2).
     #[command(allow_negative_numbers = true)]
     Verify {
         name: String,
         /// Check only this disc instead of sweeping every live disc.
         #[arg(long)]
-        disc: Option<i64>,
+        disc: Option<DiscArg>,
     },
     /// Show the full version history of one file.
     History { name: String, rel_path: String },
@@ -108,37 +109,30 @@ pub enum Command {
 pub enum DiscCommand {
     /// Mark a disc dead (destroyed/unreadable); its live files re-plan.
     ///
-    /// `allow_negative_numbers` so that `-1` reaches `disc_ordinal` and is
+    /// `allow_negative_numbers` so that `-1` reaches `disc_name` and is
     /// refused with the same sentence the Scala parser used, rather than
     /// clap's "unexpected argument". Both exit 1; matching the wording costs
     /// one attribute.
     #[command(allow_negative_numbers = true)]
     MarkDead {
         name: String,
-        /// The ordinal of the disc to mark dead.
-        #[arg(value_parser = disc_ordinal)]
-        ordinal: u32,
+        /// The disc to mark dead: its ordinal, plus its set letter in a multi-copy project (e.g. 3B).
+        #[arg(value_parser = disc_name)]
+        disc: DiscArg,
         #[arg(long, short = 'y', default_value_t = false)]
         yes: bool,
     },
 }
 
-/// The `disc mark-dead` ordinal, validated at parse time.
-///
-/// The mirror of `Commands.scala`'s `mapOrFail`: positive, and inside `Int`.
-/// Validating here rather than in the domain is deliberate and is the one
-/// place this binary's two disc-ordinal arguments differ — `verify --disc`
-/// hands a negative ordinal to the domain (exit 2), because that is what
-/// zio-cli did and the exit ladder is contract. Mark-dead is irreversible, so
-/// its bad ordinals are refused before anything opens the catalog.
-fn disc_ordinal(raw: &str) -> Result<u32, String> {
-    match raw.parse::<i128>() {
-        Ok(n) if n > 0 && n <= i128::from(i32::MAX) => Ok(n as u32),
-        // One message for every rejection, including a non-numeric argument:
-        // Scala words that case differently ("abc is not a integer."), which
-        // §3.2 sanctions, and a single sentence is the clearer one.
+/// The `disc mark-dead` argument, validated at parse time: a positive ordinal
+/// with an optional set letter. Mark-dead is irreversible, so a bad argument
+/// is refused before anything opens the catalog — unlike `verify --disc`,
+/// which hands a negative ordinal to the domain (exit 2).
+fn disc_name(raw: &str) -> Result<DiscArg, String> {
+    match raw.parse::<DiscArg>() {
+        Ok(a) if a.ordinal > 0 && a.ordinal <= i64::from(i32::MAX) => Ok(a),
         _ => Err(format!(
-            "disc ordinal must be a positive whole number, got {raw}"
+            "disc must be a positive ordinal with an optional set letter (e.g. 3 or 3B), got {raw}"
         )),
     }
 }
@@ -334,7 +328,7 @@ mod tests {
         let Command::Verify { disc, .. } = one.command else {
             panic!("not verify")
         };
-        assert_eq!(disc, Some(3));
+        assert_eq!(disc.map(|d| d.ordinal), Some(3));
     }
 
     /// zio-cli let a negative ordinal through to the domain, which answers it
@@ -346,7 +340,7 @@ mod tests {
         let Command::Verify { disc, .. } = cli.command else {
             panic!("not verify")
         };
-        assert_eq!(disc, Some(-1));
+        assert_eq!(disc.map(|d| d.ordinal), Some(-1));
     }
 
     #[test]
@@ -406,13 +400,13 @@ mod tests {
         let plain =
             Cli::try_parse_from(["diskrement", "disc", "mark-dead", "photos", "1"]).unwrap();
         let Command::Disc {
-            command: DiscCommand::MarkDead { name, ordinal, yes },
+            command: DiscCommand::MarkDead { name, disc, yes },
         } = plain.command
         else {
             panic!("not disc mark-dead")
         };
         assert_eq!(name, "photos");
-        assert_eq!(ordinal, 1);
+        assert_eq!(disc.ordinal, 1);
         assert!(!yes);
 
         for argv in [
@@ -421,12 +415,12 @@ mod tests {
         ] {
             let cli = Cli::try_parse_from(argv).unwrap();
             let Command::Disc {
-                command: DiscCommand::MarkDead { ordinal, yes, .. },
+                command: DiscCommand::MarkDead { disc, yes, .. },
             } = cli.command
             else {
                 panic!("not disc mark-dead")
             };
-            assert_eq!(ordinal, 2);
+            assert_eq!(disc.ordinal, 2);
             assert!(yes);
         }
     }
@@ -457,12 +451,78 @@ mod tests {
         let cli =
             Cli::try_parse_from(["diskrement", "disc", "mark-dead", "p", "2147483647"]).unwrap();
         let Command::Disc {
-            command: DiscCommand::MarkDead { ordinal, .. },
+            command: DiscCommand::MarkDead { disc, .. },
         } = cli.command
         else {
             panic!("not disc mark-dead")
         };
-        assert_eq!(ordinal, 2_147_483_647);
+        assert_eq!(disc.ordinal, 2_147_483_647);
+    }
+
+    fn init_with_copies(n: &str) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from([
+            "diskrement",
+            "init",
+            "p",
+            "--source",
+            "/s",
+            "--work-dir",
+            "/w",
+            "--copies",
+            n,
+        ])
+    }
+
+    #[test]
+    fn copies_must_be_between_one_and_the_letter_count() {
+        assert!(init_with_copies("1").is_ok());
+        assert!(init_with_copies("26").is_ok());
+        assert!(init_with_copies("0").is_err());
+        assert!(init_with_copies("27").is_err());
+        assert_eq!(
+            diskrement_core::MAX_COPIES,
+            26,
+            "the parser's range is spelled out"
+        );
+    }
+
+    #[test]
+    fn mark_dead_takes_a_disc_name() {
+        let cli = Cli::try_parse_from(["diskrement", "disc", "mark-dead", "p", "2b"]).unwrap();
+        let Command::Disc {
+            command: DiscCommand::MarkDead { disc, .. },
+        } = cli.command
+        else {
+            panic!("not mark-dead")
+        };
+        assert_eq!(disc.to_string(), "2B");
+    }
+
+    #[test]
+    fn mark_dead_refuses_a_non_positive_or_malformed_disc() {
+        for bad in ["0", "-1", "2BB", "B2", "x"] {
+            let err =
+                Cli::try_parse_from(["diskrement", "disc", "mark-dead", "p", bad]).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("disc must be a positive ordinal with an optional set letter"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_takes_a_disc_name_and_lets_a_negative_ordinal_through() {
+        let cli = Cli::try_parse_from(["diskrement", "verify", "p", "--disc", "3B"]).unwrap();
+        let Command::Verify { disc, .. } = cli.command else {
+            panic!("not verify")
+        };
+        assert_eq!(disc.map(|d| d.to_string()), Some("3B".to_string()));
+        let cli = Cli::try_parse_from(["diskrement", "verify", "p", "--disc", "-1"]).unwrap();
+        let Command::Verify { disc, .. } = cli.command else {
+            panic!("not verify")
+        };
+        assert_eq!(disc.map(|d| d.ordinal), Some(-1));
     }
 
     /// A bare `disc` is a group, not a command: it must not run anything.
