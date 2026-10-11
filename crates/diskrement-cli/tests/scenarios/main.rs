@@ -26,3 +26,4 @@ mod s10_warm_rescan;
 mod s11_exit_codes;
 mod s12_realistic_tree;
 mod s13_copies;
+mod s14_deferred_deletions;

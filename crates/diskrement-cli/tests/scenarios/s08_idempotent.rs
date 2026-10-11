@@ -1,7 +1,8 @@
 //! Scenario 8: after a full burn, re-scanning an untouched source reports
-//! everything unchanged and there is nothing left to plan.
+//! everything unchanged, there is nothing left to plan, and burning that plan
+//! writes nothing.
 
-use crate::support;
+use crate::{disc, support};
 
 #[test]
 fn rescanning_an_unchanged_source_reports_all_unchanged_and_plans_nothing() {
@@ -25,4 +26,16 @@ fn rescanning_an_unchanged_source_reports_all_unchanged_and_plans_nothing() {
     let pl2 = cli.run(&["plan", "p"]);
     assert_eq!(pl2.code, 0);
     assert!(pl2.out_has("Nothing to burn: no changes to plan."));
+
+    // Burning that plan writes nothing: disc 1 gets no second session.
+    let b2 = cli.run(&["burn", "p", "--yes"]);
+    assert_eq!(b2.code, 0, "{}{}", b2.stdout, b2.stderr);
+    assert!(
+        b2.out_has("Nothing burned: no disc in this plan."),
+        "{}",
+        b2.stdout
+    );
+    assert!(!b2.out_has("Wrote disc"), "{}", b2.stdout);
+    assert_eq!(disc::manifest(&s.disc_dir(1)).session_ordinal, 1);
+    assert!(!s.disc_dir(2).exists());
 }
