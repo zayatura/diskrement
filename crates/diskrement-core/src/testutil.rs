@@ -214,3 +214,13 @@ pub fn reshuffled_planner_input_strategy(
             })
     })
 }
+
+/// A catalog entry whose version is live in exactly `sets`.
+pub fn entry_in(path: &str, hash: &str, size: u64, sets: &[u32]) -> CatalogEntry {
+    CatalogEntry {
+        rel_path: RelPath(path.to_string()),
+        content_hash: ContentHash(hash.to_string()),
+        size_bytes: size,
+        live_sets: sets.iter().copied().collect(),
+    }
+}
