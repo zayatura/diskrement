@@ -675,6 +675,56 @@ mod tests {
         assert_eq!(report.tombstones, vec![RelPath("gone.bin".into())]);
     }
 
+    fn finalized(ordinal: u32, copy_set: u32, used: u64) -> DiscState {
+        DiscState {
+            status: DiscStatus::Finalized,
+            ..open(ordinal, copy_set, used)
+        }
+    }
+
+    #[test]
+    fn finalize_with_deletions_only_and_no_open_disc_plans_no_disc() {
+        let kept = vec![file("a.bin", 300)];
+        let view = live_in(&[file("a.bin", 300), file("gone.bin", 10)], &[0, 1]);
+        let states = [finalized(1, 0, 310), finalized(1, 1, 310)];
+        let report = plan_from(
+            &view,
+            &kept,
+            vec![RelPath("gone.bin".into())],
+            &states,
+            DiscType::BdR,
+            Capacity::new(1_000),
+            true,
+            2,
+            |_| 7,
+        );
+        assert!(report.sets.is_empty(), "nothing open to seal in either set");
+        assert_eq!(report.tombstones, vec![RelPath("gone.bin".into())]);
+    }
+
+    #[test]
+    fn finalize_with_deletions_only_seals_just_the_set_that_has_an_open_disc() {
+        let kept = vec![file("a.bin", 300)];
+        let view = live_in(&[file("a.bin", 300), file("gone.bin", 10)], &[0, 1]);
+        let states = [open(1, 0, 310), finalized(1, 1, 310)];
+        let report = plan_from(
+            &view,
+            &kept,
+            vec![RelPath("gone.bin".into())],
+            &states,
+            DiscType::BdR,
+            Capacity::new(1_000),
+            true,
+            2,
+            |_| 7,
+        );
+        assert_eq!(report.sets.len(), 1);
+        let disc = &report.sets[0].disc;
+        assert_eq!(disc.key(), diskrement_core::DiscKey::new(1, 0));
+        assert!(disc.will_finalize && disc.files.is_empty() && !disc.is_new);
+        assert_eq!(report.tombstones, vec![RelPath("gone.bin".into())]);
+    }
+
     #[test]
     fn a_single_copy_plan_has_exactly_one_set() {
         let report = plan1(&CatalogView::empty(), &[file("a.bin", 300)], &[], false);
