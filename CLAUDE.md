@@ -49,6 +49,11 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   enough for `tail` and `classify_failure`. Lines are decoded lossily: never
   go back to `BufRead::lines`, which stops at the first non-UTF-8 line and
   leaves the pipe undrained, so a chatty child blocks forever.
+- **A real burn deletes each disc's staging tree right after its commit**
+  (`Burner::retains_staging`, `discard_staging` in `pipeline/mod.rs`); the simulated
+  backend keeps them because `StagingVerifier` reads them. This is safe only because
+  every disc, twins included, is staged from `work_dir/snapshot`: never stage a disc
+  from another disc's tree, and never hardlink into staging.
 - **xorriso extracts over an existing file** (validated 2026-09-07, 1.5.8.pl02),
   but every extraction in this tree still targets a fresh path inside a
   `TempDir`, so nothing depends on that.

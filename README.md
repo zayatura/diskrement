@@ -163,6 +163,15 @@ the simulated backend, including the staging trees `verify` reads back). Likewis
 `verify --disc <n>` naming a dead or unknown disc is an error rather than a quiet
 "nothing to verify".
 
+A real burn deletes each disc's staging tree (`<work-dir>/staging/disc-<name>`) as soon
+as that disc is committed. The burned disc and the catalog are the record, and a kept
+tree would pin the space of source files you have since deleted, through its reflinks.
+The simulated backend keeps its trees, because they are what `verify` reads back. Trees
+left by older versions of diskrement stay until you remove them. On a real-backend
+project with nothing staged, for example right after a burn, `reset <name>` does that
+safely. `btrfs filesystem du -s <work-dir>/staging/*` shows how much space they hold
+exclusively.
+
 ### Performance
 
 `scan` hashes new or changed content with up to 6 workers in parallel; override with

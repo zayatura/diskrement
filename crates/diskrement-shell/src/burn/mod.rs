@@ -213,6 +213,14 @@ impl Burner<'_> {
             Burner::Real(b) => b.burn(image),
         }
     }
+
+    /// Whether a disc's staging tree must outlive its commit. The simulated
+    /// backend's tree *is* the disc `StagingVerifier` reads back; a real disc
+    /// carries its own record, so its tree is only scratch space, and a kept
+    /// tree pins source extents the source has since deleted (issue #3).
+    pub fn retains_staging(&self) -> bool {
+        matches!(self, Burner::Simulated(_))
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +242,31 @@ mod tests {
     fn twins_are_different_discs() {
         assert!(!id(1, 0, 2).same_disc(&id(1, 1, 2)));
         assert!(id(1, 1, 2).same_disc(&id(1, 1, 2)));
+    }
+
+    /// The simulated tree is the disc `StagingVerifier` reads back; a real
+    /// disc carries its own record, so its tree is scratch space.
+    #[test]
+    fn only_the_simulated_backend_retains_staging() {
+        use crate::burn::cmd::CmdOutput;
+        use crate::burn::testkit::ScriptedOperator;
+        use crate::progress::NoopSink;
+
+        let exec = |_: &[String], _: &mut dyn FnMut(&str)| -> Result<CmdOutput, BurnError> {
+            unreachable!("asking the policy runs nothing")
+        };
+        let op = ScriptedOperator::new(&[]);
+        let real = Burner::Real(xorriso::burner::XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            &op,
+            &NoopSink,
+            1,
+        ));
+        let simulated = Burner::Simulated(simulated::SimulatedBurner::new(&NoopSink, 1));
+
+        assert!(simulated.retains_staging());
+        assert!(!real.retains_staging());
     }
 
     /// A corrupt `project.json` read off media must not panic the burner:

@@ -237,11 +237,9 @@ fn check_capacity(staged_bytes: u64, free_bytes: u64) -> Result<(), BurnError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::collections::VecDeque;
-
-    use crate::burn::cmd::CmdOutput;
-    use crate::burn::testkit::{image_of, ScriptedOperator};
+    use crate::burn::testkit::{
+        image_of, ScriptedExec as Script, ScriptedOperator, APPENDABLE, BLANK,
+    };
     use crate::progress::NoopSink;
 
     const IDENTITY_1: &str = r#"{"projectName":"photos","discOrdinal":1,"sessionOrdinal":1,"createdAt":"2026-08-30T10:00:00Z"}"#;
@@ -249,126 +247,6 @@ mod tests {
     /// The disc 1 twin from set B of a two-copy project, at session 1.
     const IDENTITY_1B: &str = r#"{"projectName":"photos","discOrdinal":1,"copySet":1,"copies":2,"sessionOrdinal":1,"createdAt":"2026-08-30T10:00:00Z"}"#;
     const IDENTITY_7: &str = r#"{"projectName":"photos","discOrdinal":1,"sessionOrdinal":7,"createdAt":"2026-08-30T10:00:00Z"}"#;
-
-    const BLANK: &[&str] = &["Media status : is blank", "Media space  : 500000s"];
-    const APPENDABLE: &[&str] = &[
-        "Media status : is written , is appendable",
-        "Media summary: 1 session, 57 data blocks, 114k data, 23g free",
-        "Media space  : 500000s",
-    ];
-
-    /// A scripted `Exec`.
-    ///
-    /// `toc` and `identities` are queues consumed per matching invocation,
-    /// which is how one script expresses "a wrong disc, then the right one"
-    /// and "the medium says session 1, the burned disc says session 2".
-    struct Script {
-        version: String,
-        toc: RefCell<VecDeque<Vec<String>>>,
-        identities: RefCell<VecDeque<Option<&'static str>>>,
-        burn_exit: i32,
-        burn_lines: Vec<String>,
-        calls: RefCell<Vec<String>>,
-    }
-
-    impl Script {
-        fn new() -> Self {
-            Script {
-                version: "xorriso 1.5.8.pl02".to_string(),
-                toc: RefCell::new(VecDeque::new()),
-                identities: RefCell::new(VecDeque::new()),
-                burn_exit: 0,
-                burn_lines: vec!["xorriso : UPDATE : 100% done".to_string()],
-                calls: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn toc(mut self, states: &[&[&str]]) -> Self {
-            self.toc = RefCell::new(
-                states
-                    .iter()
-                    .map(|s| s.iter().map(|l| (*l).to_string()).collect())
-                    .collect(),
-            );
-            self
-        }
-
-        fn identities(mut self, ids: &[Option<&'static str>]) -> Self {
-            self.identities = RefCell::new(ids.iter().copied().collect());
-            self
-        }
-
-        fn version(mut self, v: &str) -> Self {
-            self.version = v.to_string();
-            self
-        }
-
-        fn burn_fails(mut self) -> Self {
-            self.burn_exit = 5;
-            self.burn_lines = vec!["FAILURE : write error".to_string()];
-            self
-        }
-
-        fn ran(&self, needle: &str) -> bool {
-            self.calls.borrow().iter().any(|c| c.contains(needle))
-        }
-
-        fn respond(
-            &self,
-            cmd: &[String],
-            on_line: &mut dyn FnMut(&str),
-        ) -> Result<CmdOutput, BurnError> {
-            self.calls.borrow_mut().push(cmd.join(" "));
-            let has = |flag: &str| cmd.iter().any(|a| a == flag);
-            if has("--version") {
-                return Ok(CmdOutput {
-                    exit_code: 0,
-                    lines: vec![self.version.clone()],
-                });
-            }
-            if has("-toc") {
-                let lines = self
-                    .toc
-                    .borrow_mut()
-                    .pop_front()
-                    .expect("the script ran out of media states");
-                return Ok(CmdOutput {
-                    exit_code: 0,
-                    lines,
-                });
-            }
-            if has("-extract") {
-                return match self.identities.borrow_mut().pop_front().flatten() {
-                    Some(json) => {
-                        std::fs::write(cmd.last().expect("a destination"), json)
-                            .expect("writable destination");
-                        Ok(CmdOutput {
-                            exit_code: 0,
-                            lines: Vec::new(),
-                        })
-                    }
-                    None => Ok(CmdOutput {
-                        exit_code: 5,
-                        lines: vec!["FAILURE : cannot find path".to_string()],
-                    }),
-                };
-            }
-            if has("-commit") {
-                for line in &self.burn_lines {
-                    on_line(line);
-                }
-                return Ok(CmdOutput {
-                    exit_code: self.burn_exit,
-                    lines: self.burn_lines.clone(),
-                });
-            }
-            // -eject and anything else
-            Ok(CmdOutput {
-                exit_code: 0,
-                lines: Vec::new(),
-            })
-        }
-    }
 
     #[test]
     fn session_one_on_blank_media_burns_and_post_checks() {

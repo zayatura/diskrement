@@ -7,13 +7,15 @@
 //! Nothing here ships in the binary.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use diskrement_core::{ContentHash, RelPath, ScannedFile, SessionManifest};
 use sha2::{Digest, Sha256};
 
-use crate::burn::{BurnOperator, DiscIdentity, DiscImage, DiscMetadata};
+use crate::burn::cmd::CmdOutput;
+use crate::burn::{BurnError, BurnOperator, DiscIdentity, DiscImage, DiscMetadata};
 
 /// A `BurnOperator` with canned answers and a recorded transcript
 /// (`ScriptedOperator` in `XorrisoBurnerSpec.scala`). Running out of answers
@@ -64,6 +66,136 @@ pub fn has_xorriso() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// `-toc` output for a blank disc with room to spare.
+pub const BLANK: &[&str] = &["Media status : is blank", "Media space  : 500000s"];
+
+/// `-toc` output for a written disc that can take another session.
+pub const APPENDABLE: &[&str] = &[
+    "Media status : is written , is appendable",
+    "Media summary: 1 session, 57 data blocks, 114k data, 23g free",
+    "Media space  : 500000s",
+];
+
+/// A scripted `Exec` standing in for xorriso.
+///
+/// `toc` and `identities` are queues consumed per matching invocation,
+/// which is how one script expresses "a wrong disc, then the right one"
+/// and "the medium says session 1, the burned disc says session 2".
+/// Callers wrap it as `|c, l| script.respond(c, l)`.
+pub struct ScriptedExec {
+    version: String,
+    toc: RefCell<VecDeque<Vec<String>>>,
+    identities: RefCell<VecDeque<Option<&'static str>>>,
+    burn_exit: i32,
+    burn_lines: Vec<String>,
+    calls: RefCell<Vec<String>>,
+}
+
+impl Default for ScriptedExec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScriptedExec {
+    pub fn new() -> Self {
+        ScriptedExec {
+            version: "xorriso 1.5.8.pl02".to_string(),
+            toc: RefCell::new(VecDeque::new()),
+            identities: RefCell::new(VecDeque::new()),
+            burn_exit: 0,
+            burn_lines: vec!["xorriso : UPDATE : 100% done".to_string()],
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn toc(mut self, states: &[&[&str]]) -> Self {
+        self.toc = RefCell::new(
+            states
+                .iter()
+                .map(|s| s.iter().map(|l| (*l).to_string()).collect())
+                .collect(),
+        );
+        self
+    }
+
+    pub fn identities(mut self, ids: &[Option<&'static str>]) -> Self {
+        self.identities = RefCell::new(ids.iter().copied().collect());
+        self
+    }
+
+    pub fn version(mut self, v: &str) -> Self {
+        self.version = v.to_string();
+        self
+    }
+
+    pub fn burn_fails(mut self) -> Self {
+        self.burn_exit = 5;
+        self.burn_lines = vec!["FAILURE : write error".to_string()];
+        self
+    }
+
+    pub fn ran(&self, needle: &str) -> bool {
+        self.calls.borrow().iter().any(|c| c.contains(needle))
+    }
+
+    pub fn respond(
+        &self,
+        cmd: &[String],
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<CmdOutput, BurnError> {
+        self.calls.borrow_mut().push(cmd.join(" "));
+        let has = |flag: &str| cmd.iter().any(|a| a == flag);
+        if has("--version") {
+            return Ok(CmdOutput {
+                exit_code: 0,
+                lines: vec![self.version.clone()],
+            });
+        }
+        if has("-toc") {
+            let lines = self
+                .toc
+                .borrow_mut()
+                .pop_front()
+                .expect("the script ran out of media states");
+            return Ok(CmdOutput {
+                exit_code: 0,
+                lines,
+            });
+        }
+        if has("-extract") {
+            return match self.identities.borrow_mut().pop_front().flatten() {
+                Some(json) => {
+                    std::fs::write(cmd.last().expect("a destination"), json)
+                        .expect("writable destination");
+                    Ok(CmdOutput {
+                        exit_code: 0,
+                        lines: Vec::new(),
+                    })
+                }
+                None => Ok(CmdOutput {
+                    exit_code: 5,
+                    lines: vec!["FAILURE : cannot find path".to_string()],
+                }),
+            };
+        }
+        if has("-commit") {
+            for line in &self.burn_lines {
+                on_line(line);
+            }
+            return Ok(CmdOutput {
+                exit_code: self.burn_exit,
+                lines: self.burn_lines.clone(),
+            });
+        }
+        // -eject and anything else
+        Ok(CmdOutput {
+            exit_code: 0,
+            lines: Vec::new(),
+        })
+    }
 }
 
 pub fn sha256(body: &str) -> ContentHash {

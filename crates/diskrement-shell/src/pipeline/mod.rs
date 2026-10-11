@@ -387,6 +387,11 @@ impl<'a> Pipeline<'a> {
             .next_session_ordinal(p.id, key)
             .map_err(DiscFailure::Unwritten)?;
         if sess_ord == sp.session_ordinal + 1 {
+            // Committed by an earlier run that stopped before its cleanup or
+            // the plan rewrite; finish the cleanup it owed.
+            if !burner.retains_staging() {
+                discard_staging(&self.staging_dir(&disc_name));
+            }
             return Ok(None);
         }
         if sess_ord != sp.session_ordinal {
@@ -473,11 +478,7 @@ impl<'a> Pipeline<'a> {
             .archive_pointers(p.id)
             .map_err(DiscFailure::unwritten)?;
         let image = DiscImage {
-            staging_dir: self
-                .paths
-                .work_dir
-                .join("staging")
-                .join(format!("disc-{disc_name}")),
+            staging_dir: self.staging_dir(&disc_name),
             snapshot_root: snap_root,
             files: disc.files.clone(),
             metadata: DiscMetadata {
@@ -506,6 +507,11 @@ impl<'a> Pipeline<'a> {
                 surely_written: true,
             })?;
         let _ = std::fs::remove_file(&tmp_catalog);
+        // Only after the commit: until then the tree is part of what a retry
+        // or an Unrecorded disc leaves behind.
+        if !burner.retains_staging() {
+            discard_staging(&burned.staging_dir);
+        }
 
         Ok(Some(DiscBurn {
             disc: key,
@@ -531,6 +537,14 @@ impl<'a> Pipeline<'a> {
             }
         }
         Ok(next)
+    }
+
+    /// `work_dir/staging/disc-<name>`, one tree per disc (`DiscKey::name`).
+    fn staging_dir(&self, disc_name: &str) -> PathBuf {
+        self.paths
+            .work_dir
+            .join("staging")
+            .join(format!("disc-{disc_name}"))
     }
 
     /// The session ordinal `disc` gets next: 1 for a disc with none yet.
@@ -786,6 +800,20 @@ impl DiscFailure {
     /// An unexpected failure before the burner touched any media.
     fn unwritten(e: impl std::error::Error + 'static) -> Self {
         DiscFailure::Unwritten(Pipeline::failed(e))
+    }
+}
+
+/// Remove a committed disc's staging tree, best-effort. The burned disc and
+/// its commit are the record, so a failure here costs only space: it is
+/// reported with the path and never fails the burn. Absent is fine.
+fn discard_staging(dir: &Path) {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!(
+            "could not remove staging tree {} ({e}); it is safe to delete by hand",
+            dir.display()
+        ),
     }
 }
 
@@ -1296,7 +1324,9 @@ mod burn_tests {
     use chrono::{TimeZone as _, Utc};
     use diskrement_core::{DiscKey, DiscType, RelPath, ScannedFile, SetCoverage};
 
-    use crate::burn::{simulated::SimulatedBurner, Burner};
+    use crate::burn::testkit::{ScriptedExec, ScriptedOperator, BLANK};
+    use crate::burn::xorriso::burner::XorrisoBurner;
+    use crate::burn::{simulated::SimulatedBurner, BurnDevice, BurnError, BurnOperator, Burner};
     use crate::catalog::model::ProjectInit;
     use crate::progress::NoopSink;
 
@@ -1388,6 +1418,236 @@ mod burn_tests {
             &sink,
         );
         pipeline.burn("p", now(), &burner)
+    }
+
+    /// `project.json` as the scripted drive reads it back after each burn.
+    /// Only project, disc and session are compared, not `createdAt`.
+    const ID_1: &str = r#"{"projectName":"p","discOrdinal":1,"sessionOrdinal":1,"createdAt":"2026-08-30T10:00:00Z"}"#;
+    const ID_1A: &str = r#"{"projectName":"p","discOrdinal":1,"copySet":0,"copies":2,"sessionOrdinal":1,"createdAt":"2026-08-30T10:00:00Z"}"#;
+    const ID_1B: &str = r#"{"projectName":"p","discOrdinal":1,"copySet":1,"copies":2,"sessionOrdinal":1,"createdAt":"2026-08-30T10:00:00Z"}"#;
+
+    /// `run_burn` with the real backend, xorriso scripted by `script`.
+    fn run_real_burn(
+        env: &mut Env,
+        script: &ScriptedExec,
+        operator: &dyn BurnOperator,
+    ) -> Result<BurnReport, PipelineError> {
+        let sink = NoopSink;
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+        let burner = Burner::Real(XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            operator,
+            &sink,
+            2,
+        ));
+        let mut pipeline = Pipeline::new(
+            &mut env.catalog,
+            PipelinePaths {
+                work_dir: env.work.clone(),
+                scan_cache: env.scan_cache.clone(),
+            },
+            &sink,
+        );
+        pipeline.burn("p", now(), &burner)
+    }
+
+    /// Confirms every insert, recording whether `probe` exists at each prompt.
+    struct ProbeOperator {
+        probe: PathBuf,
+        seen: std::cell::RefCell<Vec<bool>>,
+    }
+
+    impl BurnOperator for ProbeOperator {
+        fn confirm_insert(&self, _message: &str) -> bool {
+            self.seen.borrow_mut().push(self.probe.exists());
+            true
+        }
+
+        fn progress(&self, _line: &str) {}
+    }
+
+    fn burned_sessions(env: &Env) -> usize {
+        env.catalog
+            .sessions_by_state(ProjectId(1), SessionState::Burned)
+            .unwrap()
+            .len()
+    }
+
+    #[test]
+    fn a_real_burn_removes_the_staging_tree_once_the_disc_commits() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        let script = ScriptedExec::new().toc(&[BLANK]).identities(&[Some(ID_1)]);
+        let op = ScriptedOperator::new(&[true]);
+
+        let report = run_real_burn(&mut env, &script, &op).unwrap();
+
+        assert_eq!(report.discs.len(), 1);
+        assert!(script.ran("-commit"), "the disc was written");
+        assert_eq!(burned_sessions(&env), 1);
+        assert!(
+            !env.work.join("staging/disc-1").exists(),
+            "the committed disc's tree is gone"
+        );
+    }
+
+    /// Twins are staged from the snapshot, never from each other: 1A's tree
+    /// is already gone when the operator is asked for 1B, and 1B still stages
+    /// (the stager re-hashes every file) and commits.
+    #[test]
+    fn a_two_copy_real_burn_removes_each_tree_before_the_next_disc() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        let script = ScriptedExec::new()
+            .toc(&[BLANK, BLANK])
+            .identities(&[Some(ID_1A), Some(ID_1B)]);
+        let op = ProbeOperator {
+            probe: env.work.join("staging/disc-1A"),
+            seen: Default::default(),
+        };
+
+        let report = run_real_burn(&mut env, &script, &op).unwrap();
+
+        assert_eq!(
+            report.discs.iter().map(|d| d.disc).collect::<Vec<_>>(),
+            vec![DiscKey::new(1, 0), DiscKey::new(1, 1)]
+        );
+        assert_eq!(burned_sessions(&env), 2);
+        assert_eq!(
+            *op.seen.borrow(),
+            vec![false, false],
+            "1A's tree was removed before 1B's prompt"
+        );
+        assert!(!env.work.join("staging/disc-1A").exists());
+        assert!(!env.work.join("staging/disc-1B").exists());
+    }
+
+    /// Commit after success: a disc whose commit failed keeps its tree; the
+    /// twin committed before it has already lost its own.
+    #[test]
+    fn a_real_burn_keeps_the_tree_of_a_disc_whose_commit_failed() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        env.catalog
+            .raw_connection_for_tests()
+            .execute_batch(
+                "create temp trigger refuse_1b before insert on disc
+                   when new.copy_set = 1
+                 begin select raise(abort, 'refused for the test'); end;",
+            )
+            .unwrap();
+        let script = ScriptedExec::new()
+            .toc(&[BLANK, BLANK])
+            .identities(&[Some(ID_1A), Some(ID_1B)]);
+        let op = ScriptedOperator::new(&[true, true]);
+
+        let err = run_real_burn(&mut env, &script, &op).unwrap_err();
+
+        assert_eq!(
+            partial_parts(&err),
+            (
+                vec!["1A".to_string()],
+                Some(UnrecordedDisc::written("1B")),
+                vec![]
+            )
+        );
+        assert!(!env.work.join("staging/disc-1A").exists());
+        assert!(env.work.join("staging/disc-1B/data/a.bin").is_file());
+    }
+
+    /// Pins existing behaviour: a declined prompt stages and commits nothing.
+    #[test]
+    fn a_declined_real_burn_stages_nothing_and_commits_nothing() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        let script = ScriptedExec::new().toc(&[BLANK]);
+        let op = ScriptedOperator::new(&[false]);
+
+        let err = run_real_burn(&mut env, &script, &op).unwrap_err();
+
+        assert!(
+            matches!(err, PipelineError::Burn(BurnError::Aborted)),
+            "{err}"
+        );
+        assert_eq!(err.exit_code(), 0);
+        assert!(!env.work.join("staging").exists());
+        assert_eq!(burned_sessions(&env), 0);
+    }
+
+    #[test]
+    fn resuming_a_real_burn_removes_a_committed_discs_leftover_tree() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        // A directory where the rewrite's temp file goes makes it fail, so
+        // the staged plan still lists 1A after 1A commits.
+        let tmp = env.work.join("staged/plan.json.tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let script = ScriptedExec::new().toc(&[BLANK]).identities(&[Some(ID_1A)]);
+        let err = run_real_burn(&mut env, &script, &ScriptedOperator::new(&[true])).unwrap_err();
+        assert_eq!(
+            partial_parts(&err),
+            (vec!["1A".to_string()], None, vec!["1B".to_string()])
+        );
+
+        // What a crash between 1A's commit and its cleanup leaves behind.
+        let leftover = env.work.join("staging/disc-1A/data");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("a.bin"), b"aaaa").unwrap();
+        std::fs::remove_dir(&tmp).unwrap();
+
+        let script = ScriptedExec::new().toc(&[BLANK]).identities(&[Some(ID_1B)]);
+        let report = run_real_burn(&mut env, &script, &ScriptedOperator::new(&[true])).unwrap();
+
+        assert_eq!(
+            report.discs.iter().map(|d| d.disc).collect::<Vec<_>>(),
+            vec![DiscKey::new(1, 1)],
+            "1A is not burned twice"
+        );
+        assert!(
+            !env.work.join("staging/disc-1A").exists(),
+            "the resume path cleans up 1A"
+        );
+        assert!(!env.work.join("staging/disc-1B").exists());
+    }
+
+    #[test]
+    fn discarding_a_staging_tree_removes_all_of_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let tree = dir.path().join("staging/disc-1");
+        std::fs::create_dir_all(tree.join("data/n")).unwrap();
+        std::fs::write(tree.join("data/n/a.bin"), b"a").unwrap();
+
+        discard_staging(&tree);
+
+        assert!(!tree.exists());
+        assert!(dir.path().join("staging").is_dir(), "only the disc's tree");
+    }
+
+    #[test]
+    fn discarding_a_missing_staging_tree_is_quiet() {
+        let dir = tempfile::TempDir::new().unwrap();
+        discard_staging(&dir.path().join("staging/disc-9"));
+        assert!(dir.path().is_dir());
+    }
+
+    /// A tree that cannot be removed is left in place, and the call still
+    /// returns: the disc is already committed, so this costs space, not data.
+    #[test]
+    fn a_staging_tree_that_cannot_be_removed_is_left_without_failing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let tree = dir.path().join("staging/disc-1");
+        let locked = tree.join("data/locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("a.bin"), b"a").unwrap();
+        std::fs::write(locked.join("probe"), b"p").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::remove_file(locked.join("probe")).is_ok() {
+            eprintln!("SKIP: running as root, a read-only directory is still writable");
+            return;
+        }
+
+        discard_staging(&tree);
+
+        assert!(locked.join("a.bin").exists(), "the tree is left in place");
+        // Let the TempDir clean up after itself.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
