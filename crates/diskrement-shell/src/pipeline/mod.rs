@@ -184,10 +184,13 @@ impl<'a> Pipeline<'a> {
     ) -> Result<ScanReport, PipelineError> {
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let cs = diff::diff(&view, files);
+        // Deletions come from the history, like `plan`'s tombstones, so the
+        // scan never reports a different count from the plan that follows it.
+        let recorded = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
         Ok(ScanReport {
             added: cs.added.len(),
             modified: cs.modified.len(),
-            deleted: cs.deleted.len(),
+            deleted: diff::tombstones(recorded.keys(), files).len(),
             unchanged: cs.unchanged.len(),
             hashed,
             scanned_files: files.len(),
