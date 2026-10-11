@@ -34,6 +34,22 @@ pub fn scan_report(r: &ScanReport) -> String {
 /// `copies = 1` there is one set and the output is the single-disc text.
 pub fn plan_report(p: &PlanReport) -> String {
     let copies = p.copies;
+    if p.sets.is_empty() {
+        // No disc this cycle (issue #9): deletions wait for the next one.
+        let mut lines = Vec::new();
+        match p.tombstones.len() {
+            0 => {}
+            1 => lines.push("Nothing to burn: 1 deletion waits for the next disc.".to_string()),
+            n => lines.push(format!(
+                "Nothing to burn: {n} deletions wait for the next disc."
+            )),
+        }
+        lines.extend(oversized_lines(p));
+        if lines.is_empty() {
+            return "Nothing to burn: no changes to plan.".to_string();
+        }
+        return lines.join("\n");
+    }
     let nothing = p.sets.iter().all(|s| s.disc.files.is_empty())
         && p.tombstones.is_empty()
         && p.oversized.is_empty();
@@ -102,13 +118,20 @@ pub fn plan_report(p: &PlanReport) -> String {
     if !p.tombstones.is_empty() {
         lines.push(format!("Deletions: {}", p.tombstones.len()));
     }
-    if !p.oversized.is_empty() {
-        lines.push("Oversized (cannot be placed):".to_string());
-        for f in &p.oversized {
-            lines.push(format!("  {}  {}", f.rel_path.as_str(), gb(f.size_bytes)));
-        }
-    }
+    lines.extend(oversized_lines(p));
     lines.join("\n")
+}
+
+/// The oversize block: a header and one line per file, or nothing.
+fn oversized_lines(p: &PlanReport) -> Vec<String> {
+    if p.oversized.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["Oversized (cannot be placed):".to_string()];
+    for f in &p.oversized {
+        lines.push(format!("  {}  {}", f.rel_path.as_str(), gb(f.size_bytes)));
+    }
+    lines
 }
 
 /// `f"${bytes / 1.0e9}%.1f GB"` (`Render.gb`).
@@ -116,12 +139,21 @@ pub fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1.0e9)
 }
 
-/// `Render.burn`: one block per disc written, the copy coverage when the
-/// project keeps more than one copy, then what to do next.
+/// `Render.burn`: one block per disc written (or why none was), the copy
+/// coverage when the project keeps more than one copy, then what to do next.
 pub fn burn_report(r: &BurnReport, copies: u32) -> String {
     let mut lines = Vec::new();
-    if r.discs.is_empty() {
-        lines.push("No disc written: every planned disc was already committed.".to_string());
+    match r.deferred_deletions {
+        Some(0) => lines.push("Nothing burned: no disc in this plan.".to_string()),
+        Some(1) => lines
+            .push("Nothing burned: 1 deletion will be recorded with the next disc.".to_string()),
+        Some(n) => lines.push(format!(
+            "Nothing burned: {n} deletions will be recorded with the next disc."
+        )),
+        None if r.discs.is_empty() => {
+            lines.push("No disc written: every planned disc was already committed.".to_string())
+        }
+        None => {}
     }
     for d in &r.discs {
         lines.push(format!(
@@ -682,6 +714,75 @@ mod tests {
             plan_report(&report),
             "Plan: finalize disc 4 (seal; no new files)."
         );
+    }
+
+    fn zero_set_plan(tombstones: &[&str], oversized: Vec<ScannedFile>) -> PlanReport {
+        PlanReport {
+            copies: 2,
+            sets: vec![],
+            disc_type: DiscType::BdR,
+            tombstones: tombstones.iter().map(|t| RelPath((*t).into())).collect(),
+            oversized,
+        }
+    }
+
+    #[test]
+    fn a_plan_with_no_disc_and_no_deletions_has_nothing_to_burn() {
+        assert_eq!(
+            plan_report(&zero_set_plan(&[], vec![])),
+            "Nothing to burn: no changes to plan."
+        );
+    }
+
+    #[test]
+    fn a_deletion_only_plan_says_the_deletions_wait_for_the_next_disc() {
+        assert_eq!(
+            plan_report(&zero_set_plan(&["gone"], vec![])),
+            "Nothing to burn: 1 deletion waits for the next disc."
+        );
+        assert_eq!(
+            plan_report(&zero_set_plan(&["a", "b"], vec![])),
+            "Nothing to burn: 2 deletions wait for the next disc."
+        );
+    }
+
+    #[test]
+    fn a_plan_with_no_disc_still_lists_oversized_files() {
+        assert_eq!(
+            plan_report(&zero_set_plan(
+                &[],
+                vec![scanned("huge.bin", 99_000_000_000)]
+            )),
+            "Oversized (cannot be placed):\n\
+             \x20 huge.bin  99.0 GB"
+        );
+    }
+
+    fn deferred_burn(n: usize) -> BurnReport {
+        BurnReport {
+            discs: vec![],
+            remaining: RemainingEstimate {
+                more_discs: 0,
+                more_files: 0,
+                more_bytes: 0,
+            },
+            coverage: vec![SetCoverage::default(), SetCoverage::default()],
+            deferred_deletions: Some(n),
+        }
+    }
+
+    #[test]
+    fn a_burn_of_a_plan_with_no_disc_says_nothing_was_burned() {
+        assert_eq!(
+            burn_report(&deferred_burn(0), 2),
+            "Nothing burned: no disc in this plan.\n\
+             Copies: every current file has 2 copies.\n\
+             No more changes — every copy set is up to date."
+        );
+        assert!(burn_report(&deferred_burn(1), 2)
+            .starts_with("Nothing burned: 1 deletion will be recorded with the next disc.\n"));
+        assert!(burn_report(&deferred_burn(3), 1)
+            .starts_with("Nothing burned: 3 deletions will be recorded with the next disc.\n"));
     }
 
     #[test]
