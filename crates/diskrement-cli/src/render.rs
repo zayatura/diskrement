@@ -29,9 +29,10 @@ pub fn scan_report(r: &ScanReport) -> String {
     }
 }
 
-/// `Render.plan`. Three shapes: nothing to do, bare seals, and one summary
-/// pair per copy set with the optional deletion and oversize lines. At
-/// `copies = 1` there is one set and the output is the single-disc text.
+/// `Render.plan`. Four shapes: nothing to do, deletions waiting for the next
+/// disc (no disc is planned), bare seals, and one summary pair per copy set
+/// with the optional deletion and oversize lines. At `copies = 1` there is one
+/// set and the output is the single-disc text.
 pub fn plan_report(p: &PlanReport) -> String {
     let copies = p.copies;
     if p.sets.is_empty() {
@@ -758,7 +759,7 @@ mod tests {
         );
     }
 
-    fn deferred_burn(n: usize) -> BurnReport {
+    fn deferred_burn(n: usize, copies: usize) -> BurnReport {
         BurnReport {
             discs: vec![],
             remaining: RemainingEstimate {
@@ -766,7 +767,7 @@ mod tests {
                 more_files: 0,
                 more_bytes: 0,
             },
-            coverage: vec![SetCoverage::default(), SetCoverage::default()],
+            coverage: vec![SetCoverage::default(); copies],
             deferred_deletions: Some(n),
         }
     }
@@ -774,14 +775,14 @@ mod tests {
     #[test]
     fn a_burn_of_a_plan_with_no_disc_says_nothing_was_burned() {
         assert_eq!(
-            burn_report(&deferred_burn(0), 2),
+            burn_report(&deferred_burn(0, 2), 2),
             "Nothing burned: no disc in this plan.\n\
              Copies: every current file has 2 copies.\n\
              No more changes — every copy set is up to date."
         );
-        assert!(burn_report(&deferred_burn(1), 2)
+        assert!(burn_report(&deferred_burn(1, 2), 2)
             .starts_with("Nothing burned: 1 deletion will be recorded with the next disc.\n"));
-        assert!(burn_report(&deferred_burn(3), 1)
+        assert!(burn_report(&deferred_burn(3, 1), 1)
             .starts_with("Nothing burned: 3 deletions will be recorded with the next disc.\n"));
     }
 
