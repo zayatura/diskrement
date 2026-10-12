@@ -23,3 +23,13 @@ Branch `feat/burn-io-phase`.
   That is conservative: preflight and media inspection have just launched xorriso, so
   this is near-impossible, and over-warning costs a check of the disc, while
   under-warning costs a spent BD-R being treated as blank.
+
+### Execution deviations (#11)
+
+- Review: added `an_io_failure_mid_write_reports_the_disc_as_maybe_written`, a pipeline
+  test through the real burner (copies=2, 1B's write fails with `Io` after 1A commits),
+  so the chain `XorrisoBurner` → `burner_failure` → `PartialBurn` is pinned end to end.
+  Confirmed it fails with the write's mapping removed.
+- Left as is (pre-existing, over-warns): an unclassified `-toc` failure during media
+  inspection is `BurnFailed`, so it reads "may have been written" although nothing was
+  written yet. The comment in `burner_failure` now says so.

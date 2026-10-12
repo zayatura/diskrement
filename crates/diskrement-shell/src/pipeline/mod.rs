@@ -870,7 +870,8 @@ fn burner_failure(e: crate::burn::BurnError) -> DiscFailure {
             }
         }
         // Staging, tool and device checks, media inspection and the operator
-        // prompt all run before anything is written.
+        // prompt all run before anything is written. (An inspection that
+        // xorriso fails unclassified is `BurnFailed`, above: it over-warns.)
         B::HashMismatch { .. }
         | B::SourceFileMissing(_)
         | B::Io(_)
@@ -1473,11 +1474,20 @@ mod burn_tests {
         script: &ScriptedExec,
         operator: &dyn BurnOperator,
     ) -> Result<BurnReport, PipelineError> {
-        let sink = NoopSink;
         let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+        run_real_burn_with(env, &exec, operator)
+    }
+
+    /// `run_real_burn` with any `Exec`, for scripts that fail mid-run.
+    fn run_real_burn_with(
+        env: &mut Env,
+        exec: &dyn crate::burn::cmd::Exec,
+        operator: &dyn BurnOperator,
+    ) -> Result<BurnReport, PipelineError> {
+        let sink = NoopSink;
         let burner = Burner::Real(XorrisoBurner::new(
             BurnDevice::RealDevice("/dev/sr0".to_string()),
-            &exec,
+            exec,
             operator,
             &sink,
             2,
@@ -1592,6 +1602,39 @@ mod burn_tests {
         );
         assert!(!env.work.join("staging/disc-1A").exists());
         assert!(env.work.join("staging/disc-1B/data/a.bin").is_file());
+    }
+
+    /// An I/O failure while xorriso writes 1B, after 1A committed, reaches the
+    /// operator as "may have been written", never as "not written" (#11).
+    #[test]
+    fn an_io_failure_mid_write_reports_the_disc_as_maybe_written() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        let script = ScriptedExec::new()
+            .toc(&[BLANK, BLANK])
+            .identities(&[Some(ID_1A)]);
+        let commits = std::cell::Cell::new(0);
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| {
+            if c.iter().any(|a| a == "-commit") {
+                commits.set(commits.get() + 1);
+                if commits.get() == 2 {
+                    return Err(BurnError::Io(std::io::Error::other("broken pipe")));
+                }
+            }
+            script.respond(c, l)
+        };
+
+        let err =
+            run_real_burn_with(&mut env, &exec, &ScriptedOperator::new(&[true, true])).unwrap_err();
+
+        assert_eq!(
+            partial_parts(&err),
+            (
+                vec!["1A".to_string()],
+                Some(UnrecordedDisc::maybe_written("1B")),
+                vec![]
+            )
+        );
+        assert_eq!(err.exit_code(), 6);
     }
 
     /// Pins existing behaviour: a declined prompt stages and commits nothing.

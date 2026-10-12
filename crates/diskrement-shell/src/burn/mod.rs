@@ -191,8 +191,9 @@ pub enum BurnError {
         exit_code: i32,
         output_tail: Vec<String>,
     },
-    /// An I/O failure around the burn command itself (spawning it, reading
-    /// its output, waiting for it), as opposed to `Io` before it. xorriso may
+    /// An I/O failure around the burn command itself (setting up its pipe,
+    /// spawning it, reading its output, waiting for it), as opposed to `Io`
+    /// before it. xorriso may
     /// already have written to the media, so a partial burn must not call
     /// this disc "not written".
     #[error("burn I/O error while xorriso was writing the disc: {0}")]

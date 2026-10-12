@@ -213,6 +213,8 @@ impl<'a> XorrisoBurner<'a> {
         let found = MediaInspector::new(self.device.clone(), self.exec)
             .read_identity()
             .map_err(|e| {
+                // `Io`'s own message is the bare "burn I/O error"; name the
+                // underlying error instead.
                 BurnError::PostBurnCheckFailed(match e {
                     BurnError::Io(io) => format!("could not read the identity back: {io}"),
                     other => format!("could not read the identity back: {other}"),
