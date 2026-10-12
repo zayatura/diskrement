@@ -5,6 +5,7 @@
 #
 # Runs init -> plan -> burn (simulated) -> plan against SOURCE_DIR
 # (each plan scans the source first; the second is the warm rescan)
+# Each plan step's time includes planning, which is small next to the scan's hashing and I/O.
 # using a throwaway project under WORK_AREA (same filesystem as SOURCE_DIR).
 # Staging uses CoW reflinks there -- init already enforces same-filesystem +
 # reflink capability -- so the real space requirement is metadata-only.

@@ -1,7 +1,8 @@
 //! Scenario 8: after a full burn, re-planning an untouched source reports
 //! everything unchanged, there is nothing left to plan, and burning that plan
 //! writes nothing. A file added after that nothing-to-burn cycle is then seen
-//! (#4: the old staged scan was reused and hid it).
+//! (#4: the old staged scan was reused and hid it), even with no burn in
+//! between.
 
 use crate::{disc, support};
 
@@ -36,8 +37,20 @@ fn replanning_an_unchanged_source_plans_nothing_and_a_new_file_is_then_seen() {
     assert_eq!(disc::manifest(&s.disc_dir(1)).session_ordinal, 1);
     assert!(!s.disc_dir(2).exists());
 
-    // #4: a plan with nothing to burn left its scan staged, and the next
-    // cycle reused it and never saw new files. Now the next plan does.
+    // #4: a plan with nothing to burn used to leave its scan staged, and a
+    // later scan reused it and never saw new files. Plan, don't burn, add a
+    // file, and plan again: the second plan must see it.
+    let pl2b = cli.run(&["plan", "p"]);
+    assert_eq!(pl2b.code, 0, "{}{}", pl2b.stdout, pl2b.stderr);
+    assert!(
+        pl2b.out_has("Nothing to burn: no changes to plan."),
+        "{}",
+        pl2b.stdout
+    );
+    assert!(
+        s.work.join("staged/scan.json").is_file(),
+        "the scan stays staged until a burn"
+    );
     support::write(&s.source, "c.txt", 64);
     let pl3 = cli.run(&["plan", "p"]);
     assert_eq!(pl3.code, 0, "{}{}", pl3.stdout, pl3.stderr);
