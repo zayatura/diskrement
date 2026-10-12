@@ -137,8 +137,9 @@ listed for re-burn, and the next `scan` / `plan` / `burn` writes them to fresh m
 A dead disc is excluded from `verify`, is never topped off again, and shows as `DEAD`
 in `status`.
 
-`history` lists one row per burned copy, so after the recovery burn every row on the
-dead disc reads `LOST` — including the one holding content you still have. `LOST` means
+`history` numbers versions, oldest first, and shows where each copy lives. After the
+recovery burn every copy on the dead disc reads `LOST`, including the one holding
+content you still have. `LOST` means
 *those bytes* are gone, not that the content is unrecoverable: a file that was
 superseded once on the dead disc ends up reading
 
@@ -150,8 +151,10 @@ b.txt
 ```
 
 where v2 and v3 carry the same content hash — the live copy came back on fresh media.
+With `copies` > 1, each version prints its size and hash once, followed by one line per
+copy (1A, 1B, …) with that copy's status.
 Between the mark-dead and that recovery burn, `status` keeps counting the re-burn list
-under `Current files` — `history` still calls those files `CURRENT` — and names them on
+under `Current files` — `history` shows them as `CURRENT (on a dead disc)` — and names them on
 a line of their own:
 
 ```

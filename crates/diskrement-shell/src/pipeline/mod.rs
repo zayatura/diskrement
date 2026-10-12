@@ -3503,6 +3503,68 @@ mod copies_tests {
         );
     }
 
+    /// Each version's copies share its number and sit together, 1A before 1B
+    /// (#7). The current copy on the dead 1B still reads CURRENT, flagged as
+    /// on a dead disc; the superseded one there reads LOST.
+    #[test]
+    fn a_two_copy_history_numbers_versions_not_copies() {
+        let mut env = burned_twice();
+        std::fs::write(env.source.join("a.bin"), b"AAAA").unwrap();
+        pipeline(&mut env).scan("p", false, true).unwrap();
+        pipeline(&mut env).plan("p", None, false).unwrap();
+        let burner = Burner::Simulated(SimulatedBurner::new(&NoopSink, 2));
+        pipeline(&mut env).burn("p", at(2), &burner).unwrap();
+        pipeline(&mut env)
+            .mark_dead("p", "1B".parse::<DiscArg>().unwrap(), at(3))
+            .unwrap();
+
+        let history = pipeline(&mut env)
+            .history("p", &RelPath("a.bin".to_string()))
+            .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .map(|h| (
+                    h.version,
+                    h.disc.name(2),
+                    h.session_ordinal,
+                    h.status,
+                    h.on_dead_disc
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    1,
+                    "1A".to_string(),
+                    1,
+                    crate::catalog::model::VersionStatus::Superseded,
+                    false
+                ),
+                (
+                    1,
+                    "1B".to_string(),
+                    1,
+                    crate::catalog::model::VersionStatus::Lost,
+                    true
+                ),
+                (
+                    2,
+                    "1A".to_string(),
+                    2,
+                    crate::catalog::model::VersionStatus::Current,
+                    false
+                ),
+                (
+                    2,
+                    "1B".to_string(),
+                    2,
+                    crate::catalog::model::VersionStatus::Current,
+                    true
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn marking_both_twins_dead_leaves_no_set_complete_and_still_counts_the_file() {
         let mut env = burned_twice();

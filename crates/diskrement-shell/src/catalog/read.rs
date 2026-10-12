@@ -332,6 +332,10 @@ impl Catalog {
     /// still reads `Current`, because the source file still exists and the next
     /// burn re-writes it. Only a *non-current* version on a dead disc is
     /// `Lost` — which is why `Lost` is per physical copy, not per content hash.
+    ///
+    /// One entry per copy (placement), grouped by version, twins together
+    /// (1A, 1B, 2A). `on_dead_disc` says which copies are gone even where the
+    /// status reads `Current`.
     pub fn file_history(
         &self,
         project: ProjectId,
@@ -344,7 +348,8 @@ impl Catalog {
                         case when fv.id = cur.fvid then 1 else 0 end as is_current,
                         case when exists (select 1 from disc_event e
                                           where e.disc_id = d.id and e.kind = 'MARKED_DEAD')
-                             then 1 else 0 end as disc_dead
+                             then 1 else 0 end as disc_dead,
+                        dense_rank() over (order by fv.id) as version
                  from file_version fv
                  join placement p on p.file_version_id = fv.id
                  join session s   on s.id = p.session_id
@@ -366,7 +371,7 @@ impl Catalog {
                    ) c where c.rn = 1 and c.kind <> 'DELETED'
                  ) cur on cur.fvid = fv.id
                  where fv.project_id = ?1 and fv.rel_path = ?2
-                 order by fv.id, d.copy_set, d.ordinal, s.ordinal",
+                 order by fv.id, d.ordinal, d.copy_set, s.ordinal",
             )
             .map_err(CatalogError::from_sqlite)?;
 
@@ -381,14 +386,24 @@ impl Catalog {
                     row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })
             .map_err(CatalogError::from_sqlite)?;
 
         let mut out = Vec::new();
         for row in rows {
-            let (hash, size, disc_ordinal, copy_set, session_ordinal, kind, is_current, disc_dead) =
-                row.map_err(CatalogError::from_sqlite)?;
+            let (
+                hash,
+                size,
+                disc_ordinal,
+                copy_set,
+                session_ordinal,
+                kind,
+                is_current,
+                disc_dead,
+                version,
+            ) = row.map_err(CatalogError::from_sqlite)?;
             let status = if is_current == 1 {
                 VersionStatus::Current
             } else if disc_dead == 1 {
@@ -399,11 +414,13 @@ impl Catalog {
                 VersionStatus::Superseded
             };
             out.push(FileHistoryEntry {
+                version: version as u32,
                 content_hash: ContentHash(hash),
                 size_bytes: size as u64,
                 disc: DiscKey::new(disc_ordinal as u32, copy_set as u32),
                 session_ordinal: session_ordinal as u32,
                 status,
+                on_dead_disc: disc_dead == 1,
             });
         }
         Ok(out)
@@ -782,18 +799,22 @@ mod tests {
                 .expect("history reads"),
             vec![
                 FileHistoryEntry {
+                    version: 1,
                     content_hash: ContentHash("a1".to_string()),
                     size_bytes: 10,
                     disc: DiscKey::new(1, 0),
                     session_ordinal: 1,
                     status: VersionStatus::Superseded,
+                    on_dead_disc: false,
                 },
                 FileHistoryEntry {
+                    version: 2,
                     content_hash: ContentHash("a2".to_string()),
                     size_bytes: 15,
                     disc: DiscKey::new(1, 0),
                     session_ordinal: 2,
                     status: VersionStatus::Current,
+                    on_dead_disc: false,
                 },
             ]
         );
@@ -801,11 +822,13 @@ mod tests {
             cat.file_history(pid, &RelPath("b".to_string()))
                 .expect("history reads"),
             vec![FileHistoryEntry {
+                version: 1,
                 content_hash: ContentHash("b1".to_string()),
                 size_bytes: 20,
                 disc: DiscKey::new(1, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Deleted,
+                on_dead_disc: false,
             }]
         );
     }

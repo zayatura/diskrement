@@ -210,25 +210,31 @@ fn file_history_reports_lost_per_physical_copy() {
             .expect("history"),
         vec![
             FileHistoryEntry {
+                version: 1,
                 content_hash: hash(A1),
                 size_bytes: 800,
                 disc: DiscKey::new(1, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Superseded,
+                on_dead_disc: false,
             },
             FileHistoryEntry {
+                version: 2,
                 content_hash: hash(A2),
                 size_bytes: 800,
                 disc: DiscKey::new(3, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Lost,
+                on_dead_disc: true,
             },
             FileHistoryEntry {
+                version: 3,
                 content_hash: hash(A2),
                 size_bytes: 800,
                 disc: DiscKey::new(4, 0),
                 session_ordinal: 1,
                 status: VersionStatus::Current,
+                on_dead_disc: false,
             },
         ]
     );
@@ -237,11 +243,13 @@ fn file_history_reports_lost_per_physical_copy() {
         cat.file_history(project.id, &rel("b.bin"))
             .expect("history"),
         vec![FileHistoryEntry {
+            version: 1,
             content_hash: hash(B1),
             size_bytes: 800,
             disc: DiscKey::new(2, 0),
             session_ordinal: 1,
             status: VersionStatus::Deleted,
+            on_dead_disc: false,
         }]
     );
 }

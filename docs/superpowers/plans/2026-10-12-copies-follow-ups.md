@@ -58,3 +58,16 @@ better advice".
   is still short, the last line is now "Copy sets are incomplete. Run: scan → plan → burn".
 - Added a CLI test that runs the real flow: copies=2, 1B marked dead, then plan with
   `DISKREMENT_DISC_BYTES` below the file size, then burn.
+
+## #7 — `history` numbers versions, not copies
+
+Branch `feat/history-copies`.
+
+- `FileHistoryEntry` gains `version` (a 1-based `dense_rank()` over `file_version.id`
+  in the query) and `on_dead_disc`. `file_history` now orders rows by
+  `fv.id, d.ordinal, d.copy_set, s.ordinal`, so twins sit together (1A, 1B, 2A).
+- At `copies = 1` the output is byte-identical to `fixtures/run-manifest.txt` (steps
+  16 and 22). At `copies > 1` each version prints `v<n>  <size>  <hash>` once, with one
+  `disc <name> / session <n>   <status>` line per copy under it.
+- The status precedence is unchanged. A `CURRENT` copy on a dead disc now renders
+  `CURRENT (on a dead disc)`, at every `copies`.
