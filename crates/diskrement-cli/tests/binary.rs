@@ -1050,3 +1050,55 @@ mod real_backend {
             .stdout(contains("disc 1: skipped (not checked)"));
     }
 }
+
+/// A catch-up copy too large for the plan's disc type (#12).
+mod unplaceable_catch_up {
+    use super::*;
+
+    fn run(
+        catalog: &std::path::Path,
+        args: &[&str],
+        disc_bytes: Option<&str>,
+    ) -> assert_cmd::assert::Assert {
+        let mut c = cmd();
+        if let Some(n) = disc_bytes {
+            c.env("DISKREMENT_DISC_BYTES", n);
+        }
+        c.arg("--catalog").arg(catalog).args(args).assert()
+    }
+
+    /// Set B's only copy of `a.bin` dies, and the disc type now planned is too
+    /// small for it. The plan skips it rather than refusing, `burn` exits 0
+    /// with nothing to write, and neither claims the sets are up to date.
+    #[test]
+    fn a_catch_up_copy_too_large_is_skipped_and_the_set_reads_incomplete() {
+        let p = project();
+        base(&p)
+            .args(["init", "p", "--source"])
+            .arg(&p.source)
+            .arg("--work-dir")
+            .arg(&p.work)
+            .args(["--copies", "2"])
+            .assert()
+            .success();
+        run(&p.catalog, &["scan", "p"], None).success();
+        run(&p.catalog, &["plan", "p"], None).success();
+        run(&p.catalog, &["burn", "p", "--yes"], None).success();
+        run(&p.catalog, &["disc", "mark-dead", "p", "1B", "--yes"], None).success();
+
+        run(&p.catalog, &["scan", "p", "--force"], None).success();
+        run(&p.catalog, &["plan", "p"], Some("500"))
+            .success()
+            .stdout(contains("Catch-up copies too large for BD_R (skipped;"))
+            .stdout(contains("  a.bin  0.0 GB"))
+            .stdout(contains("Oversized").not());
+        run(&p.catalog, &["burn", "p", "--yes"], None)
+            .success()
+            .stdout(contains("Nothing burned: no disc in this plan."))
+            .stdout(contains("Copies: set B is missing 1 files (0.0 GB)."))
+            .stdout(contains(
+                "Copy sets are incomplete. Run: scan → plan → burn",
+            ))
+            .stdout(contains("up to date").not());
+    }
+}

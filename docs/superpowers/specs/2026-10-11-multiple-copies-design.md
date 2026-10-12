@@ -157,7 +157,9 @@ The staged `plan.json` becomes:
 - `sets`: one entry per set being written, each with `copy_set`, the planned disc, its
   `remaining` estimate, and the disc's expected prior session count (§7.3). Each planned
   file carries a tag, `new` or `copy`, describing how it was planned.
-- `tombstones` and `oversized`, once, at the plan level.
+- `tombstones` and `oversized`, once, at the plan level. (Since #12, also
+  `unplaceableCatchUp`: catch-up copies too large for the disc type, skipped rather than
+  refused.)
 
 A `plan.json` staged by the previous binary fails to parse; `burn` reports it as a
 `StalePlan` whose advice is "re-run plan" (never "reset").

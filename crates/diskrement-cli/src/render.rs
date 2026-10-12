@@ -195,22 +195,30 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
     if copies > 1 {
         lines.extend(coverage_lines(&r.coverage.sets));
     }
-    // While a file has no live copy, "up to date" would be false.
+    // While a file has no live copy, or a set lacks one, "up to date" would
+    // be false.
     let no_live_copy = no_live_copy_line(&r.coverage.no_live_copy);
-    let covered = no_live_copy.is_none();
-    lines.extend(no_live_copy);
-    if r.remaining.more_discs > 0 {
-        lines.push(format!(
+    let sets_complete = r.coverage.sets.iter().all(|c| c.missing_files == 0);
+    let next = if r.remaining.more_discs > 0 {
+        Some(format!(
             "~{} more discs of changes remain. Run: scan → plan → burn",
             r.remaining.more_discs
-        ));
-    } else if covered {
-        lines.push(if copies > 1 {
-            "No more changes — every copy set is up to date.".to_string()
-        } else {
-            "No more changes — the set is up to date.".to_string()
-        });
-    }
+        ))
+    } else if no_live_copy.is_some() {
+        // That line already says what to run; those files also count as
+        // missing from every set.
+        None
+    } else if !sets_complete {
+        // A lagging set catches up one disc per cycle; `plan` names any copy
+        // this disc type cannot hold (issue #12).
+        Some("Copy sets are incomplete. Run: scan → plan → burn".to_string())
+    } else if copies > 1 {
+        Some("No more changes — every copy set is up to date.".to_string())
+    } else {
+        Some("No more changes — the set is up to date.".to_string())
+    };
+    lines.extend(no_live_copy);
+    lines.extend(next);
     lines.join("\n")
 }
 
@@ -1114,7 +1122,7 @@ mod tests {
              ✔ Wrote disc 1B  —  label: \"p disc 1B\"\n\
              Status: left OPEN — may receive more sessions later.\n\
              Copies: set B is missing 3 files (2.0 GB).\n\
-             No more changes — every copy set is up to date."
+             Copy sets are incomplete. Run: scan → plan → burn"
         );
     }
 
