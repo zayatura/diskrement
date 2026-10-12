@@ -75,14 +75,14 @@ impl<'a> MediaInspector<'a> {
                 parse::FailureKind::NotFound => {
                     Err(BurnError::DeviceNotFound(self.device.xorriso_address()))
                 }
-                parse::FailureKind::Other => Err(BurnError::BurnFailed {
+                parse::FailureKind::Other => Err(BurnError::InspectFailed {
                     exit_code: result.exit_code,
                     output_tail: result.tail(10),
                 }),
             };
         }
 
-        let info = parse::media(&result.lines).map_err(|complaint| BurnError::BurnFailed {
+        let info = parse::media(&result.lines).map_err(|complaint| BurnError::InspectFailed {
             exit_code: result.exit_code,
             output_tail: vec![complaint],
         })?;
@@ -276,18 +276,20 @@ mod tests {
         let exec =
             |_: &[String], _: &mut dyn FnMut(&str)| out(5, &["xorriso : FAILURE : something else"]);
         let err = MediaInspector::new(device(), &exec).inspect().unwrap_err();
+        assert!(matches!(err, BurnError::InspectFailed { .. }), "{err:?}");
         assert_eq!(
             err.to_string(),
             "xorriso failed (exit 5): xorriso : FAILURE : something else"
         );
     }
 
-    /// Output with no status line at all is a `BurnFailed` quoting the parse
+    /// Output with no status line at all is an `InspectFailed` quoting the parse
     /// complaint (`MediaParse.parse`'s `Left`).
     #[test]
-    fn unparsable_output_is_a_burn_failure_quoting_the_complaint() {
+    fn unparsable_output_is_an_inspection_failure_quoting_the_complaint() {
         let exec = |_: &[String], _: &mut dyn FnMut(&str)| out(0, &["Drive current: ..."]);
         let err = MediaInspector::new(device(), &exec).inspect().unwrap_err();
+        assert!(matches!(err, BurnError::InspectFailed { .. }), "{err:?}");
         assert!(err.to_string().contains("no Media status line"), "{err}");
     }
 
