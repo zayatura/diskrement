@@ -57,6 +57,11 @@ pub fn effective_capacity(normal: Capacity, override_bytes: Option<u64>) -> Capa
 /// `tombstones` are the cycle's deletions (`diff::tombstones`, computed
 /// against the catalog history rather than the live view), carried as-is.
 ///
+/// A catch-up copy too large for this disc type (an existing file burned on a
+/// larger one) is not `oversized`, which refuses the whole burn: no change to
+/// the source can fix it. It goes to `unplaceable_catch_up` instead, is
+/// skipped this cycle, and that set's coverage stays incomplete (issue #12).
+///
 /// `next_session` returns the session ordinal an existing disc gets next; it
 /// is recorded per set so `burn` can tell a disc it already committed from one
 /// it has not.
@@ -83,12 +88,20 @@ pub fn plan_from(
 
     let mut sets = Vec::new();
     let mut oversized: Vec<ScannedFile> = Vec::new();
+    let mut unplaceable_catch_up: Vec<ScannedFile> = Vec::new();
     for (copy_set, extra) in (0..copies).zip(catch_up.iter()) {
         let to_place: Vec<ScannedFile> = new_files.iter().chain(extra.iter()).cloned().collect();
         let full = planner::plan_set(copy_set, &to_place, &tombstones, states, cap);
         for f in full.oversized {
-            if !oversized.iter().any(|o| o.rel_path == f.rel_path) {
-                oversized.push(f);
+            // `shortfall` never lists a new or modified file, so a path in
+            // `extra` is a copy of something already burned.
+            let bucket = if extra.iter().any(|e| e.rel_path == f.rel_path) {
+                &mut unplaceable_catch_up
+            } else {
+                &mut oversized
+            };
+            if !bucket.iter().any(|o| o.rel_path == f.rel_path) {
+                bucket.push(f);
             }
         }
         // `plan_set` always returns at least one disc.
@@ -102,6 +115,7 @@ pub fn plan_from(
         }
     }
     oversized.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    unplaceable_catch_up.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
     PlanReport {
         copies,
@@ -109,6 +123,7 @@ pub fn plan_from(
         disc_type,
         tombstones,
         oversized,
+        unplaceable_catch_up,
     }
 }
 
@@ -581,6 +596,38 @@ mod tests {
         assert_eq!(sp.disc.key(), diskrement_core::DiscKey::new(1, 1));
         assert_eq!(sp.catch_up, 1);
         assert_eq!(sp.disc.files, files);
+    }
+
+    /// A catch-up copy larger than this plan's disc (an earlier disc type was
+    /// bigger) is skipped, not oversized: `burn` must not refuse the plan over
+    /// something no source change can fix (#12). A new file that does not
+    /// fit is still oversized.
+    #[test]
+    fn a_catch_up_copy_too_large_for_the_disc_is_skipped_not_oversized() {
+        let burned = vec![file("film.mkv", 5_000), file("a.bin", 300)];
+        let view = live_in(&burned, &[0]);
+        let mut scanned = burned.clone();
+        scanned.push(file("new-huge.bin", 9_000));
+        scanned.push(file("new.bin", 10));
+        let report = plan2(&view, &scanned, &[open(1, 0, 300)], false);
+
+        assert_eq!(
+            report.unplaceable_catch_up,
+            vec![file("film.mkv", 5_000)],
+            "listed once, though only set B lacks it"
+        );
+        assert_eq!(report.oversized, vec![file("new-huge.bin", 9_000)]);
+        let b = report
+            .sets
+            .iter()
+            .find(|s| s.disc.copy_set == 1)
+            .expect("set B still writes its other catch-up copy");
+        assert_eq!(b.catch_up, 1);
+        assert!(b
+            .disc
+            .files
+            .iter()
+            .all(|f| f.rel_path.as_str() != "film.mkv"));
     }
 
     #[test]

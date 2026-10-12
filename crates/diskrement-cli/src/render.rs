@@ -31,8 +31,8 @@ pub fn scan_report(r: &ScanReport) -> String {
 
 /// `Render.plan`. Four shapes: nothing to do, deletions waiting for the next
 /// disc (no disc is planned), bare seals, and one summary pair per copy set
-/// with the optional deletion and oversize lines. At `copies = 1` there is one
-/// set and the output is the single-disc text.
+/// with the optional deletion, oversize and skipped catch-up lines. At
+/// `copies = 1` there is one set and the output is the single-disc text.
 pub fn plan_report(p: &PlanReport) -> String {
     let copies = p.copies;
     if p.sets.is_empty() {
@@ -46,6 +46,7 @@ pub fn plan_report(p: &PlanReport) -> String {
             )),
         }
         lines.extend(oversized_lines(p));
+        lines.extend(unplaceable_catch_up_lines(p));
         if lines.is_empty() {
             return "Nothing to burn: no changes to plan.".to_string();
         }
@@ -53,7 +54,8 @@ pub fn plan_report(p: &PlanReport) -> String {
     }
     let nothing = p.sets.iter().all(|s| s.disc.files.is_empty())
         && p.tombstones.is_empty()
-        && p.oversized.is_empty();
+        && p.oversized.is_empty()
+        && p.unplaceable_catch_up.is_empty();
     if nothing {
         let seals: Vec<String> = p
             .sets
@@ -120,6 +122,7 @@ pub fn plan_report(p: &PlanReport) -> String {
         lines.push(format!("Deletions: {}", p.tombstones.len()));
     }
     lines.extend(oversized_lines(p));
+    lines.extend(unplaceable_catch_up_lines(p));
     lines.join("\n")
 }
 
@@ -130,6 +133,23 @@ fn oversized_lines(p: &PlanReport) -> Vec<String> {
     }
     let mut lines = vec!["Oversized (cannot be placed):".to_string()];
     for f in &p.oversized {
+        lines.push(format!("  {}  {}", f.rel_path.as_str(), gb(f.size_bytes)));
+    }
+    lines
+}
+
+/// Catch-up copies this disc type cannot hold (issue #12): a header naming
+/// the disc type and the way out, and one line per file, or nothing. Unlike
+/// the oversize block this never stops `burn`.
+fn unplaceable_catch_up_lines(p: &PlanReport) -> Vec<String> {
+    if p.unplaceable_catch_up.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "Catch-up copies too large for {} (skipped; plan with a larger --disc-type to place them):",
+        p.disc_type
+    )];
+    for f in &p.unplaceable_catch_up {
         lines.push(format!("  {}  {}", f.rel_path.as_str(), gb(f.size_bytes)));
     }
     lines
@@ -727,6 +747,7 @@ mod tests {
             disc_type: DiscType::BdR,
             tombstones: tombstones.into_iter().map(|t| RelPath(t.into())).collect(),
             oversized,
+            unplaceable_catch_up: vec![],
         }
     }
 
@@ -811,6 +832,7 @@ mod tests {
             disc_type: DiscType::BdR,
             tombstones: tombstones.iter().map(|t| RelPath((*t).into())).collect(),
             oversized,
+            unplaceable_catch_up: vec![],
         }
     }
 
@@ -918,6 +940,30 @@ mod tests {
         );
     }
 
+    /// A skipped catch-up copy follows the oversize block, and a plan whose
+    /// only content is one still prints rather than "nothing to burn".
+    #[test]
+    fn unplaceable_catch_up_copies_are_listed_after_the_oversize_block() {
+        let mut report = zero_set_plan(&[], vec![scanned("huge.bin", 99_000_000_000)]);
+        report.disc_type = DiscType::Dvd;
+        report.unplaceable_catch_up = vec![scanned("film.mkv", 20_000_000_000)];
+        assert_eq!(
+            plan_report(&report),
+            "Oversized (cannot be placed):\n\
+             \x20 huge.bin  99.0 GB\n\
+             Catch-up copies too large for DVD (skipped; plan with a larger --disc-type \
+             to place them):\n\
+             \x20 film.mkv  20.0 GB"
+        );
+
+        report.oversized.clear();
+        assert!(
+            plan_report(&report).starts_with("Catch-up copies too large for DVD"),
+            "{}",
+            plan_report(&report)
+        );
+    }
+
     #[test]
     fn oversized_files_are_listed_under_the_summary() {
         let report = plan_of(
@@ -1022,6 +1068,7 @@ mod tests {
             disc_type: DiscType::BdR,
             tombstones: vec![],
             oversized: vec![],
+            unplaceable_catch_up: vec![],
         };
         assert_eq!(
             plan_report(&p),
@@ -1659,6 +1706,7 @@ mod snapshots {
                 .map(|t| RelPath((*t).to_string()))
                 .collect(),
             oversized,
+            unplaceable_catch_up: vec![],
         }
     }
 

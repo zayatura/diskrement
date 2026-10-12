@@ -67,6 +67,9 @@ pub struct PlanReport {
     pub disc_type: DiscType,
     pub tombstones: Vec<RelPath>,
     pub oversized: Vec<ScannedFile>,
+    /// Catch-up copies too large for `disc_type`: skipped, never refused
+    /// (issue #12). Sorted by path, each listed once.
+    pub unplaceable_catch_up: Vec<ScannedFile>,
 }
 
 /// What one disc's burn produced.
