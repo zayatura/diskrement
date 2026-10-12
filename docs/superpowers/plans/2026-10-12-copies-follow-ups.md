@@ -79,3 +79,16 @@ Branch `feat/history-copies`.
   the same version rather than creating a new version. The README now says so.
 - Added a `copies = 1` render case for the annotation and a CLI test that runs
   `diskrement history` on a two-copy project.
+
+## #8 — store errors name discs through `DiscKey::name`
+
+Branch `feat/store-disc-names`. A `disc_name(tx, project, disc)` helper reads the
+project's `copies` and returns `DiscKey::name(copies)`. It is used by `mark_verified`,
+`mark_dead`, `disc_id`, `finalize_disc` and `write_disc`. If the project row is
+unreadable (unreachable in practice), it falls back to the lettered form. Variants and
+exit codes are unchanged.
+
+### Execution deviations (#8)
+
+- Review: `disc_id` keeps the pipeline's "no disc with ordinal …" wording. Added a
+  `finalize_disc` (`plan --finalize`) assertion to the test.

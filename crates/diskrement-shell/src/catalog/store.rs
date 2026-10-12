@@ -271,6 +271,7 @@ fn disc_name(tx: &Transaction<'_>, project: ProjectId, disc: DiscKey) -> String 
             params![project.0],
             |row| row.get::<_, i64>(0),
         )
+        // Any `copies` above 1 letters the name.
         .map_or(2, |c| c as u32);
     disc.name(copies)
 }
@@ -284,7 +285,10 @@ fn disc_id(tx: &Transaction<'_>, project: ProjectId, disc: DiscKey) -> Result<i6
     .optional()
     .map_err(CatalogError::from_sqlite)?
     .ok_or_else(|| {
-        CatalogError::ConstraintViolation(format!("no disc {}", disc_name(tx, project, disc)))
+        CatalogError::ConstraintViolation(format!(
+            "no disc with ordinal {}",
+            disc_name(tx, project, disc)
+        ))
     })
 }
 
@@ -1175,7 +1179,10 @@ mod tests {
         let unknown = cat
             .mark_dead(pid, DiscKey::new(9, 1), &dead_at())
             .expect_err("no such disc");
-        assert!(unknown.to_string().contains("no disc 9B"), "{unknown}");
+        assert!(
+            unknown.to_string().contains("no disc with ordinal 9B"),
+            "{unknown}"
+        );
 
         let unverifiable = cat
             .mark_verified(pid, DiscKey::new(1, 1), 7)
@@ -1194,6 +1201,15 @@ mod tests {
         assert!(
             resealed.to_string().contains("disc 1B is not OPEN"),
             "{resealed}"
+        );
+
+        // The `plan --finalize` path seals through `finalize_disc`.
+        let mut seal = update(pid, 2, 1, vec![fw("c", "c1", 10)], vec![], vec![]);
+        seal.finalize_disc_ordinals = vec![DiscKey::new(1, 1)];
+        let sealed_twice = cat.apply_update(&seal).expect_err("1B is sealed");
+        assert!(
+            sealed_twice.to_string().contains("disc 1B is not OPEN"),
+            "{sealed_twice}"
         );
     }
 
