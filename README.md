@@ -150,10 +150,17 @@ b.txt
 ```
 
 where v2 and v3 carry the same content hash — the live copy came back on fresh media.
-Between the mark-dead and that recovery burn, `status`'s `Current files` count drops by
-exactly the re-burn list — the still-current files whose only burned copy was on the
-dead disc (to zero, if that was all of them) — while `history` still calls those files
-`CURRENT`: `status` counts the *burned* view, which the dead disc just dropped out of.
+Between the mark-dead and that recovery burn, `status` keeps counting the re-burn list
+under `Current files` — `history` still calls those files `CURRENT` — and names them on
+a line of their own:
+
+```
+No live copy: 2 files (0.0 GB) — re-burn on next scan/plan/burn.
+```
+
+With more than one copy, those files also count as missing from every copy set, so no
+set reads `complete` while a file has no live copy anywhere; `burn` prints the same line
+and does not claim the archive is up to date.
 
 If a plan was already staged against the disc when it was marked dead, `burn` refuses
 it — re-run `plan`, which is the whole recovery: the staged scan and the source snapshot

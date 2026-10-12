@@ -879,3 +879,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 4: Finish the branch**
 
 Use superpowers:finishing-a-development-branch. Repo etiquette: merge into `main` with `git merge --no-ff feat/coverage-no-live-copy -m "Merge feat/coverage-no-live-copy: coverage counts files with no live copy (#6)"`, push, delete the branch locally and on `origin`, and close issue #6.
+
+---
+
+## Deviations applied during execution
+
+- **Task 2:** an existing test, `mark_dead_tests::a_dead_discs_live_files_re_plan_onto_a_fresh_disc`, asserted `total_current_files == 0` after the kill ("the view drops versions whose only copy is dead"), the very behaviour #6 changes. It now asserts `2` and `no_live_copy == {2 files, 7 bytes}`. The plan missed it because it grepped for `coverage`, not `total_current_files`.
+- **Task 2:** the open assumption held: a dead disc other than the planned one does not stale the plan, and burn writes disc 2. The mutation check (burn given an empty size map) made the new burn test fail as intended.
+- **Task 3:** `diskrement-cli` has no library target; its unit tests run with `cargo test -p diskrement-cli --bin diskrement`, not `--lib`.
+- **Task 5:** `README.md`'s coaster-workflow section said `Current files` drops by the re-burn list after a mark-dead; it now describes the "No live copy" line.
