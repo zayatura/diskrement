@@ -138,8 +138,8 @@ impl Catalog {
                 .map_err(CatalogError::from_sqlite)?;
             if updated == 0 {
                 return Err(CatalogError::IllegalStatusTransition(format!(
-                    "no BURNED session {session_ordinal} on disc {} (set {})",
-                    disc.ordinal, disc.copy_set
+                    "no BURNED session {session_ordinal} on disc {}",
+                    disc_name(tx, project, disc)
                 )));
             }
             Ok(())
@@ -175,8 +175,8 @@ impl Catalog {
                 .map_err(CatalogError::from_sqlite)?;
             if already > 0 {
                 return Err(CatalogError::IllegalStatusTransition(format!(
-                    "disc {} (set {}) is already dead",
-                    disc.ordinal, disc.copy_set
+                    "disc {} is already dead",
+                    disc_name(tx, project, disc)
                 )));
             }
 
@@ -259,6 +259,23 @@ impl Catalog {
     }
 }
 
+/// `disc` as every other message names it: `DiscKey::name` under the
+/// project's `copies` (CLAUDE.md: never format a disc ordinal by hand).
+///
+/// Only error messages use this. When the project row cannot be read, the
+/// lettered form is used, since it is never ambiguous.
+fn disc_name(tx: &Transaction<'_>, project: ProjectId, disc: DiscKey) -> String {
+    let copies = tx
+        .query_row(
+            "select copies from project where id = ?1",
+            params![project.0],
+            |row| row.get::<_, i64>(0),
+        )
+        // Any `copies` above 1 letters the name.
+        .map_or(2, |c| c as u32);
+    disc.name(copies)
+}
+
 fn disc_id(tx: &Transaction<'_>, project: ProjectId, disc: DiscKey) -> Result<i64, CatalogError> {
     tx.query_row(
         "select id from disc where project_id = ?1 and ordinal = ?2 and copy_set = ?3",
@@ -269,8 +286,8 @@ fn disc_id(tx: &Transaction<'_>, project: ProjectId, disc: DiscKey) -> Result<i6
     .map_err(CatalogError::from_sqlite)?
     .ok_or_else(|| {
         CatalogError::ConstraintViolation(format!(
-            "no disc with ordinal {} in copy set {}",
-            disc.ordinal, disc.copy_set
+            "no disc with ordinal {}",
+            disc_name(tx, project, disc)
         ))
     })
 }
@@ -291,8 +308,8 @@ fn finalize_disc(
         .map_err(CatalogError::from_sqlite)?;
     if updated == 0 {
         return Err(CatalogError::IllegalStatusTransition(format!(
-            "disc {} (set {}) is not OPEN",
-            disc.ordinal, disc.copy_set
+            "disc {} is not OPEN",
+            disc_name(tx, project, disc)
         )));
     }
     Ok(())
@@ -330,8 +347,8 @@ fn write_disc(tx: &Transaction<'_>, project: ProjectId, d: &DiscWrite) -> Result
                 .map_err(CatalogError::from_sqlite)?;
             if updated == 0 {
                 return Err(CatalogError::IllegalStatusTransition(format!(
-                    "disc {} (set {}) is not OPEN",
-                    d.ordinal, d.copy_set
+                    "disc {} is not OPEN",
+                    disc_name(tx, project, DiscKey::new(d.ordinal, d.copy_set))
                 )));
             }
         }
@@ -1132,6 +1149,10 @@ mod tests {
             matches!(duplicate, CatalogError::IllegalStatusTransition(_)),
             "expected IllegalStatusTransition, got {duplicate:?}"
         );
+        assert!(
+            duplicate.to_string().contains("disc 1 is already dead"),
+            "{duplicate}"
+        );
 
         let unknown = cat
             .mark_dead(pid, DiscKey::new(9, 0), &dead_at())
@@ -1139,6 +1160,56 @@ mod tests {
         assert!(
             matches!(unknown, CatalogError::ConstraintViolation(_)),
             "expected ConstraintViolation, got {unknown:?}"
+        );
+    }
+
+    /// Store errors name discs through `DiscKey::name`, so at copies=2 they
+    /// carry the set letter (#8).
+    #[test]
+    fn store_errors_name_discs_with_the_projects_copies() {
+        let (_dir, mut cat) = temp_catalog();
+        let mut init = project_init("p");
+        init.copies = 2;
+        let pid = cat.create_project(&init).expect("project");
+        let mut sealed = update(pid, 1, 1, vec![fw("a", "a1", 10)], vec![], vec![]);
+        sealed.discs[0].copy_set = 1;
+        sealed.discs[0].status = DiscStatus::Finalized;
+        cat.apply_update(&sealed).expect("1B burned and sealed");
+
+        let unknown = cat
+            .mark_dead(pid, DiscKey::new(9, 1), &dead_at())
+            .expect_err("no such disc");
+        assert!(
+            unknown.to_string().contains("no disc with ordinal 9B"),
+            "{unknown}"
+        );
+
+        let unverifiable = cat
+            .mark_verified(pid, DiscKey::new(1, 1), 7)
+            .expect_err("no session 7");
+        assert!(
+            unverifiable
+                .to_string()
+                .contains("no BURNED session 7 on disc 1B"),
+            "{unverifiable}"
+        );
+
+        let mut again = update(pid, 1, 2, vec![fw("b", "b1", 10)], vec![], vec![]);
+        again.discs[0].copy_set = 1;
+        again.discs[0].status = DiscStatus::Finalized;
+        let resealed = cat.apply_update(&again).expect_err("1B is sealed");
+        assert!(
+            resealed.to_string().contains("disc 1B is not OPEN"),
+            "{resealed}"
+        );
+
+        // The `plan --finalize` path seals through `finalize_disc`.
+        let mut seal = update(pid, 2, 1, vec![fw("c", "c1", 10)], vec![], vec![]);
+        seal.finalize_disc_ordinals = vec![DiscKey::new(1, 1)];
+        let sealed_twice = cat.apply_update(&seal).expect_err("1B is sealed");
+        assert!(
+            sealed_twice.to_string().contains("disc 1B is not OPEN"),
+            "{sealed_twice}"
         );
     }
 
