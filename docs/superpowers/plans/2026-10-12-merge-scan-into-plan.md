@@ -1251,18 +1251,21 @@ Executed subagent-driven on 2026-10-12. Each task had a spec review and a code-q
   A sweep also changed the `reset` help to "Discard staged plan state.", plus the `ReburnEntry` and `replication.rs` comments.
 - **Task 6 (55cb803).** This commit's trailer names Claude Sonnet 5.5, the model that wrote it.
 - **Task 7.** The final review found stale comments in `planning.rs`'s module doc and the `restage` helper, and a split sentence in the `perf-bench.sh` header. All three are fixed in the commit that adds this section.
-- **Left open, for the user to decide:** a stray file in `staged/` (e.g. a vim swap file) now blocks every `plan` with exit 5, and the message ends "(this is a bug)". The message names the directory, and nothing is lost. Before #4 the same check ran only in `burn` and `reset`.
+- **After the final review, at the user's request:** a stray file in `staged/` (an editor's swap file, say) would otherwise block every `plan`, now that `plan` clears `staged/` first. `staged::clear` therefore removes the whole directory, stray files included. That reverses the Scala-era refusal of a non-empty `staged/`, and it covers `plan`, `burn` and `reset` alike.
+  - `clear_staged` still names the directory on a real I/O failure.
+  - `a_stray_file_in_staged_does_not_block_plan` replaces the failing-plan test, and `staged.rs` gains `clear_removes_a_stray_file_with_the_rest`.
+  - `a_cleanup_failure_after_every_disc_committed_names_them_all` used a foreign file to make the final clear fail. It now uses a read-only subdirectory instead, and skips when run as root.
 
 **Final counts** (`DISKREMENT_SCENARIOS_REQUIRED=1`, xorriso present):
 
 | Suite | Baseline | Final | Why |
 |---|---|---|---|
 | core | 82 | 82 | |
-| shell lib | 368 | 372 | Task 1 +1, Task 2 +3 net and +2 from review fixes, Task 4 −2 |
+| shell lib | 368 | 373 | Task 1 +1, Task 2 +3 net and +2 from review fixes, Task 4 −2, stray-file `clear` test +1 |
 | shell integration (8/6/2/5) | 21 | 21 | |
 | cli bin unit | 108 | 107 | +1 `--rehash`, −1 `scan` args, −1 reused render |
 | `binary` | 46 | 46 | −1 `scan_on_an_unknown_project…`, +1 `scan_is_no_longer_a_command` |
 | `scenarios` | 20 | 20 | |
-| **total** | 645 | 648 | |
+| **total** | 645 | 649 | |
 
 clippy (`-D warnings`) and `cargo fmt --check` are clean, and `cargo build --release` succeeds. The release-binary smoke test (Step 2) behaved as expected.

@@ -80,8 +80,8 @@ impl<'a> Pipeline<'a> {
         ))
     }
 
-    /// Clear the staged scan and plan. `staged::clear` refuses a `staged/`
-    /// that holds anything else, so the error names the directory to look in.
+    /// Clear the staged scan and plan. A failure (permissions, I/O) names the
+    /// directory rather than giving a bare OS message.
     fn clear_staged(&self) -> Result<(), PipelineError> {
         staged::clear(&self.paths.work_dir).map_err(|e| {
             PipelineError::Failed(format!(
@@ -1297,22 +1297,19 @@ mod tests {
         assert!(staged::read_scan(&e.work).unwrap().is_none());
     }
 
-    /// `plan` clears `staged/` first; a stray file there blocks that, and the
-    /// error names the directory instead of a bare OS message.
+    /// `plan` clears `staged/` first. A stray file there (an editor's swap
+    /// file, say) goes with it rather than blocking every plan.
     #[test]
-    fn a_stray_file_in_staged_fails_plan_naming_the_directory() {
+    fn a_stray_file_in_staged_does_not_block_plan() {
         let mut e = setup();
         write_src(&e, "a.txt", b"a");
         e.pipeline.init(&project_init(&e)).unwrap();
         e.pipeline.plan("p", None, false, false).unwrap();
-        let staged_dir = e.work.join("staged");
-        std::fs::write(staged_dir.join("stray.txt"), b"x").unwrap();
-        let err = e.pipeline.plan("p", None, false, false).unwrap_err();
-        assert!(
-            err.to_string().contains(&staged_dir.display().to_string()),
-            "{err}"
-        );
-        assert_eq!(err.exit_code(), 5);
+        let stray = e.work.join("staged/.plan.json.swp");
+        std::fs::write(&stray, b"x").unwrap();
+        let out = e.pipeline.plan("p", None, false, false).unwrap();
+        assert_eq!(out.plan.sets[0].disc.files.len(), 1);
+        assert!(!stray.exists(), "the stray file is gone");
     }
 
     /// Each plan's snapshot replaces the last one rather than accumulating.
@@ -2696,11 +2693,25 @@ mod burn_tests {
 
     #[test]
     fn a_cleanup_failure_after_every_disc_committed_names_them_all() {
+        use std::os::unix::fs::PermissionsExt as _;
         let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
-        // Something foreign in `staged/` makes `clear` refuse.
-        std::fs::write(env.work.join("staged/foreign"), b"x").unwrap();
+        // A read-only directory in `staged/` that still holds a file makes
+        // `clear` fail, and only `clear`: the plan rewrites after each commit
+        // go to `staged/` itself, which stays writable.
+        let locked = env.work.join("staged/locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("f"), b"x").unwrap();
+        let mode = |m| std::fs::Permissions::from_mode(m);
+        std::fs::set_permissions(&locked, mode(0o555)).unwrap();
+        if std::fs::write(locked.join("probe"), b"x").is_ok() {
+            std::fs::set_permissions(&locked, mode(0o755)).unwrap();
+            eprintln!("SKIP: running as root, a read-only directory is still writable");
+            return;
+        }
 
-        let err = run_burn(&mut env).unwrap_err();
+        let result = run_burn(&mut env);
+        std::fs::set_permissions(&locked, mode(0o755)).unwrap();
+        let err = result.unwrap_err();
         assert_eq!(
             partial_parts(&err),
             (vec!["1A".to_string(), "1B".to_string()], None, vec![])

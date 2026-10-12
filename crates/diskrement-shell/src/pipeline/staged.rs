@@ -294,31 +294,16 @@ pub fn is_legacy_plan(work_dir: &Path) -> bool {
         .is_some_and(|v| v.get("disc").is_some() && v.get("sets").is_none())
 }
 
-/// Discard both staged files, any temp file an interrupted `write_json` left,
-/// and the `staged/` directory
-/// (`StagedStoreLive.clear`). Absent files are not an error.
+/// Discard the `staged/` directory: both staged files, any temp file an
+/// interrupted `write_json` left, and anything else in it
+/// (`StagedStoreLive.clear`). A missing directory is not an error.
 ///
-/// A non-empty `staged/` *is* an error, and deliberately so: the Scala
-/// `Files.deleteIfExists(stagedDir)` threw `DirectoryNotEmptyException` in
-/// that case, and something unexpected living in the recovery unit is worth
-/// surfacing rather than stepping around.
+/// `staged/` belongs to diskrement alone, so a stray file there (an editor's
+/// swap file, a hand-made backup) goes with the rest. The Scala build refused
+/// a non-empty `staged/`; since #4 every `plan` clears it first, and refusing
+/// would block every cycle until the operator found the file.
 pub fn clear(work_dir: &Path) -> std::io::Result<()> {
-    for file in [scan_path(work_dir), plan_path(work_dir)] {
-        remove_if_present(&file)?;
-        // `write_json`'s temp file, if a crash stopped it before the rename.
-        let mut tmp = file.into_os_string();
-        tmp.push(".tmp");
-        remove_if_present(Path::new(&tmp))?;
-    }
-    match std::fs::remove_dir(work_dir.join("staged")) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-fn remove_if_present(file: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(file) {
+    match std::fs::remove_dir_all(work_dir.join("staged")) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -511,6 +496,16 @@ mod tests {
         clear(dir.path()).unwrap();
         assert!(read_scan(dir.path()).unwrap().is_none());
         assert!(read_plan(dir.path()).unwrap().is_none());
+        assert!(!dir.path().join("staged").exists());
+    }
+
+    /// `staged/` belongs to diskrement alone, so anything else in it goes too.
+    #[test]
+    fn clear_removes_a_stray_file_with_the_rest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_plan(dir.path(), &plan_report()).unwrap();
+        std::fs::write(dir.path().join("staged/plan.json.bak"), b"x").unwrap();
+        clear(dir.path()).unwrap();
         assert!(!dir.path().join("staged").exists());
     }
 
