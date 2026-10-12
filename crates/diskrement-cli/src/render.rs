@@ -141,7 +141,8 @@ pub fn gb(bytes: u64) -> String {
 }
 
 /// `Render.burn`: one block per disc written (or why none was), the copy
-/// coverage when the project keeps more than one copy, then what to do next.
+/// coverage when the project keeps more than one copy, any files with no live
+/// copy at all, then what to do next.
 pub fn burn_report(r: &BurnReport, copies: u32) -> String {
     let mut lines = Vec::new();
     match r.deferred_deletions {
@@ -174,18 +175,22 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
     if copies > 1 {
         lines.extend(coverage_lines(&r.coverage.sets));
     }
-    lines.push(if r.remaining.more_discs == 0 {
-        if copies > 1 {
+    // While a file has no live copy, "up to date" would be false.
+    let no_live_copy = no_live_copy_line(&r.coverage.no_live_copy);
+    let covered = no_live_copy.is_none();
+    lines.extend(no_live_copy);
+    if r.remaining.more_discs > 0 {
+        lines.push(format!(
+            "~{} more discs of changes remain. Run: scan → plan → burn",
+            r.remaining.more_discs
+        ));
+    } else if covered {
+        lines.push(if copies > 1 {
             "No more changes — every copy set is up to date.".to_string()
         } else {
             "No more changes — the set is up to date.".to_string()
-        }
-    } else {
-        format!(
-            "~{} more discs of changes remain. Run: scan → plan → burn",
-            r.remaining.more_discs
-        )
-    });
+        });
+    }
     lines.join("\n")
 }
 
@@ -214,6 +219,18 @@ fn coverage_lines(coverage: &[SetCoverage]) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// The files with no live copy in any set, or nothing when there are none.
+/// Worded after `mark_dead`'s "Re-burn on next scan/plan/burn".
+fn no_live_copy_line(c: &SetCoverage) -> Option<String> {
+    (c.missing_files > 0).then(|| {
+        format!(
+            "No live copy: {} files ({}) — re-burn on next scan/plan/burn.",
+            c.missing_files,
+            gb(c.missing_bytes)
+        )
+    })
 }
 
 pub fn status_report(p: &Project, r: &StatusReport) -> String {
@@ -257,6 +274,10 @@ pub fn status_report(p: &Project, r: &StatusReport) -> String {
                 ));
             }
         }
+    }
+    if let Some(line) = no_live_copy_line(&r.coverage.no_live_copy) {
+        out.push_str(&line);
+        out.push('\n');
     }
     let last = r
         .last_burn_at
@@ -526,6 +547,69 @@ mod tests {
              set A: complete\n  \
              set B: 2 files (0.3 GB) missing\n\
              Current files: 2      Last burn: never"
+        );
+    }
+
+    #[test]
+    fn a_single_copy_status_names_the_files_with_no_live_copy() {
+        let gone = SetCoverage {
+            missing_files: 2,
+            missing_bytes: 800_000_000,
+        };
+        let r = StatusReport {
+            discs: vec![],
+            open_discs: vec![],
+            total_current_files: 2,
+            last_burn_at: None,
+            coverage: diskrement_core::Coverage {
+                sets: vec![gone],
+                no_live_copy: gone,
+            },
+        };
+        assert_eq!(
+            status_report(&project(), &r),
+            "Project photos  (source /srv/photos, BD_R, margin 2.0%)\n\
+             Discs:\n\
+             No live copy: 2 files (0.8 GB) — re-burn on next scan/plan/burn.\n\
+             Current files: 2      Last burn: never"
+        );
+    }
+
+    #[test]
+    fn a_two_copy_status_with_no_live_copy_shows_no_set_complete() {
+        let mut p = project();
+        p.copies = 2;
+        let r = StatusReport {
+            discs: vec![],
+            open_discs: vec![],
+            total_current_files: 3,
+            last_burn_at: None,
+            coverage: diskrement_core::Coverage {
+                sets: vec![
+                    SetCoverage {
+                        missing_files: 2,
+                        missing_bytes: 800_000_000,
+                    },
+                    SetCoverage {
+                        missing_files: 3,
+                        missing_bytes: 900_000_000,
+                    },
+                ],
+                no_live_copy: SetCoverage {
+                    missing_files: 2,
+                    missing_bytes: 800_000_000,
+                },
+            },
+        };
+        assert_eq!(
+            status_report(&p, &r),
+            "Project photos  (source /srv/photos, BD_R, margin 2.0%, 2 copies)\n\
+             Discs:\n\
+             Copies:\n  \
+             set A: 2 files (0.8 GB) missing\n  \
+             set B: 3 files (0.9 GB) missing\n\
+             No live copy: 2 files (0.8 GB) — re-burn on next scan/plan/burn.\n\
+             Current files: 3      Last burn: never"
         );
     }
 
@@ -988,6 +1072,41 @@ mod tests {
     }
 
     #[test]
+    fn a_two_copy_burn_lists_lagging_sets_then_the_files_with_no_live_copy() {
+        let gone = SetCoverage {
+            missing_files: 1,
+            missing_bytes: 4_000_000_000,
+        };
+        let r = BurnReport {
+            discs: vec![DiscBurn {
+                disc: DiscKey::new(2, 0),
+                label: "p disc 2A".to_string(),
+                finalized: false,
+                staging_dir: "/w/staging".into(),
+                image_bytes: 1,
+            }],
+            remaining: RemainingEstimate {
+                more_discs: 0,
+                more_files: 0,
+                more_bytes: 0,
+            },
+            coverage: diskrement_core::Coverage {
+                sets: vec![gone, gone],
+                no_live_copy: gone,
+            },
+            deferred_deletions: None,
+        };
+        assert_eq!(
+            burn_report(&r, 2),
+            "✔ Wrote disc 2A  —  label: \"p disc 2A\"\n\
+             Status: left OPEN — may receive more sessions later.\n\
+             Copies: set A is missing 1 files (4.0 GB).\n\
+             Copies: set B is missing 1 files (4.0 GB).\n\
+             No live copy: 1 files (4.0 GB) — re-burn on next scan/plan/burn."
+        );
+    }
+
+    #[test]
     fn a_burn_with_no_coverage_rows_claims_no_copy_count() {
         let r = BurnReport {
             discs: vec![],
@@ -1053,6 +1172,40 @@ mod burn_render_tests {
             "✔ Wrote disc 1  —  label: \"p disc 1\"\n\
              Status: FINALIZED — set this disc aside, it is sealed.\n\
              ~1 more discs of changes remain. Run: scan → plan → burn"
+        );
+    }
+
+    #[test]
+    fn a_single_copy_burn_with_no_live_copy_does_not_claim_up_to_date() {
+        let gone = SetCoverage {
+            missing_files: 1,
+            missing_bytes: 4_000_000_000,
+        };
+        let mut r = report(false, 0);
+        r.coverage = diskrement_core::Coverage {
+            sets: vec![gone],
+            no_live_copy: gone,
+        };
+        assert_eq!(
+            burn_report(&r, 1),
+            "✔ Wrote disc 1  —  label: \"p disc 1\"\n\
+             Status: left OPEN — may receive more sessions later.\n\
+             No live copy: 1 files (4.0 GB) — re-burn on next scan/plan/burn."
+        );
+
+        // More discs to come: the line stays, and so does the remaining one.
+        let mut r = report(false, 1);
+        r.coverage = diskrement_core::Coverage {
+            sets: vec![gone],
+            no_live_copy: gone,
+        };
+        assert!(
+            burn_report(&r, 1).ends_with(
+                "No live copy: 1 files (4.0 GB) — re-burn on next scan/plan/burn.\n\
+                 ~1 more discs of changes remain. Run: scan → plan → burn"
+            ),
+            "{}",
+            burn_report(&r, 1)
         );
     }
 
