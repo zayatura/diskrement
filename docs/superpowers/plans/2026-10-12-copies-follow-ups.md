@@ -1,4 +1,4 @@
-# Multiple-copies follow-ups (#7, #8, #10, #11, #12)
+# Multiple-copies follow-ups (#7, #8, #10, #11, #12, #16, #17)
 
 **Parent:** `2026-10-11-multiple-copies.md` ("Known limitations"). #6 and #9 have their own
 specs and plans; #13 (raising `copies`) is deferred.
@@ -126,3 +126,13 @@ copy" files. Mutation check: with `shortfall` replaced by empty lists, the test 
   file's bytes sit on an unkilled disc in every set. That catches the mutant. Files are
   now 40–200 KB (2–5 initially) so sets spill more often. The coverage exemption is
   bounded: each set may miss at most the number of pending deletions.
+
+## #17 — an inspection failure is "not written"
+
+Branch `feat/inspection-failed`. `MediaInspector::inspect` returned `BurnFailed` for an
+unclassified `-toc` failure or unparsable output. A partial burn treats `BurnFailed` as
+"may have been written", although inspection runs before anything is written. The new
+`BurnError::InspectFailed` (exit 6) is worded exactly like `BurnFailed`, so no output
+changes. `burner_failure` classes it as not written. `verify` also inspects and gets the
+same message and exit code as before. Pinned by
+`an_inspection_failure_reports_the_disc_as_not_written`, which fails with the old variant.

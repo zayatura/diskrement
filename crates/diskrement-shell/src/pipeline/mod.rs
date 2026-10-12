@@ -870,9 +870,9 @@ fn burner_failure(e: crate::burn::BurnError) -> DiscFailure {
             }
         }
         // Staging, tool and device checks, media inspection and the operator
-        // prompt all run before anything is written. (An inspection that
-        // xorriso fails unclassified is `BurnFailed`, above: it over-warns.)
+        // prompt all run before anything is written.
         B::HashMismatch { .. }
+        | B::InspectFailed { .. }
         | B::SourceFileMissing(_)
         | B::Io(_)
         | B::ToolMissing(_)
@@ -1633,6 +1633,36 @@ mod burn_tests {
                 Some(UnrecordedDisc::maybe_written("1B")),
                 vec![]
             )
+        );
+        assert_eq!(err.exit_code(), 6);
+    }
+
+    /// An unclassified `-toc` failure while checking 1B's media comes before
+    /// any write, so a partial burn lists 1B as not written (#17).
+    #[test]
+    fn an_inspection_failure_reports_the_disc_as_not_written() {
+        let mut env = staged_env_with(&[("a.bin", b"aaaa")], false, 2);
+        let script = ScriptedExec::new().toc(&[BLANK]).identities(&[Some(ID_1A)]);
+        let tocs = std::cell::Cell::new(0);
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| {
+            if c.iter().any(|a| a == "-toc") {
+                tocs.set(tocs.get() + 1);
+                if tocs.get() == 2 {
+                    return Ok(crate::burn::cmd::CmdOutput {
+                        exit_code: 5,
+                        lines: vec!["xorriso : FAILURE : odd drive".to_string()],
+                    });
+                }
+            }
+            script.respond(c, l)
+        };
+
+        let err =
+            run_real_burn_with(&mut env, &exec, &ScriptedOperator::new(&[true, true])).unwrap_err();
+
+        assert_eq!(
+            partial_parts(&err),
+            (vec!["1A".to_string()], None, vec!["1B".to_string()])
         );
         assert_eq!(err.exit_code(), 6);
     }
@@ -2590,6 +2620,10 @@ mod burn_tests {
 
         let unwritten = |e: B| matches!(burner_failure(e), DiscFailure::Unwritten(_));
         assert!(unwritten(B::Aborted));
+        assert!(unwritten(B::InspectFailed {
+            exit_code: 5,
+            output_tail: vec![],
+        }));
         assert!(unwritten(B::ToolMissing("x".into())));
         assert!(unwritten(B::ToolTooOld("1.4".into())));
         assert!(unwritten(B::DeviceNotFound("/dev/sr9".into())));
