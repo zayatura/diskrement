@@ -80,6 +80,18 @@ impl<'a> Pipeline<'a> {
         ))
     }
 
+    /// Clear the staged scan and plan. `staged::clear` refuses a `staged/`
+    /// that holds anything else, so the error names the directory to look in.
+    fn clear_staged(&self) -> Result<(), PipelineError> {
+        staged::clear(&self.paths.work_dir).map_err(|e| {
+            PipelineError::Failed(format!(
+                "could not clear {}: {}",
+                self.paths.work_dir.join("staged").display(),
+                crate::error::with_causes(&e)
+            ))
+        })
+    }
+
     fn project(&self, name: &str) -> Result<Project, PipelineError> {
         self.catalog
             .find_project(name)
@@ -232,7 +244,7 @@ impl<'a> Pipeline<'a> {
         rehash: bool,
     ) -> Result<PlanOutcome, PipelineError> {
         let p = self.project(name)?;
-        staged::clear(&self.paths.work_dir).map_err(Self::failed)?;
+        self.clear_staged()?;
         let (files, hashed) = self.fresh_scan(&p, rehash)?;
         self.plan_scanned(&p, &files, Some(hashed), disc_type_override, finalize)
     }
@@ -287,7 +299,13 @@ impl<'a> Pipeline<'a> {
         let scanned = staged::read_scan(&self.paths.work_dir)
             .map_err(Self::corrupt_scan)?
             .expect("plan_staged plans a scan the test staged");
-        self.plan_scanned(&p, &scanned, Some(0), disc_type_override, finalize)
+        self.plan_scanned(
+            &p,
+            &scanned,
+            Some(0), // nothing hashed: the test staged the scan
+            disc_type_override,
+            finalize,
+        )
     }
 
     /// `burn`: write the staged plan's discs in set order, committing each one
@@ -322,7 +340,7 @@ impl<'a> Pipeline<'a> {
             .map_err(Self::failed)?
             .ok_or_else(|| PipelineError::NoStagedPlan(name.to_string()))?;
         let scanned = staged::read_scan(&self.paths.work_dir)
-            .map_err(Self::failed)?
+            .map_err(Self::corrupt_scan)?
             .ok_or_else(|| PipelineError::NoStagedPlan(name.to_string()))?;
         if !report.oversized.is_empty() {
             return Err(PipelineError::OversizedFiles(
@@ -808,7 +826,7 @@ impl<'a> Pipeline<'a> {
     /// trees are the staged verifier's only evidence.
     pub fn reset(&self, name: &str) -> Result<(), PipelineError> {
         self.project(name)?;
-        staged::clear(&self.paths.work_dir).map_err(Self::failed)?;
+        self.clear_staged()?;
 
         let burn_catalog = self.paths.work_dir.join("burn-catalog.sqlite");
         match std::fs::remove_file(&burn_catalog) {
@@ -1320,6 +1338,24 @@ mod tests {
         assert_eq!(err.exit_code(), 3, "{err}");
         assert!(staged::read_plan(&e.work).unwrap().is_none());
         assert!(staged::read_scan(&e.work).unwrap().is_none());
+    }
+
+    /// `plan` clears `staged/` first; a stray file there blocks that, and the
+    /// error names the directory instead of a bare OS message.
+    #[test]
+    fn a_stray_file_in_staged_fails_plan_naming_the_directory() {
+        let mut e = setup();
+        write_src(&e, "a.txt", b"a");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        e.pipeline.plan("p", None, false, false).unwrap();
+        let staged_dir = e.work.join("staged");
+        std::fs::write(staged_dir.join("stray.txt"), b"x").unwrap();
+        let err = e.pipeline.plan("p", None, false, false).unwrap_err();
+        assert!(
+            err.to_string().contains(&staged_dir.display().to_string()),
+            "{err}"
+        );
+        assert_eq!(err.exit_code(), 5);
     }
 
     /// Each plan's snapshot replaces the last one rather than accumulating.
@@ -1967,6 +2003,17 @@ mod burn_tests {
         let err = run_burn(&mut env).unwrap_err();
         assert!(matches!(err, PipelineError::NoStagedPlan(_)), "{err}");
         assert_eq!(err.exit_code(), 2);
+    }
+
+    /// A scan.json that does not decode is named as such, not as a bare
+    /// serde error.
+    #[test]
+    fn burning_with_a_corrupt_staged_scan_says_so() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        std::fs::write(staged::scan_path(&env.work), b"not json").unwrap();
+        let err = run_burn(&mut env).unwrap_err();
+        assert!(err.to_string().contains("corrupt scan.json"), "{err}");
+        assert_eq!(err.exit_code(), 5);
     }
 
     #[test]

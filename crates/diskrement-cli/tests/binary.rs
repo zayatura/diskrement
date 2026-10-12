@@ -274,7 +274,7 @@ mod plan {
             .arg(root.join("work"))
             .assert()
             .success();
-        cmd()
+        let out = cmd()
             .arg("--catalog")
             .arg(&catalog)
             .args(["plan", "p"])
@@ -284,7 +284,15 @@ mod plan {
                 contains("Scanned: 0 added, 0 modified, 0 deleted, 0 unchanged.\n")
                     .and(contains("Hashed 0 of 0 files (0 fingerprints reused).\n"))
                     .and(contains("Nothing to burn: no changes to plan.")),
-            );
+            )
+            .get_output()
+            .stdout
+            .clone();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.find("Scanned:").unwrap() < s.find("Nothing to burn").unwrap(),
+            "the scan block comes before the plan block: {s}"
+        );
     }
 
     #[test]
