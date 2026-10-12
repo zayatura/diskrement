@@ -192,9 +192,9 @@ pub enum BurnError {
         output_tail: Vec<String>,
     },
     /// The media inspection (`-toc`) failed in a way `parse` does not
-    /// classify, or printed nothing it could parse. Worded exactly like
-    /// `BurnFailed`, but it comes before any write, so a partial burn calls
-    /// the disc "not written" (#17).
+    /// classify, or printed nothing it could parse, in `burn` or `verify`.
+    /// Worded exactly like `BurnFailed`, but in a burn it comes before any
+    /// write, so a partial burn calls the disc "not written" (#17).
     #[error("xorriso failed (exit {exit_code}): {}", output_tail.join(" | "))]
     InspectFailed {
         exit_code: i32,

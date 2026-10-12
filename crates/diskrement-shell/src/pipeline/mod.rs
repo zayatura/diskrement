@@ -1664,6 +1664,7 @@ mod burn_tests {
             partial_parts(&err),
             (vec!["1A".to_string()], None, vec!["1B".to_string()])
         );
+        assert!(err.to_string().contains("odd drive"), "{err}");
         assert_eq!(err.exit_code(), 6);
     }
 
