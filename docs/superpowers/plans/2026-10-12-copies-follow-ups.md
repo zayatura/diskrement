@@ -136,3 +136,25 @@ unclassified `-toc` failure or unparsable output. A partial burn treats `BurnFai
 changes. `burner_failure` classes it as not written. `verify` also inspects and gets the
 same message and exit code as before. Pinned by
 `an_inspection_failure_reports_the_disc_as_not_written`, which fails with the old variant.
+
+## #16 — a deleted file whose last copy dies is not due for a re-burn
+
+Branch `feat/pending-deletions`. The user chose a work-dir file over a catalog record,
+since #9 forbids a sessionless deletion record, and over reading only the staged scan,
+since `burn` clears it.
+
+- `scan` (both the fresh and the reuse path, through `count`) writes the latest
+  deletions to `<work_dir>/pending-deletions.json`. A rescan replaces the file; `burn`
+  and `reset` leave it alone.
+- The pipeline's `coverage` helper drops those paths from the view and the sizes before
+  `replication::coverage`. They are neither "no live copy" nor missing from a set.
+  Applies to `status` and to `burn`'s report.
+- `Catalog::mark_dead` takes the set and treats those versions as non-current. A dying
+  last copy is LOST (a `lost_version` row with fate LOST, listed as permanently lost),
+  never REBURN or degraded.
+- A file that comes back before the next scan still counts as deleted until that scan.
+  A mark-dead that runs before any scan has seen the deletion still records REBURN,
+  because nothing knew of the deletion yet. Coverage corrects itself on the next scan.
+- The #10 property no longer exempts pending deletions: coverage must read complete
+  after every full cycle. A mutant that ignores the file fails both it and
+  `a_deleted_file_whose_copies_died_is_not_due_for_a_re_burn`. 200 cases pass.

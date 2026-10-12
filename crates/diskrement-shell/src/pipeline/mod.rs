@@ -5,14 +5,14 @@ pub mod planning;
 pub mod reports;
 pub mod staged;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use diskrement_core::{
-    diff, manifest, replication, Capacity, DiscArg, DiscContents, DiscKey, DiscState, DiscStatus,
-    DiscType, PlannedDisc, RelPath, ScannedFile, SessionManifest,
+    diff, manifest, replication, Capacity, CatalogView, Coverage, DiscArg, DiscContents, DiscKey,
+    DiscState, DiscStatus, DiscType, PlannedDisc, RelPath, ScannedFile, SessionManifest,
 };
 
 use crate::burn::verifier::{DiscExpectation, Verifier};
@@ -59,6 +59,14 @@ impl<'a> Pipeline<'a> {
             paths,
             progress,
         }
+    }
+
+    /// The latest scan's deletions that still wait for a burned disc (#16).
+    /// Empty when no scan has run here or the file cannot be read: it only
+    /// refines what `status`, `burn` and `mark-dead` say, so losing it costs
+    /// the pre-#16 wording, never data.
+    fn pending_deletions(&self) -> BTreeSet<RelPath> {
+        staged::read_pending_deletions(&self.paths.work_dir).unwrap_or_default()
     }
 
     fn failed(e: impl std::error::Error + 'static) -> PipelineError {
@@ -189,10 +197,14 @@ impl<'a> Pipeline<'a> {
         // Deletions come from the history, like `plan`'s tombstones, so the
         // scan never reports a different count from the plan that follows it.
         let recorded = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
+        let deleted = diff::tombstones(recorded.keys(), files);
+        // Kept until the next scan, so `status`, `burn` and `mark-dead` know
+        // these files were deleted rather than lost (#16).
+        staged::write_pending_deletions(&self.paths.work_dir, &deleted).map_err(Self::failed)?;
         Ok(ScanReport {
             added: cs.added.len(),
             modified: cs.modified.len(),
-            deleted: diff::tombstones(recorded.keys(), files).len(),
+            deleted: deleted.len(),
             unchanged: cs.unchanged.len(),
             hashed,
             scanned_files: files.len(),
@@ -362,7 +374,7 @@ impl<'a> Pipeline<'a> {
         Ok(BurnReport {
             discs: written,
             remaining,
-            coverage: replication::coverage(&view, &sizes(&current), p.copies),
+            coverage: coverage(&view, &current, p.copies, &self.pending_deletions()),
             deferred_deletions,
         })
     }
@@ -617,7 +629,7 @@ impl<'a> Pipeline<'a> {
         }
         Ok(StatusReport {
             open_discs,
-            coverage: replication::coverage(&view, &sizes(&current), p.copies),
+            coverage: coverage(&view, &current, p.copies, &self.pending_deletions()),
             total_current_files: current.len(),
             discs,
             last_burn_at,
@@ -806,7 +818,9 @@ impl<'a> Pipeline<'a> {
         {
             return Err(PipelineError::DiscAlreadyDead(key.name(p.copies)));
         }
-        self.catalog.mark_dead(p.id, key, &at).map_err(Self::failed)
+        self.catalog
+            .mark_dead(p.id, key, &at, &self.pending_deletions())
+            .map_err(Self::failed)
     }
 }
 
@@ -832,12 +846,24 @@ impl DiscFailure {
     }
 }
 
-/// Each current version's size, for `replication::coverage`.
-fn sizes(current: &BTreeMap<RelPath, FileFingerprint>) -> BTreeMap<RelPath, u64> {
-    current
+/// `replication::coverage` over the current versions that are still in the
+/// source. A deletion waiting for the next burned disc (#9) leaves its version
+/// current in the catalog; counted, it would read as missing from a set, or as
+/// having no live copy and due for a re-burn that can never happen (#16).
+fn coverage(
+    view: &CatalogView,
+    current: &BTreeMap<RelPath, FileFingerprint>,
+    copies: u32,
+    pending: &BTreeSet<RelPath>,
+) -> Coverage {
+    let mut view = view.clone();
+    view.current.retain(|path, _| !pending.contains(path));
+    let sizes: BTreeMap<RelPath, u64> = current
         .iter()
+        .filter(|(path, _)| !pending.contains(*path))
         .map(|(path, f)| (path.clone(), f.size_bytes))
-        .collect()
+        .collect();
+    replication::coverage(&view, &sizes, copies)
 }
 
 /// Remove a committed disc's staging tree, best-effort. The burned disc and
@@ -1960,7 +1986,12 @@ mod burn_tests {
         staged::write_plan(&env.work, &report).unwrap();
 
         env.catalog
-            .mark_dead(ProjectId(1), DiscKey::new(1, 0), &now())
+            .mark_dead(
+                ProjectId(1),
+                DiscKey::new(1, 0),
+                &now(),
+                &Default::default(),
+            )
             .expect("marking disc 1 dead");
 
         let err = run_burn(&mut env).unwrap_err();
@@ -2396,7 +2427,12 @@ mod burn_tests {
         restage(&mut env, &[("a.bin", b"aaaa")]);
         run_burn(&mut env).unwrap();
         env.catalog
-            .mark_dead(ProjectId(1), DiscKey::new(1, 0), &now())
+            .mark_dead(
+                ProjectId(1),
+                DiscKey::new(1, 0),
+                &now(),
+                &Default::default(),
+            )
             .unwrap();
 
         let plan = restage(&mut env, &[("a.bin", b"aaaa"), ("b.bin", b"bbbb")]);
@@ -2495,7 +2531,12 @@ mod burn_tests {
         assert_eq!(plan.sets[0].disc.key(), DiscKey::new(2, 0));
         assert_eq!(plan.tombstones, vec![RelPath("gone.bin".into())]);
         env.catalog
-            .mark_dead(ProjectId(1), DiscKey::new(1, 0), &now())
+            .mark_dead(
+                ProjectId(1),
+                DiscKey::new(1, 0),
+                &now(),
+                &Default::default(),
+            )
             .unwrap();
 
         run_burn(&mut env).unwrap();
@@ -3601,6 +3642,51 @@ mod copies_tests {
         );
     }
 
+    /// #16: `a.bin` is deleted after its only copies die. The deletion waits
+    /// for the next burned disc, and until then it is neither "no live copy"
+    /// nor missing from a set: nothing could ever re-burn it.
+    #[test]
+    fn a_deleted_file_whose_copies_died_is_not_due_for_a_re_burn() {
+        let mut env = burned_twice();
+        for disc in ["1A", "1B"] {
+            pipeline(&mut env)
+                .mark_dead("p", disc.parse::<DiscArg>().unwrap(), at(2))
+                .unwrap();
+        }
+        std::fs::remove_file(env.source.join("a.bin")).unwrap();
+        pipeline(&mut env).scan("p", false, true).unwrap();
+        let plan = pipeline(&mut env).plan("p", None, false).unwrap();
+        assert!(plan.sets.is_empty(), "a deletion-only cycle burns nothing");
+        let burner = Burner::Simulated(SimulatedBurner::new(&NoopSink, 2));
+        let burned = pipeline(&mut env).burn("p", at(3), &burner).unwrap();
+        assert_eq!(burned.coverage.no_live_copy.missing_files, 0);
+
+        let s = pipeline(&mut env).status("p").unwrap();
+        assert_eq!(s.coverage.no_live_copy.missing_files, 0);
+        assert!(s.coverage.sets.iter().all(|c| c.missing_files == 0));
+    }
+
+    /// #16: once a scan has seen `a.bin` deleted, losing its last copies
+    /// records it LOST, not as a re-burn the source can no longer serve.
+    #[test]
+    fn mark_dead_after_a_scan_saw_the_deletion_reports_the_file_lost() {
+        let mut env = burned_twice();
+        std::fs::remove_file(env.source.join("a.bin")).unwrap();
+        pipeline(&mut env).scan("p", false, true).unwrap();
+
+        pipeline(&mut env)
+            .mark_dead("p", "1A".parse::<DiscArg>().unwrap(), at(2))
+            .unwrap();
+        let report = pipeline(&mut env)
+            .mark_dead("p", "1B".parse::<DiscArg>().unwrap(), at(3))
+            .unwrap();
+
+        assert!(report.reburn.is_empty(), "{report:?}");
+        assert!(report.degraded.is_empty(), "{report:?}");
+        assert_eq!(report.lost.len(), 1);
+        assert_eq!(report.lost[0].rel_path.as_str(), "a.bin");
+    }
+
     #[test]
     fn marking_both_twins_dead_leaves_no_set_complete_and_still_counts_the_file() {
         let mut env = burned_twice();
@@ -3760,21 +3846,11 @@ mod copies_tests {
                 prop_assert_eq!(&held_in, &all_sets, "{}'s bytes are short of copies", name);
             }
         }
-        // Coverage counts every catalog-current version, which includes a
-        // deleted file whose deletion waits for the next burned disc (#9). If
-        // its last copy died meanwhile, it reads "no live copy" until then:
-        // the imprecision recorded with #6. Such pending deletions are the
-        // only gap coverage may show.
+        // Coverage leaves out deletions still waiting for a burned disc (#16),
+        // so after a full cycle it reads complete.
         let status = pipeline(env).status("p").unwrap();
-        let on_source = NAMES.iter().filter(|n| env.source.join(n).exists()).count();
-        // The loop above proved every source file current, so this is exact.
-        let pending = status.total_current_files - on_source;
-        prop_assert!(status
-            .coverage
-            .sets
-            .iter()
-            .all(|c| c.missing_files <= pending));
-        prop_assert!(status.coverage.no_live_copy.missing_files <= pending);
+        prop_assert!(status.coverage.sets.iter().all(|c| c.missing_files == 0));
+        prop_assert_eq!(status.coverage.no_live_copy.missing_files, 0);
         Ok(())
     }
 
