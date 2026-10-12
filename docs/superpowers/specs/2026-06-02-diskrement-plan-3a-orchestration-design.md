@@ -90,6 +90,10 @@ final case class FileHistoryEntry(
 
 **`plan(name, discTypeOverride)`** — require a staged scan (`NoStagedScan`). `Diff.diff(readView(pid), stagedScan)` → `ChangeSet`; `Planner.plan(changeSet, readDiscStates(pid), Capacity.fromDiscType(discType, project.marginPercent))` where `discType = discTypeOverride orElse project.defaultDiscType`; stage and return the `BurnPlan`. If `BurnPlan.oversized` is non-empty, still stage but the result surfaces them (a hard error is raised at `burn`, or `plan` returns them for the caller to see — see §6).
 
+> **Amended 2026-10-12 (#4):** `scan` and `plan` are one operation. `plan` clears the
+> staged scan and plan, snapshots, scans and plans; `NoStagedScan` no longer exists.
+> See `2026-10-12-merge-scan-into-plan-design.md`.
+
 **`burn(name)`** — require a staged plan (`NoStagedPlan`) and the live snapshot (`SnapshotMissing`). Pre-burn: `snapshotTo(tmpCatalog)` and `archivePointers(pid)` once. Recompute `ChangeSet` from staged scan. For each `PlannedDisc` (tombstones assigned to the last disc): `ManifestBuilder.build` → `SessionManifest`; build a `DiscImage` (staging dir `workDir/staging/disc-<ordinal>`, `snapshotRoot`, `files`, `DiscMetadata`(identity, manifest, tmpCatalog, pointers)); `SimulatedBurner.burn`. After all succeed, assemble one `CatalogUpdate` (DiscWrite per disc with `status = if willFinalize FINALIZED else OPEN`, label `"<name> disc <ordinal>"`, `SessionWrite` with next session ordinal, `burnedAt = now`, `manifestHash = sha256(manifestJson)`, added/modified `FileWrite`s split from `disc.files` with `discPath = "/data/" + relPath`, `deleted = tombstones`), `applyUpdate(update)`, then `SourceSnapshot.release` and clear staged state. Return `BurnReport`.
 
 **Staging-dir lifecycle.** `burn` clears only the staged *inputs* (`staged/scan.json`, `staged/plan.json`) and releases the snapshot on success; it **leaves the per-disc staging output** (`workDir/staging/disc-<ordinal>`) in place, because in cycle 1 those directories *are* the simulated discs that `verify` re-reads. `reset` removes everything — staged inputs, the `staging/` output dirs, and the snapshot.

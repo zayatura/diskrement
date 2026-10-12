@@ -30,7 +30,7 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       arranged without root. The mapping is pinned by unit tests —
       `burn/media.rs` permission→`DevicePermissionDenied`,
       `error.rs` →exit 6, `pipeline` exit-code test.)
-- [x] 1. `init` a scratch project (small source dir, a few MB), `scan`, `plan`,
+- [x] 1. `init` a scratch project (small source dir, a few MB), `plan`,
       `burn` to a blank BD-R. Confirm: insert prompt appears, xorriso UPDATE
       progress streams, disc ejects, catalog commits (`status` shows the disc).
       (Rust, 2026-09-11 — blank CMC BD-R in sr1: both prompts appeared,
@@ -44,7 +44,7 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       marked VERIFIED.
       (Rust, 2026-09-11 — `disc 1: 3 files OK ✓`; `session` row advanced to
       `VERIFIED`.)
-- [x] 3. Add/modify a file, `scan`/`plan`/`burn` again to the SAME disc
+- [x] 3. Add/modify a file, `plan`/`burn` again to the SAME disc
       (top-off). Confirm the identity check accepted it and `-toc` (or
       `xorriso -outdev "$DISKREMENT_DEVICE" -toc`) shows 2 sessions.
       (Rust, 2026-09-11 — `appending to open disc 1` accepted;
