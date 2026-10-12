@@ -6,7 +6,7 @@
 use crate::support;
 
 #[test]
-fn verify_of_an_unknown_project_and_plan_without_a_scan_both_exit_two() {
+fn verify_of_an_unknown_project_and_burn_without_a_plan_both_exit_two() {
     let Some(s) = support::scratch_or_skip("exit codes") else {
         return;
     };
@@ -16,5 +16,5 @@ fn verify_of_an_unknown_project_and_plan_without_a_scan_both_exit_two() {
     cli.init(&s, "p");
 
     assert_eq!(cli.run(&["verify", "does-not-exist"]).code, 2);
-    assert_eq!(cli.run(&["plan", "p"]).code, 2);
+    assert_eq!(cli.run(&["burn", "p", "--yes"]).code, 2);
 }

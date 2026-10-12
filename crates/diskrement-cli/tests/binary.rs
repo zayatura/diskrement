@@ -256,8 +256,10 @@ mod plan {
             .stdout(contains("Oversized (cannot be placed):").and(contains("big.bin")));
     }
 
+    /// `plan` needs no earlier step: on an empty source it scans, finds
+    /// nothing, and says so (#4).
     #[test]
-    fn plan_without_a_staged_scan_exits_2_and_says_to_run_scan() {
+    fn plan_on_a_fresh_project_scans_by_itself() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -277,8 +279,12 @@ mod plan {
             .arg(&catalog)
             .args(["plan", "p"])
             .assert()
-            .code(2)
-            .stderr(contains("no staged scan for p (run scan)"));
+            .success()
+            .stdout(
+                contains("Scanned: 0 added, 0 modified, 0 deleted, 0 unchanged.\n")
+                    .and(contains("Hashed 0 of 0 files (0 fingerprints reused).\n"))
+                    .and(contains("Nothing to burn: no changes to plan.")),
+            );
     }
 
     #[test]
@@ -728,15 +734,16 @@ mod verify_history_reset {
             .stdout(contains("  #1   "));
     }
 
+    /// `reset` discards the staged plan; the next `plan` simply scans again.
     #[test]
-    fn planning_after_a_reset_needs_a_fresh_scan() {
+    fn planning_after_a_reset_scans_again() {
         let f = burned_project();
-        run(&f, &["scan", "p"]).success();
+        run(&f, &["plan", "p"]).success();
         run(&f, &["reset", "p"]).success();
-        run(&f, &["plan", "p"])
-            .failure()
-            .code(2)
-            .stderr(contains("no staged scan for p (run scan)"));
+        assert!(!f.work.join("staged").exists());
+        run(&f, &["plan", "p"]).success().stdout(contains(
+            "Scanned: 0 added, 0 modified, 0 deleted, 2 unchanged.",
+        ));
     }
 
     #[test]

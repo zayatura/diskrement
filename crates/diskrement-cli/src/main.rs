@@ -161,21 +161,25 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             name,
             disc_type,
             finalize,
+            rehash,
         } => {
             // The work dir comes from the project row, not the CLI
-            // (`Runner.withProject`). `plan` reports no progress.
+            // (`Runner.withProject`). `plan` scans first, so hashing progress
+            // goes to stderr like any long phase.
             let mut catalog = open_catalog(&resolved.catalog)?;
             let p = find_or_fail(&catalog, &name)?;
-            let pipeline = Pipeline::new(
+            let sink = progress::ConsoleProgress::new();
+            let mut pipeline = Pipeline::new(
                 &mut catalog,
                 PipelinePaths {
                     work_dir: PathBuf::from(&p.work_dir),
                     scan_cache: paths::scan_cache_path(&resolved.catalog, &name),
                 },
-                &NoopSink,
+                &sink,
             );
-            let report = pipeline.plan(&name, disc_type, finalize)?;
-            say(&render::plan_report(&report));
+            let outcome = pipeline.plan(&name, disc_type, finalize, rehash)?;
+            say(&render::scan_report(&outcome.scan));
+            say(&render::plan_report(&outcome.plan));
             Ok(0)
         }
         Command::Status { name } => {

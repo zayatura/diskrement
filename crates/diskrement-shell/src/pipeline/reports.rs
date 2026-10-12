@@ -18,6 +18,13 @@ pub struct ScanReport {
     pub scanned_files: usize,
 }
 
+/// What `plan` returns: the scan it took and the plan it staged (#4).
+#[derive(Debug)]
+pub struct PlanOutcome {
+    pub scan: ScanReport,
+    pub plan: PlanReport,
+}
+
 /// `StatusReport`. `open_discs` holds each copy set's open disc, if it has
 /// one; `coverage` is indexed by copy set.
 #[derive(Debug)]

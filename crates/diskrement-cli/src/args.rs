@@ -62,7 +62,7 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
-    /// Plan the next disc from the staged scan.
+    /// Scan the source and plan the next disc.
     Plan {
         name: String,
         /// Override the project's default disc type for this plan only.
@@ -71,6 +71,9 @@ pub enum Command {
         /// Seal the disc even when everything fit.
         #[arg(long, default_value_t = false)]
         finalize: bool,
+        /// Re-hash every file, ignoring the fingerprint cache and the size+mtime fast path.
+        #[arg(long, default_value_t = false)]
+        rehash: bool,
     },
     /// Show discs, totals, and last burn.
     Status { name: String },
@@ -271,6 +274,7 @@ mod tests {
             name,
             disc_type,
             finalize,
+            rehash,
         } = cli.command
         else {
             panic!("not plan")
@@ -278,6 +282,7 @@ mod tests {
         assert_eq!(name, "photos");
         assert_eq!(disc_type, None);
         assert!(!finalize);
+        assert!(!rehash);
     }
 
     #[test]
@@ -301,6 +306,15 @@ mod tests {
         };
         assert_eq!(disc_type, Some(DiscType::DvdDl));
         assert!(finalize);
+    }
+
+    #[test]
+    fn plan_takes_the_rehash_flag() {
+        let cli = Cli::try_parse_from(["diskrement", "plan", "photos", "--rehash"]).unwrap();
+        let Command::Plan { rehash, .. } = cli.command else {
+            panic!("not plan")
+        };
+        assert!(rehash);
     }
 
     #[test]

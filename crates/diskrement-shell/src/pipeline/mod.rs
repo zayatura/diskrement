@@ -30,8 +30,8 @@ use crate::fs::snapshot::{self, SnapshotHandle};
 use crate::progress::ProgressSink;
 
 use reports::{
-    BurnReport, DiscBurn, PlanReport, RemainingEstimate, ScanReport, SetPlan, StatusReport,
-    VerifyReport,
+    BurnReport, DiscBurn, PlanOutcome, PlanReport, RemainingEstimate, ScanReport, SetPlan,
+    StatusReport, VerifyReport,
 };
 
 /// The paths a pipeline needs, resolved by the CLI (`ProjectPaths` +
@@ -218,24 +218,40 @@ impl<'a> Pipeline<'a> {
         })
     }
 
-    /// `plan`: the staged scan plus the catalog view decide the disc each copy
-    /// set writes this cycle (`PipelineLive.plan`). Stages `staged/plan.json` and
-    /// writes **no catalog rows** — no `PLANNED` state is ever persisted; the
-    /// staged plan in the work dir is the recovery unit.
+    /// `plan`: scan the source, then decide the disc each copy set writes this
+    /// cycle. The staged scan and plan are cleared first, so a plan that fails
+    /// at any step leaves nothing for `burn` to accept (#4); the fresh snapshot
+    /// replaces the previous one. Stages `staged/scan.json` and
+    /// `staged/plan.json` and writes **no catalog rows**. No `PLANNED` state is
+    /// ever persisted: the staged plan in the work dir is the recovery unit.
     pub fn plan(
-        &self,
+        &mut self,
         name: &str,
         disc_type_override: Option<DiscType>,
         finalize: bool,
-    ) -> Result<PlanReport, PipelineError> {
+        rehash: bool,
+    ) -> Result<PlanOutcome, PipelineError> {
         let p = self.project(name)?;
-        let scanned = staged::read_scan(&self.paths.work_dir)
-            .map_err(Self::corrupt_scan)?
-            .ok_or_else(|| PipelineError::NoStagedScan(name.to_string()))?;
+        staged::clear(&self.paths.work_dir).map_err(Self::failed)?;
+        let (files, hashed) = self.fresh_scan(&p, rehash)?;
+        self.plan_scanned(&p, &files, Some(hashed), disc_type_override, finalize)
+    }
+
+    /// `plan` on files already scanned and staged: count them against the
+    /// catalog, plan, and stage the plan.
+    fn plan_scanned(
+        &self,
+        p: &Project,
+        scanned: &[ScannedFile],
+        hashed: Option<usize>,
+        disc_type_override: Option<DiscType>,
+        finalize: bool,
+    ) -> Result<PlanOutcome, PipelineError> {
+        let scan = self.count(p, scanned, hashed)?;
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let states = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
         let recorded = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
-        let tombstones = diff::tombstones(recorded.keys(), &scanned);
+        let tombstones = diff::tombstones(recorded.keys(), scanned);
         let disc_type = disc_type_override.unwrap_or(p.default_disc_type);
         let cap = planning::effective_capacity(
             Capacity::from_disc_type(disc_type, p.margin_percent),
@@ -244,7 +260,7 @@ impl<'a> Pipeline<'a> {
         let next = self.next_sessions(p.id)?;
         let report = planning::plan_from(
             &view,
-            &scanned,
+            scanned,
             tombstones,
             &states,
             disc_type,
@@ -254,7 +270,24 @@ impl<'a> Pipeline<'a> {
             |disc| next.get(&disc).copied().unwrap_or(1),
         );
         staged::write_plan(&self.paths.work_dir, &report).map_err(Self::failed)?;
-        Ok(report)
+        Ok(PlanOutcome { scan, plan: report })
+    }
+
+    /// `plan` without the scan: plans `scan.json` as it stands. The burn
+    /// tests stage a snapshot and a scan by hand (fixed mtimes, files that
+    /// never touch the source) and plan them through this.
+    #[cfg(test)]
+    fn plan_staged(
+        &self,
+        name: &str,
+        disc_type_override: Option<DiscType>,
+        finalize: bool,
+    ) -> Result<PlanOutcome, PipelineError> {
+        let p = self.project(name)?;
+        let scanned = staged::read_scan(&self.paths.work_dir)
+            .map_err(Self::corrupt_scan)?
+            .expect("plan_staged plans a scan the test staged");
+        self.plan_scanned(&p, &scanned, Some(0), disc_type_override, finalize)
     }
 
     /// `burn`: write the staged plan's discs in set order, committing each one
@@ -1240,19 +1273,74 @@ mod tests {
         }
     }
 
+    /// `plan` needs no earlier step: it scans the source itself (#4).
     #[test]
-    fn plan_without_a_staged_scan_is_exit_2_with_the_run_scan_advice() {
+    fn plan_scans_the_source_itself() {
+        let mut e = setup();
+        write_src(&e, "a.txt", b"aaaaa");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        let out = e.pipeline.plan("p", None, false, false).unwrap();
+        assert_eq!((out.scan.added, out.scan.scanned_files), (1, 1));
+        assert_eq!(out.plan.sets[0].disc.files.len(), 1);
+        assert_eq!(staged::read_scan(&e.work).unwrap().unwrap().len(), 1);
+    }
+
+    /// The #4 regression: a plan with nothing to burn used to leave its scan
+    /// staged, and every later scan reused it, so new files were never seen.
+    #[test]
+    fn a_plan_after_nothing_to_burn_sees_a_file_added_since() {
         let mut e = setup();
         e.pipeline.init(&project_init(&e)).unwrap();
-        let err = e.pipeline.plan("p", None, false).unwrap_err();
-        assert_eq!(err.to_string(), "no staged scan for p (run scan)");
-        assert_eq!(err.exit_code(), 2);
+        let first = e.pipeline.plan("p", None, false, false).unwrap();
+        assert!(first.plan.sets.is_empty(), "nothing to burn yet");
+        write_src(&e, "new.jpg", b"photo");
+        let second = e.pipeline.plan("p", None, false, false).unwrap();
+        assert_eq!(second.scan.added, 1);
+        assert_eq!(second.plan.sets[0].disc.files.len(), 1);
+        assert_eq!(
+            second.plan.sets[0].disc.files[0].rel_path.as_str(),
+            "new.jpg"
+        );
+    }
+
+    /// A plan that fails partway leaves nothing staged, so `burn` cannot
+    /// accept an older plan whose snapshot the failed scan already replaced.
+    #[test]
+    fn a_plan_that_fails_mid_scan_leaves_nothing_staged() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let mut e = setup();
+        write_src(&e, "a.txt", b"a");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        e.pipeline.plan("p", None, false, false).unwrap();
+        assert!(staged::read_plan(&e.work).unwrap().is_some());
+
+        let bad = std::ffi::OsStr::from_bytes(b"bad\xffname.txt");
+        std::fs::write(e.src.join(bad), b"x").unwrap();
+        let err = e.pipeline.plan("p", None, false, false).unwrap_err();
+        assert_eq!(err.exit_code(), 3, "{err}");
+        assert!(staged::read_plan(&e.work).unwrap().is_none());
+        assert!(staged::read_scan(&e.work).unwrap().is_none());
+    }
+
+    /// Each plan's snapshot replaces the last one rather than accumulating.
+    #[test]
+    fn a_re_plan_replaces_the_snapshot() {
+        let mut e = setup();
+        write_src(&e, "a.txt", b"a");
+        e.pipeline.init(&project_init(&e)).unwrap();
+        e.pipeline.plan("p", None, false, false).unwrap();
+        std::fs::remove_file(e.src.join("a.txt")).unwrap();
+        write_src(&e, "b.txt", b"b");
+        e.pipeline.plan("p", None, false, false).unwrap();
+        let snap = e.work.join("snapshot");
+        assert!(snap.join("b.txt").is_file());
+        assert!(!snap.join("a.txt").exists(), "the first snapshot is gone");
     }
 
     #[test]
     fn plan_on_an_unknown_project_fails_projectnotfound() {
-        let e = setup();
-        let err = e.pipeline.plan("nosuch", None, false).unwrap_err();
+        let mut e = setup();
+        let err = e.pipeline.plan("nosuch", None, false, false).unwrap_err();
         assert!(matches!(err, PipelineError::ProjectNotFound(_)));
     }
 
@@ -1262,7 +1350,7 @@ mod tests {
         write_src(&e, "a.txt", b"aaaaa");
         e.pipeline.init(&project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
-        let report = e.pipeline.plan("p", None, false).unwrap();
+        let report = e.pipeline.plan("p", None, false, false).unwrap().plan;
         assert_eq!(report.sets[0].disc.ordinal, 1);
         assert_eq!(report.sets[0].disc.files.len(), 1);
         assert_eq!(report.disc_type, DiscType::BdR);
@@ -1276,7 +1364,7 @@ mod tests {
         write_src(&e, "a.txt", b"a");
         e.pipeline.init(&project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
-        let report = e.pipeline.plan("p", None, false).unwrap();
+        let report = e.pipeline.plan("p", None, false, false).unwrap().plan;
         assert_eq!(
             report.sets[0].disc.usable_bytes,
             diskrement_core::Capacity::from_disc_type(DiscType::BdR, 2.0).usable_bytes
@@ -1289,7 +1377,11 @@ mod tests {
         write_src(&e, "a.txt", b"a");
         e.pipeline.init(&project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
-        let report = e.pipeline.plan("p", Some(DiscType::Dvd), false).unwrap();
+        let report = e
+            .pipeline
+            .plan("p", Some(DiscType::Dvd), false, false)
+            .unwrap()
+            .plan;
         assert_eq!(report.disc_type, DiscType::Dvd);
         assert_eq!(
             report.sets[0].disc.usable_bytes,
@@ -1304,12 +1396,12 @@ mod tests {
         e.pipeline.init(&project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
         assert!(
-            !e.pipeline.plan("p", None, false).unwrap().sets[0]
+            !e.pipeline.plan("p", None, false, false).unwrap().plan.sets[0]
                 .disc
                 .will_finalize
         );
         assert!(
-            e.pipeline.plan("p", None, true).unwrap().sets[0]
+            e.pipeline.plan("p", None, true, false).unwrap().plan.sets[0]
                 .disc
                 .will_finalize
         );
@@ -1322,7 +1414,7 @@ mod tests {
         write_src(&e, "b.txt", &[b'b'; 200_000]);
         e.pipeline.init(&tiny_project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
-        let report = e.pipeline.plan("p", None, false).unwrap();
+        let report = e.pipeline.plan("p", None, false, false).unwrap().plan;
         assert_eq!(report.sets[0].disc.files.len(), 1);
         assert!(report.sets[0].disc.will_finalize);
         assert_eq!(report.sets[0].remaining.more_discs, 1);
@@ -1336,7 +1428,7 @@ mod tests {
         write_src(&e, "big.txt", &[b'x'; 300_000]);
         e.pipeline.init(&tiny_project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
-        let report = e.pipeline.plan("p", None, false).unwrap();
+        let report = e.pipeline.plan("p", None, false, false).unwrap().plan;
         assert_eq!(report.oversized.len(), 1);
         assert_eq!(report.oversized[0].rel_path.as_str(), "big.txt");
     }
@@ -1348,8 +1440,8 @@ mod tests {
         write_src(&e, "a.txt", b"a");
         e.pipeline.init(&project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
-        e.pipeline.plan("p", None, false).unwrap();
-        let second = e.pipeline.plan("p", None, true).unwrap();
+        e.pipeline.plan("p", None, false, false).unwrap();
+        let second = e.pipeline.plan("p", None, true, false).unwrap().plan;
         assert!(second.sets[0].disc.will_finalize);
         assert_eq!(staged::read_plan(&e.work).unwrap().unwrap(), second);
         assert_eq!(staged::read_scan(&e.work).unwrap().unwrap().len(), 1);
@@ -1387,7 +1479,7 @@ mod tests {
         e.pipeline.init(&project_init(&e)).unwrap();
         e.pipeline.scan("p", false, false).unwrap();
         let before = burn_written_rows(&e.pipeline);
-        e.pipeline.plan("p", None, false).unwrap();
+        e.pipeline.plan("p", None, false, false).unwrap();
         assert_eq!(burn_written_rows(&e.pipeline), before);
         assert!(before.iter().all(|line| line.ends_with("=0")), "{before:?}");
     }
@@ -2118,7 +2210,7 @@ mod burn_tests {
             },
             &sink,
         )
-        .plan("p", None, false)
+        .plan_staged("p", None, false)
         .unwrap();
 
         run_burn(&mut env).unwrap();
@@ -2288,8 +2380,9 @@ mod burn_tests {
             },
             &sink,
         )
-        .plan("p", None, false)
+        .plan_staged("p", None, false)
         .unwrap()
+        .plan
     }
 
     /// `(copy set, session ordinal)` of every DELETED change record of `path`.
@@ -2952,7 +3045,7 @@ mod verify_tests {
                 },
                 &sink,
             );
-            let plan = pipeline.plan("p", None, true).unwrap();
+            let plan = pipeline.plan_staged("p", None, true).unwrap().plan;
             assert!(plan.sets[0].disc.files.is_empty());
             pipeline.burn("p", now(), &burner).unwrap();
         }
@@ -3185,7 +3278,7 @@ mod mark_dead_tests {
             },
             &sink,
         );
-        pipeline.plan("p", None, false).unwrap();
+        pipeline.plan_staged("p", None, false).unwrap();
         pipeline.burn("p", burned_at, &burner).unwrap();
     }
 
@@ -3214,7 +3307,7 @@ mod mark_dead_tests {
             },
             &NoopSink,
         );
-        pipeline.plan("p", None, false)
+        pipeline.plan_staged("p", None, false).map(|o| o.plan)
     }
 
     fn run_verify(env: &mut Env, disc: Option<&str>) -> Result<Vec<VerifyReport>, PipelineError> {
@@ -3480,7 +3573,7 @@ mod mark_dead_tests {
         {
             let p = paths(&e);
             let mut pipeline = Pipeline::new(&mut e.catalog, p, &sink);
-            pipeline.plan("p", None, true).unwrap();
+            pipeline.plan_staged("p", None, true).unwrap();
             pipeline.burn("p", at(1), &burner).unwrap();
         }
 
@@ -3490,7 +3583,7 @@ mod mark_dead_tests {
         {
             let p = paths(&e);
             let pipeline = Pipeline::new(&mut e.catalog, p, &sink);
-            pipeline.plan("p", None, false).unwrap();
+            pipeline.plan_staged("p", None, false).unwrap();
         }
         run_mark_dead(&mut e, "1").expect("mark-dead succeeds");
 
@@ -3563,7 +3656,7 @@ mod copies_tests {
         let mut pipeline = Pipeline::new(&mut env.catalog, p, &NoopSink);
         pipeline.init(&pi).unwrap();
         pipeline.scan("p", false, false).unwrap();
-        pipeline.plan("p", None, false).unwrap();
+        pipeline.plan("p", None, false, false).unwrap();
         let burner = Burner::Simulated(SimulatedBurner::new(&NoopSink, 2));
         pipeline.burn("p", at(1), &burner).unwrap();
         env
@@ -3611,7 +3704,7 @@ mod copies_tests {
         let mut env = burned_twice();
         std::fs::write(env.source.join("a.bin"), b"AAAA").unwrap();
         pipeline(&mut env).scan("p", false, true).unwrap();
-        pipeline(&mut env).plan("p", None, false).unwrap();
+        pipeline(&mut env).plan("p", None, false, false).unwrap();
         let burner = Burner::Simulated(SimulatedBurner::new(&NoopSink, 2));
         pipeline(&mut env).burn("p", at(2), &burner).unwrap();
         pipeline(&mut env)
@@ -3678,7 +3771,10 @@ mod copies_tests {
         }
         std::fs::remove_file(env.source.join("a.bin")).unwrap();
         pipeline(&mut env).scan("p", false, true).unwrap();
-        let plan = pipeline(&mut env).plan("p", None, false).unwrap();
+        let plan = pipeline(&mut env)
+            .plan("p", None, false, false)
+            .unwrap()
+            .plan;
         assert!(plan.sets.is_empty(), "a deletion-only cycle burns nothing");
         let burner = Burner::Simulated(SimulatedBurner::new(&NoopSink, 2));
         let burned = pipeline(&mut env).burn("p", at(3), &burner).unwrap();
@@ -3729,7 +3825,7 @@ mod copies_tests {
 
         let scan = pipeline(&mut env).scan("p", false, true).unwrap();
         assert_eq!(scan.added, 1, "no live copy, so the file is new again");
-        pipeline(&mut env).plan("p", None, false).unwrap();
+        pipeline(&mut env).plan("p", None, false, false).unwrap();
         let burner = Burner::Simulated(SimulatedBurner::new(&NoopSink, 2));
         pipeline(&mut env).burn("p", at(3), &burner).unwrap();
         let s = pipeline(&mut env).status("p").unwrap();
@@ -3840,7 +3936,7 @@ mod copies_tests {
     fn run_to_completion(env: &mut Env, clock: &mut i64) -> Result<(), TestCaseError> {
         for _ in 0..40 {
             pipeline(env).scan("p", false, true).unwrap();
-            let report = pipeline(env).plan("p", None, false).unwrap();
+            let report = pipeline(env).plan("p", None, false, false).unwrap().plan;
             prop_assert!(report.oversized.is_empty() && report.unplaceable_catch_up.is_empty());
             if report.sets.is_empty() {
                 return Ok(());
