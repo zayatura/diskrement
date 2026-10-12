@@ -1215,3 +1215,54 @@ gh issue close 4 --reason completed --comment "Fixed in the merge of feat/merge-
 - [ ] **Step 5: Live-backup note.** Update the `photo-backup-live` memory. The cycle is
   now `plan` → `burn` → `verify NA/NB`, and the `scan --force` workaround is gone.
   `--rehash` replaces `scan --verify`.
+
+---
+
+## Execution deviations
+
+Executed subagent-driven on 2026-10-12. Each task had a spec review and a code-quality review, and the whole branch had a final review. These are the places where the work differs from the text above.
+
+- **Task 1 (f201e88, 0eae71e).** The doc comment on `a_staged_plan_without_its_scan_is_the_no_staged_plan_error` said a plan without its scan "can only come from deleting files by hand". That is wrong: `staged::clear` removes `scan.json` before `plan.json`, so an interrupted clear also leaves that state. The comment was corrected, and the sibling test `burning_without_a_staged_plan_is_a_state_error` gained its `exit_code() == 2` assertion.
+- **Task 2 (39ee53a, ef9e8e0).** The review fixes:
+  - `burn` now reads `scan.json` through `corrupt_scan`, as spec §5 says. The plan left this out, and without it Task 4 would have turned `corrupt_scan` into dead code. A new test covers it: `burning_with_a_corrupt_staged_scan_says_so`.
+  - A new helper, `clear_staged`, used by both `plan` and `reset`, names the `staged/` directory when a stray file blocks the clear. Previously the error was a bare "Directory not empty". A new test covers it: `a_stray_file_in_staged_fails_plan_naming_the_directory`.
+  - `plan_on_a_fresh_project_scans_by_itself` also checks that the scan block comes before the plan block.
+  - The `StalePlan` doc comment was reworded, because `plan` now scans afresh.
+
+  The two new tests are why the shell lib ends at **372**, not the 370 this plan expected.
+- **Task 3 (40bc26e, 03edeb1).**
+  - The s08 tail in this plan did not discriminate. Its intervening "Nothing burned" `burn` clears the staged state, so a regression back to reuse would still pass. The fix adds a nothing-to-burn `plan` that is not burned, before the new file appears. The test now asserts that `scan.json` is staged at that point.
+  - The `binary.rs` module `init_scan_status` was renamed here rather than in Task 4.
+  - `perf-bench.sh` notes in its header that a plan step's time includes planning.
+- **Task 4 (2d7bb47).** Further stale comments were fixed:
+  - `fresh_scan`'s snapshot comment, which wrongly said "only `reset` removes it";
+  - the `stale_detail` doc and a drift test's doc;
+  - the mark-dead module's `env()` doc, which said it used the real `plan` when it uses `plan_staged`;
+  - `pending_deletions_path`.
+
+  The `count` stderr warning now reads "until the next plan".
+- **Task 5 (fe01d8e).** The Task 4 review's comment items were folded in:
+  - the `staged.rs` module doc and `timestamps.rs`;
+  - `count`'s "the plan it is part of";
+  - `fresh_scan`'s parameter `verify` renamed to `rehash`;
+  - the test renamed `a_file_back_before_a_re_plan_is_reported_lost_but_burned_again`;
+  - the `ScanReport` doc wrap.
+
+  A sweep also changed the `reset` help to "Discard staged plan state.", plus the `ReburnEntry` and `replication.rs` comments.
+- **Task 6 (55cb803).** This commit's trailer names Claude Sonnet 5.5, the model that wrote it.
+- **Task 7.** The final review found stale comments in `planning.rs`'s module doc and the `restage` helper, and a split sentence in the `perf-bench.sh` header. All three are fixed in the commit that adds this section.
+- **Left open, for the user to decide:** a stray file in `staged/` (e.g. a vim swap file) now blocks every `plan` with exit 5, and the message ends "(this is a bug)". The message names the directory, and nothing is lost. Before #4 the same check ran only in `burn` and `reset`.
+
+**Final counts** (`DISKREMENT_SCENARIOS_REQUIRED=1`, xorriso present):
+
+| Suite | Baseline | Final | Why |
+|---|---|---|---|
+| core | 82 | 82 | |
+| shell lib | 368 | 372 | Task 1 +1, Task 2 +3 net and +2 from review fixes, Task 4 −2 |
+| shell integration (8/6/2/5) | 21 | 21 | |
+| cli bin unit | 108 | 107 | +1 `--rehash`, −1 `scan` args, −1 reused render |
+| `binary` | 46 | 46 | −1 `scan_on_an_unknown_project…`, +1 `scan_is_no_longer_a_command` |
+| `scenarios` | 20 | 20 | |
+| **total** | 645 | 648 | |
+
+clippy (`-D warnings`) and `cargo fmt --check` are clean, and `cargo build --release` succeeds. The release-binary smoke test (Step 2) behaved as expected.

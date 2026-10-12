@@ -2197,7 +2197,7 @@ mod burn_tests {
             mtime: now(),
         }];
         staged::write_scan(&env.work, &scanned).unwrap();
-        // The pipeline's own `plan`, so the staged plan records session 2.
+        // The pipeline's own planning (`plan_staged`), so the staged plan records session 2.
         let sink = NoopSink;
         Pipeline::new(
             &mut env.catalog,
@@ -2351,7 +2351,7 @@ mod burn_tests {
     }
 
     /// Stage a fresh cycle over `files`: the snapshot holds them, `scan.json`
-    /// lists them, and the pipeline's own `plan` stages the plan.
+    /// lists them, and `plan_staged` plans them.
     fn restage(env: &mut Env, files: &[(&str, &[u8])]) -> PlanReport {
         let snapshot = env.work.join("snapshot");
         let _ = std::fs::remove_dir_all(&snapshot);

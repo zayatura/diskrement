@@ -1,4 +1,4 @@
-//! The pure half of `plan`: everything between reading the staged scan and
+//! The pure half of `plan`: everything between the scan it just took and
 //! writing `staged/plan.json`. No filesystem, no catalog, no clock —
 //! `Pipeline::plan` is the thin edge around this.
 
