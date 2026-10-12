@@ -77,7 +77,7 @@ pub struct Coverage {
     /// Indexed by copy set: current versions with no live copy in that set,
     /// including those with no live copy anywhere.
     pub sets: Vec<SetCoverage>,
-    /// Current versions with no live copy in any set. The next scan re-adds
+    /// Current versions with no live copy in any set. The next plan re-adds
     /// them (the REBURN path), but until then no set holds them.
     pub no_live_copy: SetCoverage,
 }

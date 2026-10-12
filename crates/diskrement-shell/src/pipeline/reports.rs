@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 
 use diskrement_core::{Coverage, DiscKey, DiscState, DiscType, PlannedDisc, RelPath, ScannedFile};
 
-/// What `plan`'s scan found. `hashed` counts the files hashed this run; the rest reused a fingerprint.
+/// What `plan`'s scan found. `hashed` counts the files hashed this run; the
+/// rest reused a fingerprint.
 #[derive(Debug)]
 pub struct ScanReport {
     pub added: usize,

@@ -104,7 +104,7 @@ fn each_cycle_writes_one_disc_per_set_and_a_dead_twin_is_restored() {
     );
     assert!(dead.out_has("No live files to re-burn."), "{}", dead.stdout);
     assert!(
-        dead.out_has("Short of a copy — restored on next scan/plan/burn (2):"),
+        dead.out_has("Short of a copy — restored on next plan/burn (2):"),
         "{}",
         dead.stdout
     );

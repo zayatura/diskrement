@@ -43,7 +43,7 @@ fn a_dead_discs_live_content_replans_and_the_superseded_version_is_lost() {
         "the lost entry is not b.txt's session-1 version: {}",
         dead.stdout
     );
-    assert!(dead.out_has("Re-burn on next scan/plan/burn (2):"));
+    assert!(dead.out_has("Re-burn on next plan/burn (2):"));
 
     let status = cli.run(&["status", "p"]);
     assert!(status.out_has("DEAD"));

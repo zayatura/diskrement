@@ -18,7 +18,7 @@ const CATALOG_COLUMNS: &[(&str, &str)] = &[
     ("disc_event", "at"),
 ];
 
-/// The same, for the fingerprint sidecar written by `scan`.
+/// The same, for the fingerprint sidecar written by `plan`'s scan.
 const SCANCACHE_COLUMNS: &[(&str, &str)] =
     &[("fingerprint", "mtime"), ("fingerprint", "updated_at")];
 

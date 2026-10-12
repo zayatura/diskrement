@@ -1,6 +1,6 @@
 //! The staged scan and plan (`StagedStore.scala`): `<work>/staged/scan.json`
-//! is the hand-off from `scan` to `plan` and the recovery unit's first
-//! artifact; `<work>/staged/plan.json` is the recovery unit itself — `plan`
+//! is written by `plan` beside the plan and read back by `burn` to detect
+//! drift; `<work>/staged/plan.json` is the recovery unit itself — `plan`
 //! stages it, `burn` consumes it. Field spellings follow the Scala zio-json
 //! codec's camelCase. The plan is v2 since copy sets (one entry per set); a
 //! v1 plan is detected by `is_legacy_plan` and answered with a stale-plan

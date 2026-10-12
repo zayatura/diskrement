@@ -203,7 +203,7 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
     let sets_complete = r.coverage.sets.iter().all(|c| c.missing_files == 0);
     let next = if r.remaining.more_discs > 0 {
         Some(format!(
-            "~{} more discs of changes remain. Run: scan → plan → burn",
+            "~{} more discs of changes remain. Run: plan → burn",
             r.remaining.more_discs
         ))
     } else if no_live_copy.is_some() {
@@ -213,7 +213,7 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
     } else if !sets_complete {
         // A lagging set catches up one disc per cycle; `plan` names any copy
         // this disc type cannot hold (issue #12).
-        Some("Copy sets are incomplete. Run: scan → plan → burn".to_string())
+        Some("Copy sets are incomplete. Run: plan → burn".to_string())
     } else if copies > 1 {
         Some("No more changes — every copy set is up to date.".to_string())
     } else {
@@ -252,11 +252,11 @@ fn coverage_lines(coverage: &[SetCoverage]) -> Vec<String> {
 }
 
 /// The files with no live copy in any set, or nothing when there are none.
-/// Worded after `mark_dead`'s "Re-burn on next scan/plan/burn".
+/// Worded after `mark_dead`'s "Re-burn on next plan/burn".
 fn no_live_copy_line(c: &SetCoverage) -> Option<String> {
     (c.missing_files > 0).then(|| {
         format!(
-            "No live copy: {} files ({}) — re-burn on next scan/plan/burn.",
+            "No live copy: {} files ({}) — re-burn on next plan/burn.",
             c.missing_files,
             gb(c.missing_bytes)
         )
@@ -457,12 +457,9 @@ pub fn mark_dead(r: &LostReport, copies: u32) -> String {
     if r.reburn.is_empty() {
         lines.push("No live files to re-burn.".to_string());
     } else {
-        lines.push(format!(
-            "Re-burn on next scan/plan/burn ({}):",
-            r.reburn.len()
-        ));
+        lines.push(format!("Re-burn on next plan/burn ({}):", r.reburn.len()));
         // Only the path: the hash and size are already in the catalog, and
-        // the operator's next action is `scan`, not an inspection.
+        // the operator's next action is `plan`, not an inspection.
         lines.extend(
             r.reburn
                 .iter()
@@ -472,7 +469,7 @@ pub fn mark_dead(r: &LostReport, copies: u32) -> String {
 
     if !r.degraded.is_empty() {
         lines.push(format!(
-            "Short of a copy — restored on next scan/plan/burn ({}):",
+            "Short of a copy — restored on next plan/burn ({}):",
             r.degraded.len()
         ));
         lines.extend(
@@ -633,7 +630,7 @@ mod tests {
             status_report(&project(), &r),
             "Project photos  (source /srv/photos, BD_R, margin 2.0%)\n\
              Discs:\n\
-             No live copy: 2 files (0.8 GB) — re-burn on next scan/plan/burn.\n\
+             No live copy: 2 files (0.8 GB) — re-burn on next plan/burn.\n\
              Current files: 2      Last burn: never"
         );
     }
@@ -671,7 +668,7 @@ mod tests {
              Copies:\n  \
              set A: 2 files (0.8 GB) missing\n  \
              set B: 3 files (0.9 GB) missing\n\
-             No live copy: 2 files (0.8 GB) — re-burn on next scan/plan/burn.\n\
+             No live copy: 2 files (0.8 GB) — re-burn on next plan/burn.\n\
              Current files: 3      Last burn: never"
         );
     }
@@ -1141,7 +1138,7 @@ mod tests {
              ✔ Wrote disc 1B  —  label: \"p disc 1B\"\n\
              Status: left OPEN — may receive more sessions later.\n\
              Copies: set B is missing 3 files (2.0 GB).\n\
-             Copy sets are incomplete. Run: scan → plan → burn"
+             Copy sets are incomplete. Run: plan → burn"
         );
     }
 
@@ -1176,7 +1173,7 @@ mod tests {
              Status: left OPEN — may receive more sessions later.\n\
              Copies: set A is missing 1 files (4.0 GB).\n\
              Copies: set B is missing 1 files (4.0 GB).\n\
-             No live copy: 1 files (4.0 GB) — re-burn on next scan/plan/burn."
+             No live copy: 1 files (4.0 GB) — re-burn on next plan/burn."
         );
     }
 
@@ -1245,7 +1242,7 @@ mod burn_render_tests {
             burn_report(&report(true, 1), 1),
             "✔ Wrote disc 1  —  label: \"p disc 1\"\n\
              Status: FINALIZED — set this disc aside, it is sealed.\n\
-             ~1 more discs of changes remain. Run: scan → plan → burn"
+             ~1 more discs of changes remain. Run: plan → burn"
         );
     }
 
@@ -1264,7 +1261,7 @@ mod burn_render_tests {
             burn_report(&r, 1),
             "✔ Wrote disc 1  —  label: \"p disc 1\"\n\
              Status: left OPEN — may receive more sessions later.\n\
-             No live copy: 1 files (4.0 GB) — re-burn on next scan/plan/burn."
+             No live copy: 1 files (4.0 GB) — re-burn on next plan/burn."
         );
 
         // More discs to come: the line stays, and so does the remaining one.
@@ -1275,8 +1272,8 @@ mod burn_render_tests {
         };
         assert!(
             burn_report(&r, 1).ends_with(
-                "No live copy: 1 files (4.0 GB) — re-burn on next scan/plan/burn.\n\
-                 ~1 more discs of changes remain. Run: scan → plan → burn"
+                "No live copy: 1 files (4.0 GB) — re-burn on next plan/burn.\n\
+                 ~1 more discs of changes remain. Run: plan → burn"
             ),
             "{}",
             burn_report(&r, 1)
@@ -1591,7 +1588,7 @@ mod p6_render_tests {
             ),
             "Disc 3 marked DEAD.\n\
              No versions permanently lost.\n\
-             Re-burn on next scan/plan/burn (1):\n\
+             Re-burn on next plan/burn (1):\n\
              \x20 a.bin"
         );
     }
@@ -1619,7 +1616,7 @@ mod p6_render_tests {
                 "Disc 1 marked DEAD.\n\
                  Permanently lost (1):\n\
                  \x20 b.bin  0.0 GB  {b1}  (was session 1)\n\
-                 Re-burn on next scan/plan/burn (2):\n\
+                 Re-burn on next plan/burn (2):\n\
                  \x20 a.bin\n\
                  \x20 b.bin"
             )
@@ -1665,7 +1662,7 @@ mod p6_render_tests {
             "Disc 1B marked DEAD.\n\
              No versions permanently lost.\n\
              No live files to re-burn.\n\
-             Short of a copy — restored on next scan/plan/burn (1):\n  \
+             Short of a copy — restored on next plan/burn (1):\n  \
              a.bin\n\
              Superseded versions still held on another disc: 1"
         );

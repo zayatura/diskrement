@@ -75,7 +75,7 @@ pub enum Command {
         #[arg(long, short = 'y', default_value_t = false)]
         yes: bool,
     },
-    /// Discard staged scan/plan state.
+    /// Discard staged plan state.
     Reset { name: String },
     /// Re-hash burned disc(s) against the catalog.
     ///

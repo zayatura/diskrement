@@ -120,7 +120,7 @@ impl<'a> Pipeline<'a> {
     fn fresh_scan(
         &mut self,
         p: &Project,
-        verify: bool,
+        rehash: bool,
     ) -> Result<(Vec<ScannedFile>, usize), PipelineError> {
         let src = PathBuf::from(&p.source_root);
         // Snapshot failures (missing source, non-CoW, I/O) are Failed here —
@@ -146,7 +146,7 @@ impl<'a> Pipeline<'a> {
         let out: ScanOutput = scanner::scan(
             &handle.root,
             &merged,
-            verify,
+            rehash,
             par.value,
             self.progress,
             &hasher::hash,
@@ -185,7 +185,7 @@ impl<'a> Pipeline<'a> {
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
         let cs = diff::diff(&view, files);
         // Deletions come from the history, like `plan`'s tombstones, so the
-        // scan never reports a different count from the plan that follows it.
+        // scan never reports a different count from the plan it is part of.
         let recorded = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
         let deleted = diff::tombstones(recorded.keys(), files);
         // Kept until the next plan, so `status`, `burn` and `mark-dead` know
@@ -3241,7 +3241,7 @@ mod mark_dead_tests {
     /// Rebuild `work/snapshot` from `files` and stage them as the scan.
     ///
     /// A successful `burn` releases the snapshot and clears the staged state,
-    /// so every cycle re-stages from scratch — exactly as a real `scan` would.
+    /// so every cycle re-stages from scratch — as a real `plan`'s scan would.
     fn stage(env: &Env, files: &[(&str, &[u8])]) {
         let snapshot = env.work.join("snapshot");
         let _ = std::fs::remove_dir_all(&snapshot);
@@ -3807,7 +3807,7 @@ mod copies_tests {
     /// That is a wrong word, not a loss: with no live copy left, the next
     /// plan sees the file as added and the next burn restores both sets.
     #[test]
-    fn a_file_back_before_a_rescan_is_reported_lost_but_burned_again() {
+    fn a_file_back_before_a_re_plan_is_reported_lost_but_burned_again() {
         let mut env = burned_twice();
         std::fs::remove_file(env.source.join("a.bin")).unwrap();
         pipeline(&mut env).plan("p", None, false, false).unwrap();

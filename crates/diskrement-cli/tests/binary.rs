@@ -842,7 +842,7 @@ mod mark_dead {
                 "Disc 1 marked DEAD.\n\
                  Permanently lost (1):\n\
                  \x20 b.bin  0.0 GB  {B1}  (was session 1)\n\
-                 Re-burn on next scan/plan/burn (2):\n\
+                 Re-burn on next plan/burn (2):\n\
                  \x20 a.bin\n\
                  \x20 b.bin\n"
             ));
@@ -859,7 +859,7 @@ mod mark_dead {
         run(&f, &["status", "p"]).success().stdout(
             contains("  #1   DEAD")
                 .and(contains(
-                    "No live copy: 2 files (0.0 GB) — re-burn on next scan/plan/burn.\n",
+                    "No live copy: 2 files (0.0 GB) — re-burn on next plan/burn.\n",
                 ))
                 .and(contains("Current files: 2")),
         );
@@ -1132,9 +1132,7 @@ mod unplaceable_catch_up {
             .success()
             .stdout(contains("Nothing burned: no disc in this plan."))
             .stdout(contains("Copies: set B is missing 1 files (0.0 GB)."))
-            .stdout(contains(
-                "Copy sets are incomplete. Run: scan → plan → burn",
-            ))
+            .stdout(contains("Copy sets are incomplete. Run: plan → burn"))
             .stdout(contains("up to date").not());
     }
 }
