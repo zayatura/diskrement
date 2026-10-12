@@ -627,8 +627,9 @@ mod tests {
     }
 
     /// Every media/burner failure is exit 6, and every message is the Scala
-    /// one verbatim (`Burn.scala`). The abort is the single exception, and it
-    /// is already pinned above.
+    /// one verbatim (`Burn.scala`), except `WriteInterrupted`, which has no
+    /// Scala counterpart (#11). The abort is the single exception to exit 6,
+    /// and it is already pinned above.
     #[test]
     fn the_media_and_tool_errors_are_exit_6_with_their_scala_messages() {
         use crate::burn::BurnError;
@@ -666,6 +667,10 @@ mod tests {
                     output_tail: vec!["FAILURE : write error".into(), "aborting".into()],
                 },
                 "xorriso failed (exit 5): FAILURE : write error | aborting",
+            ),
+            (
+                BurnError::WriteInterrupted(std::io::Error::other("broken pipe")),
+                "burn I/O error while xorriso was writing the disc: broken pipe",
             ),
             (
                 BurnError::PostBurnCheckFailed("expected …, found: None".into()),
