@@ -158,7 +158,8 @@ impl Catalog {
     /// `deleted` names paths the latest scan found gone from the source whose
     /// deletion is not recorded yet (#9). Their versions are still current
     /// here, but nothing will re-burn them, so they are treated as non-current:
-    /// LOST, never REBURN or degraded (#16).
+    /// LOST, never REBURN or degraded, and a surviving copy elsewhere counts
+    /// as a superseded survivor (#16).
     ///
     /// The `disc` row itself is never touched: dead-ness is derived from
     /// `disc_event` at read time.

@@ -158,3 +158,13 @@ since `burn` clears it.
 - The #10 property no longer exempts pending deletions: coverage must read complete
   after every full cycle. A mutant that ignores the file fails both it and
   `a_deleted_file_whose_copies_died_is_not_due_for_a_re_burn`. 200 cases pass.
+
+### Execution deviations (#16)
+
+- Review: writing the file is now best-effort (a warning, never a scan failure), as
+  "advisory" claims. `coverage` takes the view by value instead of cloning it. The doc
+  comment notes that at copies > 1 a surviving copy of a pending deletion counts as a
+  superseded survivor.
+- Added `a_file_back_before_a_rescan_is_reported_lost_but_burned_again`. It pins the
+  stale-file limit: the report says LOST, but the next scan re-adds the file and the
+  burn restores both sets.

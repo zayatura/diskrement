@@ -199,8 +199,15 @@ impl<'a> Pipeline<'a> {
         let recorded = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
         let deleted = diff::tombstones(recorded.keys(), files);
         // Kept until the next scan, so `status`, `burn` and `mark-dead` know
-        // these files were deleted rather than lost (#16).
-        staged::write_pending_deletions(&self.paths.work_dir, &deleted).map_err(Self::failed)?;
+        // these files were deleted rather than lost (#16). Advisory, so a
+        // failed write warns instead of failing the scan.
+        if let Err(e) = staged::write_pending_deletions(&self.paths.work_dir, &deleted) {
+            eprintln!(
+                "could not record pending deletions in {} ({e}); status may call them \
+                 due for a re-burn until the next scan",
+                staged::pending_deletions_path(&self.paths.work_dir).display()
+            );
+        }
         Ok(ScanReport {
             added: cs.added.len(),
             modified: cs.modified.len(),
@@ -374,7 +381,7 @@ impl<'a> Pipeline<'a> {
         Ok(BurnReport {
             discs: written,
             remaining,
-            coverage: coverage(&view, &current, p.copies, &self.pending_deletions()),
+            coverage: coverage(view, &current, p.copies, &self.pending_deletions()),
             deferred_deletions,
         })
     }
@@ -629,7 +636,7 @@ impl<'a> Pipeline<'a> {
         }
         Ok(StatusReport {
             open_discs,
-            coverage: coverage(&view, &current, p.copies, &self.pending_deletions()),
+            coverage: coverage(view, &current, p.copies, &self.pending_deletions()),
             total_current_files: current.len(),
             discs,
             last_burn_at,
@@ -851,12 +858,11 @@ impl DiscFailure {
 /// current in the catalog; counted, it would read as missing from a set, or as
 /// having no live copy and due for a re-burn that can never happen (#16).
 fn coverage(
-    view: &CatalogView,
+    mut view: CatalogView,
     current: &BTreeMap<RelPath, FileFingerprint>,
     copies: u32,
     pending: &BTreeSet<RelPath>,
 ) -> Coverage {
-    let mut view = view.clone();
     view.current.retain(|path, _| !pending.contains(path));
     let sizes: BTreeMap<RelPath, u64> = current
         .iter()
@@ -3685,6 +3691,34 @@ mod copies_tests {
         assert!(report.degraded.is_empty(), "{report:?}");
         assert_eq!(report.lost.len(), 1);
         assert_eq!(report.lost[0].rel_path.as_str(), "a.bin");
+    }
+
+    /// The documented limit of #16: a deleted file that comes back without a
+    /// rescan still reads as deleted, so losing its copies reports it LOST.
+    /// That is a wrong word, not a loss: with no live copy left, the next
+    /// scan sees the file as added and the next burn restores both sets.
+    #[test]
+    fn a_file_back_before_a_rescan_is_reported_lost_but_burned_again() {
+        let mut env = burned_twice();
+        std::fs::remove_file(env.source.join("a.bin")).unwrap();
+        pipeline(&mut env).scan("p", false, true).unwrap();
+        std::fs::write(env.source.join("a.bin"), b"aaaa").unwrap();
+
+        for disc in ["1A", "1B"] {
+            pipeline(&mut env)
+                .mark_dead("p", disc.parse::<DiscArg>().unwrap(), at(2))
+                .unwrap();
+        }
+
+        let scan = pipeline(&mut env).scan("p", false, true).unwrap();
+        assert_eq!(scan.added, 1, "no live copy, so the file is new again");
+        pipeline(&mut env).plan("p", None, false).unwrap();
+        let burner = Burner::Simulated(SimulatedBurner::new(&NoopSink, 2));
+        pipeline(&mut env).burn("p", at(3), &burner).unwrap();
+        let s = pipeline(&mut env).status("p").unwrap();
+        assert_eq!(s.coverage.no_live_copy.missing_files, 0);
+        assert!(s.coverage.sets.iter().all(|c| c.missing_files == 0));
+        assert_eq!(s.total_current_files, 1);
     }
 
     #[test]
