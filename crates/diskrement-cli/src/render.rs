@@ -15,20 +15,20 @@ pub fn init_done(name: &str, id: ProjectId) -> String {
     format!("Created project {name} (id {}).", id.0)
 }
 
-/// `Scanned: …`, plus the `Hashed N of M files` line for a fresh scan only.
+/// `Scanned: …`, then how many files were hashed and how many reused a
+/// fingerprint.
 pub fn scan_report(r: &ScanReport) -> String {
-    let summary = format!(
-        "Scanned: {} added, {} modified, {} deleted, {} unchanged.",
-        r.added, r.modified, r.deleted, r.unchanged
-    );
-    match r.hashed {
-        Some(h) => format!(
-            "{summary}\nHashed {h} of {} files ({} fingerprints reused).",
-            r.scanned_files,
-            r.scanned_files - h
-        ),
-        None => summary,
-    }
+    format!(
+        "Scanned: {} added, {} modified, {} deleted, {} unchanged.\n\
+         Hashed {} of {} files ({} fingerprints reused).",
+        r.added,
+        r.modified,
+        r.deleted,
+        r.unchanged,
+        r.hashed,
+        r.scanned_files,
+        r.scanned_files - r.hashed
+    )
 }
 
 /// `Render.plan`. Four shapes: nothing to do, deletions waiting for the next
@@ -691,29 +691,13 @@ mod tests {
             modified: 1,
             deleted: 0,
             unchanged: 3,
-            hashed: Some(3),
+            hashed: 3,
             scanned_files: 6,
         };
         assert_eq!(
             scan_report(&r),
             "Scanned: 2 added, 1 modified, 0 deleted, 3 unchanged.\n\
              Hashed 3 of 6 files (3 fingerprints reused)."
-        );
-    }
-
-    #[test]
-    fn a_reused_staged_scan_omits_the_hashed_line() {
-        let r = ScanReport {
-            added: 2,
-            modified: 1,
-            deleted: 0,
-            unchanged: 3,
-            hashed: None,
-            scanned_files: 6,
-        };
-        assert_eq!(
-            scan_report(&r),
-            "Scanned: 2 added, 1 modified, 0 deleted, 3 unchanged."
         );
     }
 
@@ -1764,14 +1748,7 @@ mod snapshots {
         }
     }
 
-    fn scan_of(
-        a: usize,
-        m: usize,
-        d: usize,
-        u: usize,
-        hashed: Option<usize>,
-        total: usize,
-    ) -> ScanReport {
+    fn scan_of(a: usize, m: usize, d: usize, u: usize, hashed: usize, total: usize) -> ScanReport {
         ScanReport {
             added: a,
             modified: m,
@@ -1892,18 +1869,8 @@ mod snapshots {
         check(
             "scan",
             gallery(&[
-                (
-                    "a fresh scan",
-                    scan_report(&scan_of(2, 1, 0, 3, Some(3), 6)),
-                ),
-                (
-                    "a reused staged scan (no Hashed line)",
-                    scan_report(&scan_of(2, 1, 0, 3, None, 6)),
-                ),
-                (
-                    "nothing changed",
-                    scan_report(&scan_of(0, 0, 0, 6, Some(0), 6)),
-                ),
+                ("a fresh scan", scan_report(&scan_of(2, 1, 0, 3, 3, 6))),
+                ("nothing changed", scan_report(&scan_of(0, 0, 0, 6, 0, 6))),
             ]),
         );
     }

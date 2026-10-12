@@ -7,14 +7,14 @@ use chrono::{DateTime, Utc};
 
 use diskrement_core::{Coverage, DiscKey, DiscState, DiscType, PlannedDisc, RelPath, ScannedFile};
 
-/// `ScanResult` — `hashed` is `None` when a staged scan was reused.
+/// What `plan`'s scan found. `hashed` counts the files hashed this run; the rest reused a fingerprint.
 #[derive(Debug)]
 pub struct ScanReport {
     pub added: usize,
     pub modified: usize,
     pub deleted: usize,
     pub unchanged: usize,
-    pub hashed: Option<usize>,
+    pub hashed: usize,
     pub scanned_files: usize,
 }
 

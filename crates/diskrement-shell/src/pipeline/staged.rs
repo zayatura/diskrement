@@ -176,7 +176,7 @@ pub fn read_scan(work_dir: &Path) -> Result<Option<Vec<ScannedFile>>, serde_json
 /// It lives beside `staged/`, not in it: `burn` clears `staged/`, and a
 /// deletion-only cycle burns nothing, so this file is all that still says
 /// these paths were deleted rather than lost. It describes the source as last
-/// scanned, so a file that comes back counts as deleted until the next scan.
+/// scanned, so a file that comes back counts as deleted until the next plan.
 pub fn pending_deletions_path(work_dir: &Path) -> PathBuf {
     work_dir.join("pending-deletions.json")
 }

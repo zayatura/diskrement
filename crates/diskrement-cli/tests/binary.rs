@@ -25,6 +25,18 @@ mod init_plan_status {
         Command::cargo_bin("diskrement").expect("binary builds")
     }
 
+    /// `scan` was merged into `plan` (#4); it is now an unknown subcommand,
+    /// which is clap's argument error, exit 1.
+    #[test]
+    fn scan_is_no_longer_a_command() {
+        cmd()
+            .args(["scan", "p"])
+            .assert()
+            .failure()
+            .code(1)
+            .stderr(contains("unrecognized subcommand"));
+    }
+
     /// The happy path, end to end, in a temp dir: init → plan → status.
     #[test]
     fn init_plan_status_round_trip() {

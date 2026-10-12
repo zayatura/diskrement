@@ -79,7 +79,6 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
     // The project name the default catalog/data-dir resolution needs.
     let project_name = match &cli.command {
         Command::Init { name, .. } => name,
-        Command::Scan { name, .. } => name,
         Command::Plan { name, .. } => name,
         Command::Status { name, .. } => name,
         Command::Burn { name, .. } => name,
@@ -132,29 +131,6 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             };
             let id = pipeline.init(&pi)?;
             say(&render::init_done(&name, id));
-            Ok(0)
-        }
-        Command::Scan {
-            name,
-            verify,
-            force,
-        } => {
-            // The work dir comes from the project row, not the CLI
-            // (`Runner.loadProject`).
-            let mut catalog = open_catalog(&resolved.catalog)?;
-            let p = find_or_fail(&catalog, &name)?;
-            let scan_cache = paths::scan_cache_path(&resolved.catalog, &name);
-            let sink = progress::ConsoleProgress::new();
-            let mut pipeline = Pipeline::new(
-                &mut catalog,
-                PipelinePaths {
-                    work_dir: PathBuf::from(&p.work_dir),
-                    scan_cache,
-                },
-                &sink,
-            );
-            let report = pipeline.scan(&name, verify, force)?;
-            say(&render::scan_report(&report));
             Ok(0)
         }
         Command::Plan {

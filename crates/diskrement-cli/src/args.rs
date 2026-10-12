@@ -54,14 +54,6 @@ pub enum Command {
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=26))]
         copies: u32,
     },
-    /// Snapshot the source and stage a diff.
-    Scan {
-        name: String,
-        #[arg(long, default_value_t = false)]
-        verify: bool,
-        #[arg(long, default_value_t = false)]
-        force: bool,
-    },
     /// Scan the source and plan the next disc.
     Plan {
         name: String,
@@ -208,26 +200,6 @@ mod tests {
         assert_eq!(disc_type, DiscType::BdRDl);
         assert_eq!(margin, 5.0);
         assert_eq!(copies, 2);
-    }
-
-    #[test]
-    fn scan_flags_default_off_and_parse_on() {
-        let off = Cli::try_parse_from(["diskrement", "scan", "photos"]).unwrap();
-        let Command::Scan {
-            name: _,
-            verify,
-            force,
-        } = off.command
-        else {
-            panic!("not scan")
-        };
-        assert!(!verify && !force);
-        let on =
-            Cli::try_parse_from(["diskrement", "scan", "photos", "--verify", "--force"]).unwrap();
-        let Command::Scan { verify, force, .. } = on.command else {
-            panic!("not scan")
-        };
-        assert!(verify && force);
     }
 
     #[test]
