@@ -101,6 +101,10 @@ struct PlanReportJson {
     disc_type: String,
     tombstones: Vec<String>,
     oversized: Vec<ScannedFileJson>,
+    /// Absent from a plan staged before issue #12; such a plan lists those
+    /// files under `oversized` and is refused until re-planned.
+    #[serde(rename = "unplaceableCatchUp", default)]
+    unplaceable_catch_up: Vec<ScannedFileJson>,
 }
 
 /// `<workDir>/staged/scan.json`.
@@ -197,6 +201,11 @@ pub fn write_plan(work_dir: &Path, report: &PlanReport) -> std::io::Result<()> {
             .map(|p| p.as_str().to_string())
             .collect(),
         oversized: report.oversized.iter().map(ScannedFileJson::of).collect(),
+        unplaceable_catch_up: report
+            .unplaceable_catch_up
+            .iter()
+            .map(ScannedFileJson::of)
+            .collect(),
     };
     write_json(
         &plan_path(work_dir),
@@ -242,6 +251,7 @@ pub fn read_plan(work_dir: &Path) -> Result<Option<PlanReport>, serde_json::Erro
         disc_type: DiscType::from_str(&j.disc_type).map_err(decode_error)?,
         tombstones: j.tombstones.into_iter().map(RelPath).collect(),
         oversized: files(j.oversized)?,
+        unplaceable_catch_up: files(j.unplaceable_catch_up)?,
     }))
 }
 
@@ -362,6 +372,7 @@ mod tests {
             disc_type: DiscType::BdRDl,
             tombstones: vec![RelPath("c".into())],
             oversized: vec![sf("huge.bin")],
+            unplaceable_catch_up: vec![sf("big/copy.bin")],
         }
     }
 
@@ -371,6 +382,23 @@ mod tests {
         let report = plan_report();
         write_plan(dir.path(), &report).unwrap();
         assert_eq!(read_plan(dir.path()).unwrap().unwrap(), report);
+    }
+
+    /// A plan staged before issue #12 has no `unplaceableCatchUp`; it reads
+    /// as an empty list, and its catch-up files stay under `oversized`.
+    #[test]
+    fn a_plan_without_unplaceable_catch_up_reads_it_as_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_plan(dir.path(), &plan_report()).unwrap();
+        let path = dir.path().join("staged/plan.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("unplaceableCatchUp");
+        std::fs::write(&path, v.to_string()).unwrap();
+
+        let read = read_plan(dir.path()).unwrap().unwrap();
+        assert!(read.unplaceable_catch_up.is_empty());
+        assert_eq!(read.oversized, plan_report().oversized);
     }
 
     #[test]
@@ -427,6 +455,7 @@ mod tests {
         assert_eq!(set["remaining"]["moreFiles"], 2);
         assert_eq!(set["remaining"]["moreBytes"], 30);
         assert_eq!(v["oversized"][0]["relPath"], "huge.bin");
+        assert_eq!(v["unplaceableCatchUp"][0]["relPath"], "big/copy.bin");
     }
 
     #[test]
@@ -492,6 +521,7 @@ mod tests {
             disc_type: DiscType::BdR,
             tombstones: vec![RelPath("gone".into())],
             oversized: vec![],
+            unplaceable_catch_up: vec![],
         };
         write_plan(dir.path(), &report).unwrap();
         assert_eq!(read_plan(dir.path()).unwrap(), Some(report));

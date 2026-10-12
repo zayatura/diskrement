@@ -1875,6 +1875,24 @@ mod burn_tests {
         assert_eq!(err.exit_code(), 3);
     }
 
+    /// A skipped catch-up copy is not an oversized file: `burn` writes the
+    /// rest of the plan (#12).
+    #[test]
+    fn an_unplaceable_catch_up_copy_does_not_stop_the_burn() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        let mut report = staged::read_plan(&env.work).unwrap().unwrap();
+        report.unplaceable_catch_up.push(ScannedFile {
+            rel_path: RelPath("film.mkv".to_string()),
+            content_hash: diskrement_core::ContentHash("00".repeat(32)),
+            size_bytes: 1 << 40,
+            mtime: now(),
+        });
+        staged::write_plan(&env.work, &report).unwrap();
+
+        let burned = run_burn(&mut env).expect("the burn goes ahead");
+        assert_eq!(burned.discs.len(), 1);
+    }
+
     /// A disc marked dead after the plan was staged. The catalog cannot catch
     /// this — deadness is derived from `disc_event`, so the disc row still
     /// reads OPEN — and without the guard the burn would write a session onto
