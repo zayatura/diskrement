@@ -278,15 +278,17 @@ impl<'a> Pipeline<'a> {
         burner: &Burner<'_>,
     ) -> Result<BurnReport, PipelineError> {
         let p = self.project(name)?;
-        let scanned = staged::read_scan(&self.paths.work_dir)
-            .map_err(Self::failed)?
-            .ok_or_else(|| PipelineError::NoStagedScan(name.to_string()))?;
         if staged::is_legacy_plan(&self.paths.work_dir) {
             return Err(PipelineError::StalePlan(
                 "it was staged by an older version of diskrement".to_string(),
             ));
         }
+        // The plan first: `plan` stages both files together, so whatever is
+        // missing, the remedy is "run plan" (#4).
         let mut report = staged::read_plan(&self.paths.work_dir)
+            .map_err(Self::failed)?
+            .ok_or_else(|| PipelineError::NoStagedPlan(name.to_string()))?;
+        let scanned = staged::read_scan(&self.paths.work_dir)
             .map_err(Self::failed)?
             .ok_or_else(|| PipelineError::NoStagedPlan(name.to_string()))?;
         if !report.oversized.is_empty() {
@@ -1852,12 +1854,25 @@ mod burn_tests {
         assert_eq!(sessions, 1, "the disc knows about its own session");
     }
 
+    /// Nothing staged at all (a second burn, or a failed `plan`) is "run
+    /// plan": `plan` is the only command that stages anything (#4).
     #[test]
-    fn burning_without_a_staged_scan_is_a_state_error() {
+    fn burning_with_nothing_staged_is_a_state_error_that_says_run_plan() {
         let mut env = staged_env(&[("a.bin", b"aaaa")], false);
         staged::clear(&env.work).unwrap();
         let err = run_burn(&mut env).unwrap_err();
-        assert!(matches!(err, PipelineError::NoStagedScan(_)), "{err}");
+        assert!(matches!(err, PipelineError::NoStagedPlan(_)), "{err}");
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    /// A plan without its scan can only come from deleting files by hand. The
+    /// remedy is the same as for no plan at all, so it reads the same.
+    #[test]
+    fn a_staged_plan_without_its_scan_is_the_no_staged_plan_error() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        std::fs::remove_file(staged::scan_path(&env.work)).unwrap();
+        let err = run_burn(&mut env).unwrap_err();
+        assert!(matches!(err, PipelineError::NoStagedPlan(_)), "{err}");
         assert_eq!(err.exit_code(), 2);
     }
 

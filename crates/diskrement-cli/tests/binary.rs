@@ -515,7 +515,7 @@ mod burn {
             .args(["burn", "p", "--yes"])
             .assert()
             .code(2)
-            .stderr(contains("no staged scan for p (run scan)"));
+            .stderr(contains("no staged plan for p (run plan)"));
     }
 
     #[test]
