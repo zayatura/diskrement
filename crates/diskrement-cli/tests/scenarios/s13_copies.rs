@@ -115,6 +115,11 @@ fn each_cycle_writes_one_disc_per_set_and_a_dead_twin_is_restored() {
         "{}",
         dead.stdout
     );
+    // Set B is short both files, but each still has its copy on 1A.
+    let st = cli.run(&["status", "p"]);
+    assert!(st.out_has("set B: 2 files"), "{}", st.stdout);
+    assert!(st.out_has("set A: complete"), "{}", st.stdout);
+    assert!(!st.out_has("No live copy"), "{}", st.stdout);
 
     // Recovery: set B's next disc, 2B, carries the two catch-up copies; set A
     // has nothing to do.
