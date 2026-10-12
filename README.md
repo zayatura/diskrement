@@ -34,7 +34,7 @@ Given a source directory and a catalog database, `diskrement`:
 
 1. **Scans** the source tree and detects what has been added, modified, or deleted
    since the last burn.
-2. **Plans** a burn: tops off the current open (multisession) disc first, then spills
+2. **Plans** a burn (the same command scans first): tops off the current open (multisession) disc first, then spills
    new data onto as many new discs as needed.
 3. **Burns** each disc and commits the result to the catalog atomically. A crash
    before the commit leaves the catalog unchanged; the staged plan is the recovery unit.
@@ -92,7 +92,7 @@ SQLite), `serde`/`serde_json`, `sha2`, `rayon`, `walkdir`, `reflink-copy`.
 | Coaster workflow (mark-dead + re-plan) | Done (lost-history report + re-plan) |
 
 The pipeline orchestration layer is fully tested with integration tests against
-real temp directories and a full scan → plan → burn → verify → history loop. The
+real temp directories and a full plan → burn → verify → history loop. The
 simulated burner stages disc contents to directories rather than writing to physical
 media — this makes the entire workflow testable without hardware.
 
@@ -101,7 +101,6 @@ simulated burns:
 
 ```
 diskrement init photos --source /srv/photos --work-dir /srv/work
-diskrement scan photos
 diskrement plan photos
 diskrement burn photos          # asks for confirmation; --yes to skip
 diskrement status photos
@@ -133,7 +132,7 @@ diskrement disc mark-dead photos 1
 This records an append-only `MARKED_DEAD` event — the disc row itself is left untouched — and
 prints a report of the casualties: versions that lived only on that disc and are no
 longer their path's current version are **permanently lost**; the ones still current are
-listed for re-burn, and the next `scan` / `plan` / `burn` writes them to fresh media.
+listed for re-burn, and the next `plan` / `burn` writes them to fresh media.
 A dead disc is excluded from `verify`, is never topped off again, and shows as `DEAD`
 in `status`.
 
@@ -160,7 +159,7 @@ under `Current files` — `history` shows them as `CURRENT (on a dead disc)` —
 a line of their own:
 
 ```
-No live copy: 2 files (0.0 GB) — re-burn on next scan/plan/burn.
+No live copy: 2 files (0.0 GB) — re-burn on next plan/burn.
 ```
 
 With more than one copy, those files also count as missing from every copy set, so no
@@ -168,8 +167,8 @@ set reads `complete` while a file has no live copy anywhere; `burn` prints the s
 and does not claim the archive is up to date.
 
 If a plan was already staged against the disc when it was marked dead, `burn` refuses
-it — re-run `plan`, which is the whole recovery: the staged scan and the source snapshot
-both survive, and `plan` re-reads the disc states and targets fresh media. `reset` is
+it — re-run `plan`, which is the whole recovery: it scans the source again, re-reads the
+disc states and targets fresh media. `reset` is
 not part of the fix and throws away staged state you would only have to rebuild (with
 the simulated backend, including the staging trees `verify` reads back). Likewise,
 `verify --disc <n>` naming a dead or unknown disc is an error rather than a quiet
@@ -186,22 +185,22 @@ exclusively.
 
 ### Performance
 
-`scan` hashes new or changed content with up to 6 workers in parallel; override with
+`plan` hashes new or changed content (it scans the source before planning) with up to 6 workers in parallel; override with
 `DISKREMENT_HASH_PARALLELISM` (a positive integer, clamped to 64 — an unusable
 non-empty value falls back to 6 with a warning; an empty value is treated as unset). Long hashing or staging phases report progress on
 **stderr** (a refreshed line on a TTY, a periodic line otherwise), so `stdout` stays
 clean for data; diagnostics and warnings go to stderr too.
 
-`scan` also keeps a fingerprint cache: a sidecar SQLite file next to the catalog,
+`plan`'s scan also keeps a fingerprint cache: a sidecar SQLite file next to the catalog,
 named `<catalog-stem>.<project>.scancache.sqlite` (with the default catalog location
 that reads a little oddly, e.g. `photos.photos.scancache.sqlite` — deliberate, since
 one catalog file can hold several projects and the cache must not be shared between
-them). The first scan of a large library is the expensive one; later scans hash only
-what changed, and the scan output reports the split, e.g. `Hashed 12 of 75618 files
-(75606 fingerprints reused).` (omitted when a previously staged scan is reused, since
-no scan ran — `scan --force` rescans instead of reusing it). The cache is disposable — deleting it is always safe and merely costs
-one full re-hash on the next scan. It is never embedded on a disc and `reset` does
-not touch it. `scan --verify` re-hashes everything regardless of the cache; this is
+them). The first scan of a large library is the expensive one; later ones hash only what
+changed, and `plan` reports the split, e.g. `Hashed 12 of 75618 files (75606
+fingerprints reused).` Every `plan` scans afresh, so a cycle that found nothing to burn
+never hides later changes. The cache is disposable — deleting it is always safe and merely costs
+one full re-hash on the next plan. It is never embedded on a disc and `reset` does
+not touch it. `plan --rehash` re-hashes everything regardless of the cache; this is
 also the escape hatch for the cache's one real caveat: it extends the same size+mtime
 trust burned files already get to *scanned* files, so an in-place edit that preserves
 both size and mtime goes unnoticed where an uncached scan would have re-hashed it.
@@ -211,10 +210,10 @@ supports them (the btrfs/XFS/bcachefs `init` already requires), falling back to 
 plain copy otherwise, then re-hashes the staged tree as the integrity gate before
 burning.
 
-`scripts/perf-bench.sh SOURCE_DIR WORK_AREA` runs a full init → scan → plan → burn →
-scan cycle against a throwaway project and reports per-step wall time alongside I/O
+`scripts/perf-bench.sh SOURCE_DIR WORK_AREA` runs a full init → plan → burn → plan
+cycle (each plan scans; the second is the warm rescan) against a throwaway project and reports per-step wall time alongside I/O
 (`rchar`/`read_bytes`/`write_bytes`) from `/proc/<pid>/io`, so a rescan's savings are
-visible directly. Set `DROP_CACHES=1` to drop the page cache before the first scan for
+visible directly. Set `DROP_CACHES=1` to drop the page cache before the first plan for
 cold-cache comparability. `SOURCE_DIR` and `WORK_AREA` must be on the same filesystem,
 since the benchmark's staging step relies on the same reflink support `burn` does.
 
@@ -232,7 +231,7 @@ git clone https://github.com/zayatura/diskrement
 cd diskrement
 cargo build --release          # -> target/release/diskrement
 cargo test --workspace         # all tests
-cargo run -p diskrement-cli -- scan photos
+cargo run -p diskrement-cli -- plan photos
 ```
 
 The test suite includes integration tests that auto-skip on filesystems without

@@ -61,16 +61,13 @@ pub(crate) fn is_unique_violation(e: &rusqlite::Error) -> bool {
 pub enum PipelineError {
     #[error("project not found: {0}")]
     ProjectNotFound(String),
-    #[error("no staged scan for {0} (run scan)")]
-    NoStagedScan(String),
     #[error("no staged plan for {0} (run plan)")]
     NoStagedPlan(String),
-    #[error("source snapshot missing for {0} (run scan)")]
+    #[error("source snapshot missing for {0} (run plan)")]
     SnapshotMissing(String),
-    /// `plan` alone is the whole recovery: the staged scan and the snapshot
-    /// both survive, and `plan` re-reads the view and the disc states. Never
-    /// advise `reset` — it deletes `workDir/staging`, the staged-disc
-    /// verifier's evidence.
+    /// `plan` alone is the whole recovery: it scans afresh and re-reads the
+    /// view and the disc states. Never advise `reset` — it deletes
+    /// `workDir/staging`, the staged-disc verifier's evidence.
     #[error("staged plan is stale: {0} (re-run plan)")]
     StalePlan(String),
     /// A `--disc` or `mark-dead` argument that names no disc in this project.
@@ -173,11 +170,10 @@ impl UnrecordedDisc {
 /// What to do after a `PartialBurn`, decided by its cause.
 fn partial_burn_advice(cause: &PipelineError) -> &'static str {
     match cause {
-        // The staged plan no longer holds; a re-plan turns the committed
-        // discs' files into catch-up copies for the lagging sets.
-        PipelineError::StalePlan(_) => "re-run plan, then burn",
-        // `plan` cannot recreate the snapshot; only a fresh scan does.
-        PipelineError::SnapshotMissing(_) => "re-run scan --force, then plan and burn",
+        // The staged plan no longer holds, or its snapshot is gone. A fresh
+        // `plan` rebuilds both, and turns the committed discs' files into
+        // catch-up copies for the lagging sets.
+        PipelineError::StalePlan(_) | PipelineError::SnapshotMissing(_) => "re-run plan, then burn",
         _ => "re-run burn",
     }
 }
@@ -244,7 +240,6 @@ impl PipelineError {
     pub fn exit_code(&self) -> i32 {
         match self {
             PipelineError::ProjectNotFound(_)
-            | PipelineError::NoStagedScan(_)
             | PipelineError::NoStagedPlan(_)
             | PipelineError::SnapshotMissing(_)
             | PipelineError::UnknownDisc(_)
@@ -359,10 +354,7 @@ mod tests {
         );
         assert!(!text.contains("reset"), "{text}");
         let missing = partial(PipelineError::SnapshotMissing("p".into())).to_string();
-        assert!(
-            missing.ends_with("(re-run scan --force, then plan and burn)"),
-            "{missing}"
-        );
+        assert!(missing.ends_with("(re-run plan, then burn)"), "{missing}");
         assert!(!missing.contains("reset"), "{missing}");
     }
 
@@ -427,7 +419,6 @@ mod tests {
 
     #[test]
     fn staged_state_errors_are_exit_2_and_oversize_is_exit_3() {
-        assert_eq!(PipelineError::NoStagedScan("p".into()).exit_code(), 2);
         assert_eq!(PipelineError::NoStagedPlan("p".into()).exit_code(), 2);
         assert_eq!(PipelineError::StalePlan("d".into()).exit_code(), 2);
         assert_eq!(
@@ -463,10 +454,6 @@ mod tests {
 
     #[test]
     fn the_staged_state_messages_match_the_scala_render_verbatim() {
-        assert_eq!(
-            PipelineError::NoStagedScan("photos".into()).to_string(),
-            "no staged scan for photos (run scan)"
-        );
         assert_eq!(
             PipelineError::NoStagedPlan("photos".into()).to_string(),
             "no staged plan for photos (run plan)"
@@ -531,7 +518,7 @@ mod tests {
 
         assert_eq!(
             PipelineError::SnapshotMissing("photos".into()).to_string(),
-            "source snapshot missing for photos (run scan)"
+            "source snapshot missing for photos (run plan)"
         );
         // `PipelineError.Burn` renders its cause's message, so the wrapper adds
         // nothing of its own.

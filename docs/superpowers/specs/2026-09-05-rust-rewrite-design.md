@@ -150,6 +150,11 @@ differently from zio-cli. Output *structure* — what data appears in `status`,
 `history`, `plan`, and the success-path wording pinned by the fixture render
 oracle (§4) — does not.
 
+> **Amended 2026-10-12 (#4):** eight commands, not nine. `scan` was merged into
+> `plan` (`scan --verify` became `plan --rehash`). That freeze was the parity
+> requirement for the cutover, which is complete. See
+> `2026-10-12-merge-scan-into-plan-design.md`.
+
 ---
 
 ## 4. Golden fixtures and the render oracle

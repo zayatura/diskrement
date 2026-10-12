@@ -54,15 +54,7 @@ pub enum Command {
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=26))]
         copies: u32,
     },
-    /// Snapshot the source and stage a diff.
-    Scan {
-        name: String,
-        #[arg(long, default_value_t = false)]
-        verify: bool,
-        #[arg(long, default_value_t = false)]
-        force: bool,
-    },
-    /// Plan the next disc from the staged scan.
+    /// Scan the source and plan the next disc.
     Plan {
         name: String,
         /// Override the project's default disc type for this plan only.
@@ -71,6 +63,9 @@ pub enum Command {
         /// Seal the disc even when everything fit.
         #[arg(long, default_value_t = false)]
         finalize: bool,
+        /// Re-hash every file, ignoring the fingerprint cache and the size+mtime fast path.
+        #[arg(long, default_value_t = false)]
+        rehash: bool,
     },
     /// Show discs, totals, and last burn.
     Status { name: String },
@@ -80,7 +75,7 @@ pub enum Command {
         #[arg(long, short = 'y', default_value_t = false)]
         yes: bool,
     },
-    /// Discard staged scan/plan state.
+    /// Discard staged plan state.
     Reset { name: String },
     /// Re-hash burned disc(s) against the catalog.
     ///
@@ -208,26 +203,6 @@ mod tests {
     }
 
     #[test]
-    fn scan_flags_default_off_and_parse_on() {
-        let off = Cli::try_parse_from(["diskrement", "scan", "photos"]).unwrap();
-        let Command::Scan {
-            name: _,
-            verify,
-            force,
-        } = off.command
-        else {
-            panic!("not scan")
-        };
-        assert!(!verify && !force);
-        let on =
-            Cli::try_parse_from(["diskrement", "scan", "photos", "--verify", "--force"]).unwrap();
-        let Command::Scan { verify, force, .. } = on.command else {
-            panic!("not scan")
-        };
-        assert!(verify && force);
-    }
-
-    #[test]
     fn status_takes_only_a_name() {
         let cli = Cli::try_parse_from(["diskrement", "status", "photos"]).unwrap();
         assert!(matches!(cli.command, Command::Status { .. }));
@@ -271,6 +246,7 @@ mod tests {
             name,
             disc_type,
             finalize,
+            rehash,
         } = cli.command
         else {
             panic!("not plan")
@@ -278,6 +254,7 @@ mod tests {
         assert_eq!(name, "photos");
         assert_eq!(disc_type, None);
         assert!(!finalize);
+        assert!(!rehash);
     }
 
     #[test]
@@ -301,6 +278,15 @@ mod tests {
         };
         assert_eq!(disc_type, Some(DiscType::DvdDl));
         assert!(finalize);
+    }
+
+    #[test]
+    fn plan_takes_the_rehash_flag() {
+        let cli = Cli::try_parse_from(["diskrement", "plan", "photos", "--rehash"]).unwrap();
+        let Command::Plan { rehash, .. } = cli.command else {
+            panic!("not plan")
+        };
+        assert!(rehash);
     }
 
     #[test]

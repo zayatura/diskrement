@@ -13,7 +13,6 @@ fn a_file_larger_than_a_disc_is_reported_and_burn_refuses() {
     support::write(&s.source, "huge.bin", 5000);
 
     cli.init(&s, "p");
-    cli.run(&["scan", "p"]);
 
     let plan = cli.run(&["plan", "p"]);
     assert_eq!(plan.code, 0);

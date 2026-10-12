@@ -10,7 +10,7 @@ No live files to re-burn.
 ## one live file re-queued (run-manifest step 12)
 Disc 3 marked DEAD.
 No versions permanently lost.
-Re-burn on next scan/plan/burn (1):
+Re-burn on next plan/burn (1):
   a.bin
 
 ## a superseded version gone forever
@@ -24,6 +24,6 @@ Disc 4 marked DEAD.
 Permanently lost (2):
   b.bin  0.0 GB  b9749f157163b4bbb7faec0a55cfb88c69968a25eac4cfe13e45d6286874709a  (was session 1)
   big/movie.mkv  12.3 GB  a1b2c3  (was session 2)
-Re-burn on next scan/plan/burn (2):
+Re-burn on next plan/burn (2):
   a.bin
   nested/c.bin

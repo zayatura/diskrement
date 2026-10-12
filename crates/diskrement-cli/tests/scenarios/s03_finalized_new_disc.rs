@@ -13,7 +13,6 @@ fn after_finalize_new_changes_go_to_disc_two() {
 
     cli.init(&s, "p");
 
-    cli.run(&["scan", "p"]);
     let pl1 = cli.run(&["plan", "p", "--finalize"]);
     assert_eq!(pl1.code, 0);
     assert!(pl1.out_has("will FINALIZE"));
@@ -28,7 +27,6 @@ fn after_finalize_new_changes_go_to_disc_two() {
 
     // Cycle 2: a new file cannot go on the sealed disc.
     support::write(&s.source, "b.txt", 128);
-    cli.run(&["scan", "p"]);
     let pl2 = cli.run(&["plan", "p"]);
     assert_eq!(pl2.code, 0);
     assert!(pl2.out_has("new disc"));

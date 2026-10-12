@@ -244,7 +244,7 @@ pub struct LostVersionEntry {
 }
 
 /// A live file whose only burned copy was on the dead disc; the next
-/// scan/plan/burn writes it again from the source. Also used for
+/// plan/burn writes it again from the source. Also used for
 /// `LostReport::degraded`, where the file still has a live copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReburnEntry {

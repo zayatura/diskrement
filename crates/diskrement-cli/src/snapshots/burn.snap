@@ -5,7 +5,7 @@ expression: doc
 ## a finalized disc with more to come (run-manifest step 04)
 ✔ Wrote disc 1  —  label: "p disc 1"
 Status: FINALIZED — set this disc aside, it is sealed.
-~1 more discs of changes remain. Run: scan → plan → burn
+~1 more discs of changes remain. Run: plan → burn
 
 ## an open disc, set complete (run-manifest step 08)
 ✔ Wrote disc 2  —  label: "p disc 2"

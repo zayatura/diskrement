@@ -333,6 +333,10 @@ For any random `ChangeSet` × disc state × capacity:
 - **Restage policy:** if fresh staged scan results exist, `scan` reuses them;
   `--force` (or `reset`) is required to re-snapshot and re-hash. `plan` always
   recomputes from the staged scan (cheap).
+
+  > **Amended 2026-10-12 (#4):** superseded. `plan` now snapshots and scans the
+  > source itself on every run, and the `scan` command is gone; nothing is reused.
+  > See `2026-10-12-merge-scan-into-plan-design.md`.
 - **Staleness:** `burn` executes the staged plan as-is (it does not re-diff), but it
   reads file bytes from the **frozen snapshot** and performs the per-file hash
   re-check (§6.2) as it writes. If the snapshot is gone, those reads fail loudly.

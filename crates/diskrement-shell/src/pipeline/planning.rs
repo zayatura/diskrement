@@ -1,4 +1,4 @@
-//! The pure half of `plan`: everything between reading the staged scan and
+//! The pure half of `plan`: everything between the scan it just took and
 //! writing `staged/plan.json`. No filesystem, no catalog, no clock —
 //! `Pipeline::plan` is the thin edge around this.
 
@@ -167,11 +167,13 @@ fn set_plan(
 
 /// Why `disc` no longer describes `scanned`, or `None` if it still does.
 ///
-/// `scan --force` re-stages the scan without touching the plan, so the two
-/// can drift apart. The disc is stale when a file it places is missing from
-/// the scan or has a different hash or size there, or when a path the cycle
-/// tombstones is present again. A file the scan added that the plan does not
-/// place is not staleness: the next cycle picks it up.
+/// `plan` stages the scan and the plan together, but the old `scan` command
+/// (before #4) could re-stage the scan alone, so a work dir staged by an older
+/// diskrement, or edited by hand, can hold two that drifted apart. The disc is
+/// stale when a file it places is missing from the scan or has a different
+/// hash or size there, or when a path the cycle tombstones is present again.
+/// A file the scan added that the plan does not place is not staleness: the
+/// next cycle picks it up.
 pub fn stale_detail(
     disc: &PlannedDisc,
     tombstones: &[RelPath],

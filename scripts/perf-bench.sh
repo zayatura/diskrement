@@ -3,8 +3,10 @@
 #
 #   scripts/perf-bench.sh SOURCE_DIR WORK_AREA [BIN]
 #
-# Runs init -> scan -> plan -> burn (simulated) -> scan against SOURCE_DIR
+# Runs init -> plan -> burn (simulated) -> plan against SOURCE_DIR
 # using a throwaway project under WORK_AREA (same filesystem as SOURCE_DIR).
+# Each plan scans the source first; the second plan is the warm rescan. A
+# plan step's time includes planning, which is small next to hashing and I/O.
 # Staging uses CoW reflinks there -- init already enforces same-filesystem +
 # reflink capability -- so the real space requirement is metadata-only.
 # ~25 GB is only the worst case if reflinks are unavailable and burn silently
@@ -18,18 +20,18 @@
 #                  the hasher pulled -- the metric that proves "we did not
 #                  read the files". It has a nonzero floor (jars, the sqlite
 #                  catalog, the staged scan.json, the fingerprint sidecar),
-#                  so a near-zero scan2 should read as "<< source size", not
+#                  so a near-zero plan2 should read as "<< source size", not
 #                  "== 0".
 #   - read_bytes:  actual block-device reads only; 0 on a page-cache hit.
 #                  Kept for comparability with the recorded 388.6 GB rescan
 #                  baseline, but uninterpretable on its own when the source
 #                  tree is already warm in cache (e.g. burn re-hashing what
-#                  scan1 just read).
+#                  plan1 just read).
 #   - write_bytes: near-zero with reflink staging; ~= source size if burn
 #                  silently fell back to a plain copy.
 # Also records page-cache state (Cached, from /proc/meminfo) per step and
 # total RAM once, so a reader can judge cache influence. Set DROP_CACHES=1
-# to attempt `sync` + drop_caches via passwordless sudo before scan1; if
+# to attempt `sync` + drop_caches via passwordless sudo before plan1; if
 # that's unavailable the script warns and continues without dropping.
 #
 # Cleans up the throwaway project it created. Per-step stdout/stderr logs
@@ -286,13 +288,13 @@ run_step() {
   fi
 }
 
-# I1: attempt to drop the page cache before scan1, if requested.
+# I1: attempt to drop the page cache before plan1, if requested.
 CACHE_DROP_STATUS="not requested (DROP_CACHES not set)"
 drop_caches_if_requested() {
   if [[ "${DROP_CACHES:-0}" != "1" ]]; then
     return 0
   fi
-  echo "DROP_CACHES=1: syncing and attempting to drop the page cache before scan1..." >&2
+  echo "DROP_CACHES=1: syncing and attempting to drop the page cache before plan1..." >&2
   sync
   if sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
     CACHE_DROP_STATUS="dropped (sudo -n echo 3 > /proc/sys/vm/drop_caches succeeded)"
@@ -350,20 +352,19 @@ echo
 
 run_step init  "${GLOBAL_ARGS[@]}" init "$PROJECT" --source "$SOURCE_DIR" --work-dir "$PROJECT_WORK_DIR"
 drop_caches_if_requested
-run_step scan1 "${GLOBAL_ARGS[@]}" scan "$PROJECT"
-run_step plan  "${GLOBAL_ARGS[@]}" plan "$PROJECT"
+run_step plan1 "${GLOBAL_ARGS[@]}" plan "$PROJECT"
 run_step burn  "${GLOBAL_ARGS[@]}" burn "$PROJECT" --yes
-run_step scan2 "${GLOBAL_ARGS[@]}" scan "$PROJECT"
+run_step plan2 "${GLOBAL_ARGS[@]}" plan "$PROJECT"
 
 echo
 echo "page cache: $CACHE_DROP_STATUS"
 echo
-echo "cache evidence (P2: scan2 should show ~0 hashed):"
-echo -n "  scan1: "; grep '^Hashed' "$LOG_DIR/scan1.stdout" || echo "(no Hashed line found)"
-echo -n "  scan2: "; grep '^Hashed' "$LOG_DIR/scan2.stdout" || echo "(no Hashed line found)"
+echo "cache evidence (P2: plan2 should show ~0 hashed):"
+echo -n "  plan1: "; grep '^Hashed' "$LOG_DIR/plan1.stdout" || echo "(no Hashed line found)"
+echo -n "  plan2: "; grep '^Hashed' "$LOG_DIR/plan2.stdout" || echo "(no Hashed line found)"
 echo
 echo "note: rchar has a nonzero floor (jars, sqlite catalog, staged scan.json,"
-echo "      fingerprint sidecar) -- read scan2's rchar as '<< source size', not '== 0'."
+echo "      fingerprint sidecar) -- read plan2's rchar as '<< source size', not '== 0'."
 echo "note: the I/O sampler polls every 0.2s and cannot see any I/O the process"
 echo "      does after its last poll before exiting -- on a small/fast fixture"
 echo "      (a run finishing in a second or two) that residual can be a large"

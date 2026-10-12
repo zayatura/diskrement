@@ -16,7 +16,6 @@ fn the_second_session_lands_on_disc_one_as_session_two() {
     cli.init(&s, "p");
 
     // Cycle 1: both files to disc 1, left open.
-    cli.run(&["scan", "p"]);
     cli.run(&["plan", "p"]);
     let b1 = cli.run(&["burn", "p", "--yes"]);
     assert_eq!(b1.code, 0);
@@ -36,12 +35,9 @@ fn the_second_session_lands_on_disc_one_as_session_two() {
     support::write(&s.source, "c.txt", 64);
     support::delete(&s.source, "b.txt");
 
-    let sc2 = cli.run(&["scan", "p"]);
-    assert_eq!(sc2.code, 0);
-    assert!(sc2.out_has("Scanned: 1 added, 1 modified, 1 deleted, 0 unchanged."));
-
     let pl2 = cli.run(&["plan", "p"]);
     assert_eq!(pl2.code, 0);
+    assert!(pl2.out_has("Scanned: 1 added, 1 modified, 1 deleted, 0 unchanged."));
     assert!(pl2.out_has("appending to open disc 1"));
 
     let b2 = cli.run(&["burn", "p", "--yes"]);
