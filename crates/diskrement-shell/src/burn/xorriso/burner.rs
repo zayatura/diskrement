@@ -191,7 +191,13 @@ impl<'a> XorrisoBurner<'a> {
         if writing != WriteProgress::Ended {
             self.progress.done();
         }
-        let result = result?;
+        // `Exec` reports pipe and `wait()` failures as plain `Io`; here they
+        // come after xorriso may have touched the media. A tool that cannot
+        // be launched at all is still `ToolMissing`.
+        let result = result.map_err(|e| match e {
+            BurnError::Io(io) => BurnError::WriteInterrupted(io),
+            other => other,
+        })?;
         if result.exit_code != 0 {
             return Err(BurnError::BurnFailed {
                 exit_code: result.exit_code,
@@ -201,8 +207,17 @@ impl<'a> XorrisoBurner<'a> {
         Ok(())
     }
 
+    /// Every failure here comes after a successful write, so each one is a
+    /// `PostBurnCheckFailed`: the disc is written but not confirmed.
     fn post_burn_check(&self, id: &DiscIdentity) -> Result<(), BurnError> {
-        let found = MediaInspector::new(self.device.clone(), self.exec).read_identity()?;
+        let found = MediaInspector::new(self.device.clone(), self.exec)
+            .read_identity()
+            .map_err(|e| {
+                BurnError::PostBurnCheckFailed(match e {
+                    BurnError::Io(io) => format!("could not read the identity back: {io}"),
+                    other => format!("could not read the identity back: {other}"),
+                })
+            })?;
         let matches = found
             .as_ref()
             .is_some_and(|f| f.same_disc(id) && f.session_ordinal == id.session_ordinal);
@@ -607,6 +622,89 @@ mod tests {
         .burn(&image_of(dir.path(), 1, &[("a.txt", "hello")], false))
         .unwrap_err();
         assert!(err.to_string().ends_with("found: None"), "{err}");
+    }
+
+    /// A pipe or `wait()` failure while xorriso writes is not a pre-write
+    /// `Io`: the disc may be spent, and the partial-burn report depends on
+    /// telling the two apart (#11).
+    #[test]
+    fn an_io_failure_during_the_write_is_write_interrupted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = Script::new().toc(&[BLANK]).identities(&[]);
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| {
+            if c.iter().any(|a| a == "-commit") {
+                return Err(BurnError::Io(std::io::Error::other("broken pipe")));
+            }
+            script.respond(c, l)
+        };
+        let op = ScriptedOperator::new(&[true]);
+        let err = XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            &op,
+            &NoopSink,
+            2,
+        )
+        .burn(&image_of(dir.path(), 1, &[("a.txt", "hello")], false))
+        .unwrap_err();
+        assert!(matches!(err, BurnError::WriteInterrupted(_)), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "burn I/O error while xorriso was writing the disc: broken pipe"
+        );
+    }
+
+    /// The identity read-back runs after a successful write, so its I/O
+    /// failure is a failed post-burn check, never a pre-write `Io` (#11).
+    #[test]
+    fn an_io_failure_reading_the_identity_back_fails_the_post_burn_check() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = Script::new().toc(&[BLANK]).identities(&[]);
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| {
+            if c.iter().any(|a| a == "-extract") {
+                return Err(BurnError::Io(std::io::Error::other("read error")));
+            }
+            script.respond(c, l)
+        };
+        let op = ScriptedOperator::new(&[true]);
+        let err = XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            &op,
+            &NoopSink,
+            2,
+        )
+        .burn(&image_of(dir.path(), 1, &[("a.txt", "hello")], false))
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "post-burn sanity check failed: could not read the identity back: read error"
+        );
+    }
+
+    /// A tool that cannot be launched never touched the media, so it keeps
+    /// its own variant through the write's `Io` mapping.
+    #[test]
+    fn a_missing_tool_at_the_write_stays_tool_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = Script::new().toc(&[BLANK]).identities(&[]);
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| {
+            if c.iter().any(|a| a == "-commit") {
+                return Err(BurnError::ToolMissing("cannot launch xorriso".into()));
+            }
+            script.respond(c, l)
+        };
+        let op = ScriptedOperator::new(&[true]);
+        let err = XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            &op,
+            &NoopSink,
+            2,
+        )
+        .burn(&image_of(dir.path(), 1, &[("a.txt", "hello")], false))
+        .unwrap_err();
+        assert!(matches!(err, BurnError::ToolMissing(_)), "{err:?}");
     }
 
     #[test]

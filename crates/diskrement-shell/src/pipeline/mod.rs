@@ -832,9 +832,6 @@ impl DiscFailure {
     }
 }
 
-/// Remove a committed disc's staging tree, best-effort. The burned disc and
-/// its commit are the record, so a failure here costs only space: it is
-/// reported with the path and never fails the burn. Absent is fine.
 /// Each current version's size, for `replication::coverage`.
 fn sizes(current: &BTreeMap<RelPath, FileFingerprint>) -> BTreeMap<RelPath, u64> {
     current
@@ -843,6 +840,9 @@ fn sizes(current: &BTreeMap<RelPath, FileFingerprint>) -> BTreeMap<RelPath, u64>
         .collect()
 }
 
+/// Remove a committed disc's staging tree, best-effort. The burned disc and
+/// its commit are the record, so a failure here costs only space: it is
+/// reported with the path and never fails the burn. Absent is fine.
 fn discard_staging(dir: &Path) {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => {}
@@ -861,11 +861,14 @@ fn burner_failure(e: crate::burn::BurnError) -> DiscFailure {
     match e {
         // xorriso ran: a non-zero exit usually means the media was touched
         // (a BD-R is likely spent), and a failed post-burn check comes after
-        // xorriso exited 0 with a session on the disc.
-        B::BurnFailed { .. } | B::PostBurnCheckFailed(_) => DiscFailure::Unrecorded {
-            cause: PipelineError::Burn(e),
-            surely_written: false,
-        },
+        // xorriso exited 0 with a session on the disc. An I/O failure while
+        // xorriso ran is the same: the write may be on the media.
+        B::BurnFailed { .. } | B::WriteInterrupted(_) | B::PostBurnCheckFailed(_) => {
+            DiscFailure::Unrecorded {
+                cause: PipelineError::Burn(e),
+                surely_written: false,
+            }
+        }
         // Staging, tool and device checks, media inspection and the operator
         // prompt all run before anything is written.
         B::HashMismatch { .. }
@@ -2522,6 +2525,7 @@ mod burn_tests {
             output_tail: vec![],
         }));
         assert!(maybe(B::PostBurnCheckFailed("unreadable".into())));
+        assert!(maybe(B::WriteInterrupted(std::io::Error::other("pipe"))));
 
         let unwritten = |e: B| matches!(burner_failure(e), DiscFailure::Unwritten(_));
         assert!(unwritten(B::Aborted));
