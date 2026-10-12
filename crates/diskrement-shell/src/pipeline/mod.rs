@@ -1865,8 +1865,9 @@ mod burn_tests {
         assert_eq!(err.exit_code(), 2);
     }
 
-    /// A plan without its scan can only come from deleting files by hand. The
-    /// remedy is the same as for no plan at all, so it reads the same.
+    /// A plan without its scan comes from deleting files by hand, or from a
+    /// `staged::clear` interrupted between its two removals. The remedy is the
+    /// same as for no plan at all, so it reads the same.
     #[test]
     fn a_staged_plan_without_its_scan_is_the_no_staged_plan_error() {
         let mut env = staged_env(&[("a.bin", b"aaaa")], false);
@@ -1882,6 +1883,7 @@ mod burn_tests {
         std::fs::remove_file(staged::plan_path(&env.work)).unwrap();
         let err = run_burn(&mut env).unwrap_err();
         assert!(matches!(err, PipelineError::NoStagedPlan(_)), "{err}");
+        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]
