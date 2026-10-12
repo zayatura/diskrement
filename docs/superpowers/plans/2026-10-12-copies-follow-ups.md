@@ -99,7 +99,7 @@ Branch `feat/full-cycle-property`. The proptest
 `after_a_full_cycle_every_current_version_has_copies_live_copies` lives in
 `pipeline/mod.rs` (`copies_tests`) and runs 24 cases. Each case:
 
-- picks `copies` in 1..=3 and 1–4 files of 1–120 KB, on a project whose margin leaves
+- picks `copies` in 1..=3 and 2–5 files of 40–200 KB, on a project whose margin leaves
   250 000 usable bytes, so most sets span several discs;
 - runs scan → plan → burn with the simulated burner until a plan is empty (at most 40
   cycles);
@@ -120,3 +120,9 @@ copy" files. Mutation check: with `shortfall` replaced by empty lists, the test 
   nothing to re-burn. This is the imprecision #6 recorded. The property now checks files
   still in the source, and checks coverage only when no deletion is waiting. The gap is
   reported as a candidate follow-up instead of being fixed here.
+- Review: the first oracle was `read_view`'s `live_sets`, the same view that drives
+  catch-up. A mutant that stopped `read_view` seeing dead discs still passed. The test
+  now also tracks the discs it kills and checks through `file_history` that each source
+  file's bytes sit on an unkilled disc in every set. That catches the mutant. Files are
+  now 40–200 KB (2–5 initially) so sets spill more often. The coverage exemption is
+  bounded: each set may miss at most the number of pending deletions.

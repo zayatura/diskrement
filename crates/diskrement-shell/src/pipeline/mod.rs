@@ -3656,7 +3656,7 @@ mod copies_tests {
 
     fn change() -> impl Strategy<Value = Change> {
         prop_oneof![
-            (0..NAMES.len(), 1..=120u64).prop_map(|(i, kb)| Change::Write(i, kb)),
+            (0..NAMES.len(), 40..=200u64).prop_map(|(i, kb)| Change::Write(i, kb)),
             (0..NAMES.len()).prop_map(Change::Delete),
             (0..8usize).prop_map(Change::KillDisc),
         ]
@@ -3684,7 +3684,15 @@ mod copies_tests {
     /// version of a file still in the source has `copies` live copies, one
     /// per set, whatever was burned, rewritten, deleted or lost to dead discs
     /// along the way.
-    fn assert_fully_replicated(env: &mut Env, copies: u32) -> Result<(), TestCaseError> {
+    ///
+    /// `killed` is the test's own record of the discs it marked dead, so the
+    /// physical check below does not trust the catalog's dead-disc logic,
+    /// which also drives catch-up.
+    fn assert_fully_replicated(
+        env: &mut Env,
+        copies: u32,
+        killed: &std::collections::BTreeSet<DiscKey>,
+    ) -> Result<(), TestCaseError> {
         let view = env.catalog.read_view(ProjectId(1)).unwrap();
         let all_sets: std::collections::BTreeSet<u32> = (0..copies).collect();
         // Walk the source rather than the view: `read_view` leaves out a
@@ -3701,19 +3709,37 @@ mod copies_tests {
                     "{} is short of copies",
                     name
                 );
+
+                // Independently: the source's bytes sit on a disc the test
+                // did not kill, in every set.
+                let rel = RelPath(name.to_string());
+                let hash = crate::fs::hasher::hash(&env.source.join(name)).unwrap();
+                let held_in: std::collections::BTreeSet<u32> = env
+                    .catalog
+                    .file_history(ProjectId(1), &rel)
+                    .unwrap()
+                    .iter()
+                    .filter(|h| h.content_hash == hash && !killed.contains(&h.disc))
+                    .map(|h| h.disc.copy_set)
+                    .collect();
+                prop_assert_eq!(&held_in, &all_sets, "{}'s bytes are short of copies", name);
             }
         }
         // Coverage counts every catalog-current version, which includes a
         // deleted file whose deletion waits for the next burned disc (#9). If
         // its last copy died meanwhile, it reads "no live copy" until then:
-        // the imprecision recorded with #6. Only a cycle with no such pending
-        // deletion must read complete.
+        // the imprecision recorded with #6. Such pending deletions are the
+        // only gap coverage may show.
         let status = pipeline(env).status("p").unwrap();
         let on_source = NAMES.iter().filter(|n| env.source.join(n).exists()).count();
-        if status.total_current_files == on_source {
-            prop_assert!(status.coverage.sets.iter().all(|c| c.missing_files == 0));
-            prop_assert_eq!(status.coverage.no_live_copy.missing_files, 0);
-        }
+        // The loop above proved every source file current, so this is exact.
+        let pending = status.total_current_files - on_source;
+        prop_assert!(status
+            .coverage
+            .sets
+            .iter()
+            .all(|c| c.missing_files <= pending));
+        prop_assert!(status.coverage.no_live_copy.missing_files <= pending);
         Ok(())
     }
 
@@ -3725,7 +3751,7 @@ mod copies_tests {
         #[test]
         fn after_a_full_cycle_every_current_version_has_copies_live_copies(
             copies in 1..=3u32,
-            initial in prop::collection::vec((0..NAMES.len(), 1..=120u64), 1..5),
+            initial in prop::collection::vec((0..NAMES.len(), 40..=200u64), 2..6),
             rounds in prop::collection::vec(prop::collection::vec(change(), 1..4), 0..4),
         ) {
             let dir = tempfile::TempDir::new().unwrap();
@@ -3749,7 +3775,8 @@ mod copies_tests {
                 write(&env, i, kb);
             }
             // A margin that leaves 250_000 usable bytes (see `tiny_project_init`),
-            // so a few files already spill onto several discs per set.
+            // so two or more files of 40–200 KB usually spill onto a second
+            // disc per set.
             let init = ProjectInit {
                 name: "p".into(),
                 source_root: env.source.display().to_string(),
@@ -3762,8 +3789,9 @@ mod copies_tests {
             pipeline(&mut env).init(&init).unwrap();
 
             let mut clock = 0;
+            let mut killed = std::collections::BTreeSet::new();
             run_to_completion(&mut env, &mut clock)?;
-            assert_fully_replicated(&mut env, copies)?;
+            assert_fully_replicated(&mut env, copies, &killed)?;
 
             for round in rounds {
                 for c in round {
@@ -3782,7 +3810,9 @@ mod copies_tests {
                                 .map(|d| d.key())
                                 .collect();
                             if !live.is_empty() {
-                                let arg = live[i % live.len()].name(copies);
+                                let victim = live[i % live.len()];
+                                killed.insert(victim);
+                                let arg = victim.name(copies);
                                 clock += 1;
                                 pipeline(&mut env)
                                     .mark_dead("p", arg.parse::<DiscArg>().unwrap(), at(clock))
@@ -3792,7 +3822,7 @@ mod copies_tests {
                     }
                 }
                 run_to_completion(&mut env, &mut clock)?;
-                assert_fully_replicated(&mut env, copies)?;
+                assert_fully_replicated(&mut env, copies, &killed)?;
             }
         }
     }
