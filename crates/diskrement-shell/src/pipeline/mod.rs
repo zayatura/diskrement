@@ -355,10 +355,14 @@ impl<'a> Pipeline<'a> {
             .catalog
             .read_view(p.id)
             .map_err(|e| partial(&done, None, &[], Self::failed(e)))?;
+        let current = self
+            .catalog
+            .fingerprints(p.id)
+            .map_err(|e| partial(&done, None, &[], Self::failed(e)))?;
         Ok(BurnReport {
             discs: written,
             remaining,
-            coverage: replication::coverage(&view, p.copies),
+            coverage: replication::coverage(&view, &sizes(&current), p.copies),
             deferred_deletions,
         })
     }
@@ -589,6 +593,7 @@ impl<'a> Pipeline<'a> {
         let p = self.project(name)?;
         let discs = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
+        let current = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
         let burned = self
             .catalog
             .sessions_by_state(p.id, SessionState::Burned)
@@ -612,7 +617,7 @@ impl<'a> Pipeline<'a> {
         }
         Ok(StatusReport {
             open_discs,
-            coverage: replication::coverage(&view, p.copies),
+            coverage: replication::coverage(&view, &sizes(&current), p.copies),
             total_current_files: view.current.len(),
             discs,
             last_burn_at,
@@ -830,6 +835,14 @@ impl DiscFailure {
 /// Remove a committed disc's staging tree, best-effort. The burned disc and
 /// its commit are the record, so a failure here costs only space: it is
 /// reported with the path and never fails the burn. Absent is fine.
+/// Each current version's size, for `replication::coverage`.
+fn sizes(current: &BTreeMap<RelPath, FileFingerprint>) -> BTreeMap<RelPath, u64> {
+    current
+        .iter()
+        .map(|(path, f)| (path.clone(), f.size_bytes))
+        .collect()
+}
+
 fn discard_staging(dir: &Path) {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => {}
@@ -1346,7 +1359,7 @@ mod tests {
 mod burn_tests {
     use super::*;
     use chrono::{TimeZone as _, Utc};
-    use diskrement_core::{DiscKey, DiscType, RelPath, ScannedFile, SetCoverage};
+    use diskrement_core::{Coverage, DiscKey, DiscType, RelPath, ScannedFile, SetCoverage};
 
     use crate::burn::testkit::{ScriptedExec, ScriptedOperator, BLANK};
     use crate::burn::xorriso::burner::XorrisoBurner;
@@ -2010,7 +2023,10 @@ mod burn_tests {
         assert_eq!(count("placement"), 4);
         assert_eq!(
             report.coverage,
-            vec![SetCoverage::default(), SetCoverage::default()]
+            Coverage {
+                sets: vec![SetCoverage::default(); 2],
+                no_live_copy: SetCoverage::default(),
+            }
         );
         assert!(
             staged::read_plan(&env.work).unwrap().is_none(),
@@ -3352,7 +3368,7 @@ mod copies_tests {
         let mut env = burned_twice();
         let s = pipeline(&mut env).status("p").unwrap();
         assert_eq!(s.open_discs, vec![DiscKey::new(1, 0), DiscKey::new(1, 1)]);
-        assert!(s.coverage.iter().all(|c| c.missing_files == 0));
+        assert!(s.coverage.sets.iter().all(|c| c.missing_files == 0));
     }
 
     #[test]
@@ -3365,7 +3381,11 @@ mod copies_tests {
         assert!(report.lost.is_empty() && report.reburn.is_empty());
         assert_eq!(report.degraded.len(), 1);
         let s = pipeline(&mut env).status("p").unwrap();
-        assert_eq!(s.coverage[1].missing_files, 1);
+        assert_eq!(s.coverage.sets[1].missing_files, 1);
+        assert_eq!(
+            s.coverage.no_live_copy.missing_files, 0,
+            "a.bin is still on 1A"
+        );
     }
 
     #[test]

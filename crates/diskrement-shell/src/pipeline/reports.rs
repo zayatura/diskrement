@@ -5,9 +5,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
-use diskrement_core::{
-    DiscKey, DiscState, DiscType, PlannedDisc, RelPath, ScannedFile, SetCoverage,
-};
+use diskrement_core::{Coverage, DiscKey, DiscState, DiscType, PlannedDisc, RelPath, ScannedFile};
 
 /// `ScanResult` — `hashed` is `None` when a staged scan was reused.
 #[derive(Debug)]
@@ -28,7 +26,7 @@ pub struct StatusReport {
     pub open_discs: Vec<DiscKey>,
     pub total_current_files: usize,
     pub last_burn_at: Option<DateTime<Utc>>,
-    pub coverage: Vec<SetCoverage>,
+    pub coverage: Coverage,
 }
 
 /// How much outstanding change did NOT fit on the disc planned this cycle
@@ -96,7 +94,7 @@ pub struct DiscBurn {
 pub struct BurnReport {
     pub discs: Vec<DiscBurn>,
     pub remaining: RemainingEstimate,
-    pub coverage: Vec<SetCoverage>,
+    pub coverage: Coverage,
     pub deferred_deletions: Option<usize>,
 }
 

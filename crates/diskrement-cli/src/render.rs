@@ -172,7 +172,7 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
         );
     }
     if copies > 1 {
-        lines.extend(coverage_lines(&r.coverage));
+        lines.extend(coverage_lines(&r.coverage.sets));
     }
     lines.push(if r.remaining.more_discs == 0 {
         if copies > 1 {
@@ -245,7 +245,7 @@ pub fn status_report(p: &Project, r: &StatusReport) -> String {
     }
     if p.copies > 1 {
         out.push_str("Copies:\n");
-        for (set, c) in r.coverage.iter().enumerate() {
+        for (set, c) in r.coverage.sets.iter().enumerate() {
             let letter = set_letter(set as u32);
             if c.missing_files == 0 {
                 out.push_str(&format!("  set {letter}: complete\n"));
@@ -483,7 +483,7 @@ mod tests {
                 },
             ],
             open_discs: vec![diskrement_core::DiscKey::new(2, 0)],
-            coverage: vec![SetCoverage::default()],
+            coverage: diskrement_core::Coverage::default(),
             total_current_files: 556,
             last_burn_at: Some(ts(2026, 6, 21)),
         }
@@ -505,13 +505,16 @@ mod tests {
             open_discs: vec![diskrement_core::DiscKey::new(1, 0)],
             total_current_files: 2,
             last_burn_at: None,
-            coverage: vec![
-                SetCoverage::default(),
-                SetCoverage {
-                    missing_files: 2,
-                    missing_bytes: 300_000_000,
-                },
-            ],
+            coverage: diskrement_core::Coverage {
+                sets: vec![
+                    SetCoverage::default(),
+                    SetCoverage {
+                        missing_files: 2,
+                        missing_bytes: 300_000_000,
+                    },
+                ],
+                no_live_copy: SetCoverage::default(),
+            },
         };
         assert_eq!(
             status_report(&p, &r),
@@ -767,7 +770,10 @@ mod tests {
                 more_files: 0,
                 more_bytes: 0,
             },
-            coverage: vec![SetCoverage::default(); copies],
+            coverage: diskrement_core::Coverage {
+                sets: vec![SetCoverage::default(); copies],
+                no_live_copy: SetCoverage::default(),
+            },
             deferred_deletions: Some(n),
         }
     }
@@ -958,13 +964,16 @@ mod tests {
                 more_files: 0,
                 more_bytes: 0,
             },
-            coverage: vec![
-                SetCoverage::default(),
-                SetCoverage {
-                    missing_files: 3,
-                    missing_bytes: 2_000_000_000,
-                },
-            ],
+            coverage: diskrement_core::Coverage {
+                sets: vec![
+                    SetCoverage::default(),
+                    SetCoverage {
+                        missing_files: 3,
+                        missing_bytes: 2_000_000_000,
+                    },
+                ],
+                no_live_copy: SetCoverage::default(),
+            },
             deferred_deletions: None,
         };
         assert_eq!(
@@ -987,7 +996,7 @@ mod tests {
                 more_files: 0,
                 more_bytes: 0,
             },
-            coverage: vec![],
+            coverage: diskrement_core::Coverage::default(),
             deferred_deletions: None,
         };
         let out = burn_report(&r, 2);
@@ -1031,7 +1040,7 @@ mod burn_render_tests {
                 more_files: 1,
                 more_bytes: 800,
             },
-            coverage: vec![SetCoverage::default()],
+            coverage: diskrement_core::Coverage::default(),
             deferred_deletions: None,
         }
     }
@@ -1537,7 +1546,7 @@ mod snapshots {
                 more_files: 1,
                 more_bytes: 800,
             },
-            coverage: vec![SetCoverage::default()],
+            coverage: diskrement_core::Coverage::default(),
             deferred_deletions: None,
         }
     }
@@ -1715,14 +1724,14 @@ mod snapshots {
                 disc(2, DiscStatus::Open, 3_200_000_000, 25_000_000_000),
             ],
             open_discs: vec![diskrement_core::DiscKey::new(2, 0)],
-            coverage: vec![SetCoverage::default()],
+            coverage: diskrement_core::Coverage::default(),
             total_current_files: 556,
             last_burn_at: Some(ts(2026, 6, 21, 14, 3, 0)),
         };
         let fresh = StatusReport {
             discs: vec![],
             open_discs: vec![],
-            coverage: vec![SetCoverage::default()],
+            coverage: diskrement_core::Coverage::default(),
             total_current_files: 0,
             last_burn_at: None,
         };
@@ -1734,7 +1743,7 @@ mod snapshots {
                 disc(4, DiscStatus::Finalized, 0, 0),
             ],
             open_discs: vec![diskrement_core::DiscKey::new(2, 0)],
-            coverage: vec![SetCoverage::default()],
+            coverage: diskrement_core::Coverage::default(),
             total_current_files: 1,
             last_burn_at: Some(ts(2026, 9, 5, 20, 1, 3)),
         };
