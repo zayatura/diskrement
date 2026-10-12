@@ -6,6 +6,7 @@
 //! v1 plan is detected by `is_legacy_plan` and answered with a stale-plan
 //! error.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -167,6 +168,34 @@ pub fn read_scan(work_dir: &Path) -> Result<Option<Vec<ScannedFile>>, serde_json
         files.push(e.into_scanned()?);
     }
     Ok(Some(files))
+}
+
+/// `<workDir>/pending-deletions.json`: the latest scan's deletions, which
+/// wait for the next burned disc to be recorded (#9, #16).
+///
+/// It lives beside `staged/`, not in it: `burn` clears `staged/`, and a
+/// deletion-only cycle burns nothing, so this file is all that still says
+/// these paths were deleted rather than lost. It describes the source as last
+/// scanned, so a file that comes back counts as deleted until the next scan.
+pub fn pending_deletions_path(work_dir: &Path) -> PathBuf {
+    work_dir.join("pending-deletions.json")
+}
+
+pub fn write_pending_deletions(work_dir: &Path, paths: &[RelPath]) -> std::io::Result<()> {
+    let names: Vec<&str> = paths.iter().map(RelPath::as_str).collect();
+    write_json(
+        &pending_deletions_path(work_dir),
+        &serde_json::to_string(&names).expect("serializable"),
+    )
+}
+
+/// Empty when no scan has written the file yet.
+pub fn read_pending_deletions(work_dir: &Path) -> Result<BTreeSet<RelPath>, serde_json::Error> {
+    let Some(raw) = read_opt(&pending_deletions_path(work_dir))? else {
+        return Ok(BTreeSet::new());
+    };
+    let names: Vec<String> = serde_json::from_str(&raw)?;
+    Ok(names.into_iter().map(RelPath).collect())
 }
 
 pub fn write_plan(work_dir: &Path, report: &PlanReport) -> std::io::Result<()> {
@@ -399,6 +428,22 @@ mod tests {
         let read = read_plan(dir.path()).unwrap().unwrap();
         assert!(read.unplaceable_catch_up.is_empty());
         assert_eq!(read.oversized, plan_report().oversized);
+    }
+
+    #[test]
+    fn pending_deletions_round_trip_and_survive_clearing_the_staged_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(read_pending_deletions(dir.path()).unwrap().is_empty());
+
+        let paths = vec![RelPath("a/b.bin".into()), RelPath("c.bin".into())];
+        write_pending_deletions(dir.path(), &paths).unwrap();
+        write_scan(dir.path(), &[]).unwrap();
+        clear(dir.path()).unwrap();
+
+        assert_eq!(
+            read_pending_deletions(dir.path()).unwrap(),
+            paths.into_iter().collect::<BTreeSet<_>>()
+        );
     }
 
     #[test]

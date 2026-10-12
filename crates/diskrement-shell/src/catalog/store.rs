@@ -155,6 +155,12 @@ impl Catalog {
     /// copy); a current version still covered within its own set is not
     /// reported at all; a non-current one is counted as a superseded survivor.
     ///
+    /// `deleted` names paths the latest scan found gone from the source whose
+    /// deletion is not recorded yet (#9). Their versions are still current
+    /// here, but nothing will re-burn them, so they are treated as non-current:
+    /// LOST, never REBURN or degraded, and a surviving copy elsewhere counts
+    /// as a superseded survivor (#16).
+    ///
     /// The `disc` row itself is never touched: dead-ness is derived from
     /// `disc_event` at read time.
     pub fn mark_dead(
@@ -162,6 +168,7 @@ impl Catalog {
         project: ProjectId,
         disc: DiscKey,
         at: &DateTime<Utc>,
+        deleted: &std::collections::BTreeSet<RelPath>,
     ) -> Result<LostReport, CatalogError> {
         self.tx(|tx| {
             let disc_id = disc_id(tx, project, disc)?;
@@ -180,7 +187,10 @@ impl Catalog {
                 )));
             }
 
-            let versions = disc_versions(tx, project, disc_id)?;
+            let mut versions = disc_versions(tx, project, disc_id)?;
+            for v in &mut versions {
+                v.is_current = v.is_current && !deleted.contains(&v.rel_path);
+            }
 
             tx.execute(
                 "insert into disc_event (disc_id, kind, at) values (?1, 'MARKED_DEAD', ?2)",
@@ -884,7 +894,7 @@ mod tests {
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
         let report = cat
-            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
 
         assert_eq!(report.disc, DiscKey::new(1, 0));
@@ -936,7 +946,7 @@ mod tests {
         // assertion above.
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
-        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
 
         let conn = cat.raw_connection_for_tests();
@@ -967,7 +977,7 @@ mod tests {
         also_place_a_on_disc_2(&cat);
 
         let report = cat
-            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
         assert_eq!(
             report
@@ -1006,7 +1016,7 @@ mod tests {
         also_place_a_on_disc_2(&cat);
 
         let second = cat
-            .mark_dead(pid, DiscKey::new(2, 0), &dead_at())
+            .mark_dead(pid, DiscKey::new(2, 0), &dead_at(), &Default::default())
             .expect("disc 2 dies");
         // While disc 1 lived, a's copy there kept it off disc 2's casualty list.
         assert_eq!(
@@ -1020,7 +1030,7 @@ mod tests {
         assert!(second.lost.is_empty());
 
         let first = cat
-            .mark_dead(pid, DiscKey::new(1, 0), &dead_at2())
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at2(), &Default::default())
             .expect("disc 1 dies");
         // Now that disc 2 is dead too, a's only surviving copy is gone.
         assert_eq!(
@@ -1056,7 +1066,7 @@ mod tests {
         .expect("delete a");
 
         let report = cat
-            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
         assert_eq!(
             report
@@ -1107,7 +1117,7 @@ mod tests {
             .expect("the extra placement inserts");
 
         let report = cat
-            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
         assert_eq!(
             report
@@ -1135,15 +1145,40 @@ mod tests {
         );
     }
 
+    /// A current version whose path the latest scan found deleted is not
+    /// re-burned from a source that no longer has it: its last copy dying
+    /// makes it LOST (#16). The other current version is still REBURN.
+    #[test]
+    fn a_pending_deletion_on_a_dying_disc_is_lost_not_reburn() {
+        let (_dir, mut cat) = temp_catalog();
+        let pid = seed(&mut cat);
+        let deleted = [RelPath("a".to_string())].into_iter().collect();
+
+        let report = cat
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &deleted)
+            .expect("disc 1 dies");
+
+        assert_eq!(
+            fates(&cat),
+            vec![
+                ("a".to_string(), "LOST".to_string()),
+                ("b".to_string(), "LOST".to_string()),
+                ("b".to_string(), "REBURN".to_string()),
+            ]
+        );
+        assert!(report.lost.iter().any(|e| e.rel_path.as_str() == "a"));
+        assert!(report.reburn.iter().all(|e| e.rel_path.as_str() != "a"));
+    }
+
     #[test]
     fn marking_a_dead_disc_again_fails_and_so_does_an_unknown_ordinal() {
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
-        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
 
         let duplicate = cat
-            .mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+            .mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect_err("already dead");
         assert!(
             matches!(duplicate, CatalogError::IllegalStatusTransition(_)),
@@ -1155,7 +1190,7 @@ mod tests {
         );
 
         let unknown = cat
-            .mark_dead(pid, DiscKey::new(9, 0), &dead_at())
+            .mark_dead(pid, DiscKey::new(9, 0), &dead_at(), &Default::default())
             .expect_err("no such disc");
         assert!(
             matches!(unknown, CatalogError::ConstraintViolation(_)),
@@ -1177,7 +1212,7 @@ mod tests {
         cat.apply_update(&sealed).expect("1B burned and sealed");
 
         let unknown = cat
-            .mark_dead(pid, DiscKey::new(9, 1), &dead_at())
+            .mark_dead(pid, DiscKey::new(9, 1), &dead_at(), &Default::default())
             .expect_err("no such disc");
         assert!(
             unknown.to_string().contains("no disc with ordinal 9B"),
@@ -1227,7 +1262,7 @@ mod tests {
             vec!["a", "b"]
         );
 
-        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
         assert!(cat.read_view(pid).expect("view reads").current.is_empty());
     }
@@ -1239,7 +1274,7 @@ mod tests {
         cat.apply_update(&update(pid, 2, 1, vec![fw("c", "c1", 5)], vec![], vec![]))
             .expect("disc 2 exists");
         also_place_a_on_disc_2(&cat);
-        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
 
         // a survives on live disc 2; b@b2 is disc-1-only and drops; c is native
@@ -1259,7 +1294,7 @@ mod tests {
     fn file_history_marks_dead_disc_versions_lost() {
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
-        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
 
         let history = cat
@@ -1281,7 +1316,7 @@ mod tests {
         // has the file and it is about to be re-burned.
         let (_dir, mut cat) = temp_catalog();
         let pid = seed(&mut cat);
-        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at())
+        cat.mark_dead(pid, DiscKey::new(1, 0), &dead_at(), &Default::default())
             .expect("disc 1 dies");
 
         let history = cat
@@ -1609,7 +1644,9 @@ mod tests {
         assert_eq!(a.content_hash.as_str(), "a1");
         assert_eq!(a.live_sets, std::collections::BTreeSet::from([0, 1]));
 
-        let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
+        let report = cat
+            .mark_dead(p, DiscKey::new(1, 0), &dead_at(), &Default::default())
+            .unwrap();
         assert_eq!(report.disc, DiscKey::new(1, 0));
         assert!(report.reburn.iter().all(|r| r.rel_path.as_str() != "a"));
         assert!(report.lost.iter().all(|l| l.rel_path.as_str() != "a"));
@@ -1634,7 +1671,9 @@ mod tests {
             .expect("disc 2 exists");
         also_place_a_on_disc_2(&cat);
 
-        let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
+        let report = cat
+            .mark_dead(p, DiscKey::new(1, 0), &dead_at(), &Default::default())
+            .unwrap();
         // Set 0 still holds a@a1 on 2A: nothing to restore, nothing lost.
         assert!(report.degraded.is_empty());
         assert!(report.reburn.iter().all(|r| r.rel_path.as_str() != "a"));
@@ -1663,7 +1702,9 @@ mod tests {
             )
             .expect("the extra placement inserts");
 
-        let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
+        let report = cat
+            .mark_dead(p, DiscKey::new(1, 0), &dead_at(), &Default::default())
+            .unwrap();
         assert!(report.lost.is_empty());
         assert!(report.degraded.is_empty());
         assert_eq!(report.superseded_survivors, 1);
@@ -1680,7 +1721,9 @@ mod tests {
     fn a_single_copy_project_never_reports_degraded_versions() {
         let (_dir, mut cat) = crate::catalog::testutil::temp_catalog();
         let p = seed(&mut cat);
-        let report = cat.mark_dead(p, DiscKey::new(1, 0), &dead_at()).unwrap();
+        let report = cat
+            .mark_dead(p, DiscKey::new(1, 0), &dead_at(), &Default::default())
+            .unwrap();
         assert!(report.degraded.is_empty());
         assert_eq!(report.superseded_survivors, 0);
     }
@@ -1702,7 +1745,9 @@ mod tests {
         };
         assert_eq!(live(&cat), std::collections::BTreeSet::from([0, 1]));
 
-        let report = cat.mark_dead(p, DiscKey::new(1, 1), &dead_at()).unwrap();
+        let report = cat
+            .mark_dead(p, DiscKey::new(1, 1), &dead_at(), &Default::default())
+            .unwrap();
         assert_eq!(live(&cat), std::collections::BTreeSet::from([0]));
         // 1A still holds `a`, so losing 1B degrades it rather than reburning.
         assert!(report.reburn.is_empty());
