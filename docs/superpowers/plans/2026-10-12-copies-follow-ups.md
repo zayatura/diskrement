@@ -71,3 +71,11 @@ Branch `feat/history-copies`.
   `disc <name> / session <n>   <status>` line per copy under it.
 - The status precedence is unchanged. A `CURRENT` copy on a dead disc now renders
   `CURRENT (on a dead disc)`, at every `copies`.
+
+### Execution deviations (#7)
+
+- Review: at `copies > 1` a dead disc's copy of a still-current version reads
+  `CURRENT (on a dead disc)` permanently. Catching up the set adds a copy placement of
+  the same version rather than creating a new version. The README now says so.
+- Added a `copies = 1` render case for the annotation and a CLI test that runs
+  `diskrement history` on a two-copy project.

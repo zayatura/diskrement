@@ -152,7 +152,9 @@ b.txt
 
 where v2 and v3 carry the same content hash — the live copy came back on fresh media.
 With `copies` > 1, each version prints its size and hash once, followed by one line per
-copy (1A, 1B, …) with that copy's status.
+copy (1A, 1B, …) with that copy's status. There a dead disc's copy of a version that is
+still current keeps reading `CURRENT (on a dead disc)`, even after its set has been
+caught up: the catch-up adds another copy of the same version rather than a new one.
 Between the mark-dead and that recovery burn, `status` keeps counting the re-burn list
 under `Current files` — `history` shows them as `CURRENT (on a dead disc)` — and names them on
 a line of their own:

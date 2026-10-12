@@ -1536,6 +1536,18 @@ mod p6_render_tests {
         );
     }
 
+    /// The annotation is not a copies>1 feature: at copies=1 a current
+    /// version whose only copy died says so until it is re-burned.
+    #[test]
+    fn a_single_copy_current_version_on_a_dead_disc_says_so() {
+        let mut gone = entry("h", 800, 3, 1, VersionStatus::Current);
+        gone.on_dead_disc = true;
+        assert_eq!(
+            history(&RelPath("a.bin".to_string()), &[gone], 1),
+            "a.bin\n\x20 v1  disc 3 / session 1   0.0 GB  h  CURRENT (on a dead disc)"
+        );
+    }
+
     #[test]
     fn the_history_gb_column_uses_the_same_one_decimal_format() {
         assert_eq!(
