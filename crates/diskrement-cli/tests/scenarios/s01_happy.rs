@@ -1,10 +1,10 @@
-//! Scenario 1: init → scan → plan → burn → verify, with the staged disc read
+//! Scenario 1: init → plan → burn → verify, with the staged disc read
 //! back and compared against the source byte for byte.
 
 use crate::{disc, support};
 
 #[test]
-fn init_scan_plan_burn_verify_and_the_disc_contents_equal_the_source() {
+fn init_plan_burn_verify_and_the_disc_contents_equal_the_source() {
     let Some(s) = support::scratch_or_skip("s01 happy path") else {
         return;
     };
@@ -14,12 +14,9 @@ fn init_scan_plan_burn_verify_and_the_disc_contents_equal_the_source() {
 
     cli.init(&s, "p");
 
-    let scan = cli.run(&["scan", "p"]);
-    assert_eq!(scan.code, 0);
-    assert!(scan.out_has("Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged."));
-
     let plan = cli.run(&["plan", "p"]);
     assert_eq!(plan.code, 0);
+    assert!(plan.out_has("Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged."));
     assert!(plan.out_has("Plan: disc 1"));
     assert!(plan.out_has("new disc"));
 

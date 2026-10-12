@@ -18,19 +18,15 @@ fn three_files_over_two_discs_form_a_disjoint_union() {
     cli.init(&s, "p");
 
     // Cycle 1: disc 1 fills with two of the three.
-    let sc1 = cli.run(&["scan", "p"]);
-    assert_eq!(sc1.code, 0);
-    assert!(sc1.out_has("Scanned: 3 added"));
     let pl1 = cli.run(&["plan", "p"]);
     assert_eq!(pl1.code, 0);
+    assert!(pl1.out_has("Scanned: 3 added"));
     assert!(pl1.out_has("more discs) remain"));
     cli.run(&["burn", "p", "--yes"]);
     let d1 = disc::data_files(&s.disc_dir(1));
     assert_eq!(d1.len(), 2);
 
     // Cycle 2: the remaining file goes to disc 2 and completes the set.
-    let sc2 = cli.run(&["scan", "p"]);
-    assert_eq!(sc2.code, 0);
     let pl2 = cli.run(&["plan", "p"]);
     assert_eq!(pl2.code, 0);
     assert!(pl2.out_has("This disc completes the set."));

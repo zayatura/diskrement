@@ -18,9 +18,7 @@ fn init_two_copies(cli: &support::Cli, s: &support::Scratch) {
     assert_eq!(r.code, 0, "init failed: {}{}", r.stdout, r.stderr);
 }
 
-fn scan_plan_burn(cli: &support::Cli) -> support::Output {
-    let sc = cli.run(&["scan", "p"]);
-    assert_eq!(sc.code, 0, "scan: {}{}", sc.stdout, sc.stderr);
+fn plan_burn(cli: &support::Cli) -> support::Output {
     let pl = cli.run(&["plan", "p"]);
     assert_eq!(pl.code, 0, "plan: {}{}", pl.stdout, pl.stderr);
     cli.run(&["burn", "p", "--yes"])
@@ -42,7 +40,7 @@ fn each_cycle_writes_one_disc_per_set_and_a_dead_twin_is_restored() {
 
     // Cycle 1: both sets receive a and b. 1A records the versions; 1B
     // records copies of them.
-    let b1 = scan_plan_burn(&cli);
+    let b1 = plan_burn(&cli);
     assert_eq!(b1.code, 0, "{}{}", b1.stdout, b1.stderr);
     assert!(b1.out_has("Wrote disc 1A"), "{}", b1.stdout);
     assert!(b1.out_has("Wrote disc 1B"), "{}", b1.stdout);
@@ -76,7 +74,7 @@ fn each_cycle_writes_one_disc_per_set_and_a_dead_twin_is_restored() {
     let blocker = s.disc_dir_named("1B");
     std::fs::remove_dir_all(&blocker).unwrap();
     std::fs::write(&blocker, b"not a directory").unwrap();
-    let b2 = scan_plan_burn(&cli);
+    let b2 = plan_burn(&cli);
     assert_eq!(b2.code, 6, "{}{}", b2.stdout, b2.stderr);
     assert!(
         b2.err_has("1A committed; 1B not written (re-run burn)"),
@@ -123,13 +121,12 @@ fn each_cycle_writes_one_disc_per_set_and_a_dead_twin_is_restored() {
 
     // Recovery: set B's next disc, 2B, carries the two catch-up copies; set A
     // has nothing to do.
-    let sc = cli.run(&["scan", "p"]);
-    assert!(
-        sc.out_has("Scanned: 0 added, 0 modified, 0 deleted, 2 unchanged."),
-        "{}",
-        sc.stdout
-    );
     let pl = cli.run(&["plan", "p"]);
+    assert!(
+        pl.out_has("Scanned: 0 added, 0 modified, 0 deleted, 2 unchanged."),
+        "{}",
+        pl.stdout
+    );
     assert!(
         pl.out_has("Plan: disc 2B (new disc, BD_R) — 2 files (0 new, 2 catch-up)"),
         "{}",

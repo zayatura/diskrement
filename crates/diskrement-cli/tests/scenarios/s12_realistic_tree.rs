@@ -13,7 +13,7 @@ fn read_only(path: &std::path::Path) {
 }
 
 #[test]
-fn a_messy_tree_scans_plans_burns_and_verifies() {
+fn a_messy_tree_plans_burns_and_verifies() {
     let Some(s) = support::scratch_or_skip("s12 realistic tree") else {
         return;
     };
@@ -33,14 +33,11 @@ fn a_messy_tree_scans_plans_burns_and_verifies() {
     assert!(mkfifo.success(), "mkfifo");
 
     cli.init(&s, "p");
-    let sc = cli.run(&["scan", "p"]);
-    assert_eq!(sc.code, 0, "{}{}", sc.stdout, sc.stderr);
-    // Regular files only: the symlink, the FIFO and the directories are not
-    // archived.
-    assert!(sc.out_has("Scanned: 4 added, 0 modified, 0 deleted, 0 unchanged."));
-
     let pl = cli.run(&["plan", "p"]);
     assert_eq!(pl.code, 0, "{}{}", pl.stdout, pl.stderr);
+    // Regular files only: the symlink, the FIFO and the directories are not
+    // archived.
+    assert!(pl.out_has("Scanned: 4 added, 0 modified, 0 deleted, 0 unchanged."));
     let bu = cli.run(&["burn", "p", "--yes"]);
     assert_eq!(bu.code, 0, "{}{}", bu.stdout, bu.stderr);
 
@@ -64,14 +61,14 @@ fn a_messy_tree_scans_plans_burns_and_verifies() {
     assert_eq!(ve.code, 0, "{}{}", ve.stdout, ve.stderr);
 
     // The next cycle fast-paths the read-only files like any other.
-    let sc2 = cli.run(&["scan", "p"]);
-    assert_eq!(sc2.code, 0, "{}{}", sc2.stdout, sc2.stderr);
-    assert!(sc2.out_has("Scanned: 0 added, 0 modified, 0 deleted, 4 unchanged."));
-    assert!(sc2.out_has("Hashed 0 of 4 files"));
+    let pl2 = cli.run(&["plan", "p"]);
+    assert_eq!(pl2.code, 0, "{}{}", pl2.stdout, pl2.stderr);
+    assert!(pl2.out_has("Scanned: 0 added, 0 modified, 0 deleted, 4 unchanged."));
+    assert!(pl2.out_has("Hashed 0 of 4 files"));
 }
 
 #[test]
-fn a_file_name_that_is_not_utf8_is_refused_at_scan_with_exit_3() {
+fn a_file_name_that_is_not_utf8_is_refused_at_plan_with_exit_3() {
     let Some(s) = support::scratch_or_skip("s12 non-utf8 name") else {
         return;
     };
@@ -81,16 +78,16 @@ fn a_file_name_that_is_not_utf8_is_refused_at_scan_with_exit_3() {
     std::fs::write(s.source.join(bad), b"bytes").unwrap();
 
     cli.init(&s, "p");
-    let sc = cli.run(&["scan", "p"]);
-    assert_eq!(sc.code, 3, "{}{}", sc.stdout, sc.stderr);
-    assert!(sc.err_has("not valid UTF-8"), "{}", sc.stderr);
+    let pl = cli.run(&["plan", "p"]);
+    assert_eq!(pl.code, 3, "{}{}", pl.stdout, pl.stderr);
+    assert!(pl.err_has("not valid UTF-8"), "{}", pl.stderr);
     assert!(
-        sc.err_has("bad\u{FFFD}name.txt"),
+        pl.err_has("bad\u{FFFD}name.txt"),
         "names the file: {}",
-        sc.stderr
+        pl.stderr
     );
     assert!(
-        !s.work.join("staged/scan.json").exists(),
-        "a refused scan stages nothing"
+        !s.work.join("staged").exists(),
+        "a refused plan stages nothing"
     );
 }

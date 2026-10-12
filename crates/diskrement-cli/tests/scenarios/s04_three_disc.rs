@@ -15,13 +15,11 @@ fn three_cycles_span_discs_one_two_and_three_with_correct_history() {
     cli.init(&s, "p");
 
     // Cycle 1 -> disc 1 [a]
-    cli.run(&["scan", "p"]);
     cli.run(&["plan", "p"]);
     cli.run(&["burn", "p", "--yes"]);
 
     // Cycle 2 -> disc 2 [b]
     support::write(&s.source, "b.bin", 800);
-    cli.run(&["scan", "p"]);
     let pl2 = cli.run(&["plan", "p"]);
     assert_eq!(pl2.code, 0);
     assert!(pl2.out_has("new disc"));
@@ -30,11 +28,9 @@ fn three_cycles_span_discs_one_two_and_three_with_correct_history() {
     // Cycle 3 -> disc 3 [a'], plus b's tombstone
     support::modify(&s.source, "a.bin", 800);
     support::delete(&s.source, "b.bin");
-    let sc3 = cli.run(&["scan", "p"]);
-    assert_eq!(sc3.code, 0);
-    assert!(sc3.out_has("Scanned: 0 added, 1 modified, 1 deleted, 0 unchanged."));
     let pl3 = cli.run(&["plan", "p"]);
     assert_eq!(pl3.code, 0);
+    assert!(pl3.out_has("Scanned: 0 added, 1 modified, 1 deleted, 0 unchanged."));
     assert!(pl3.out_has("new disc"));
     cli.run(&["burn", "p", "--yes"]);
 

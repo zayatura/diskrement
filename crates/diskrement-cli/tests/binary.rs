@@ -18,16 +18,16 @@ fn binary_runs_and_prints_its_version() {
         .stdout(contains(env!("CARGO_PKG_VERSION")));
 }
 
-mod init_scan_status {
+mod init_plan_status {
     use super::*;
 
     fn cmd() -> Command {
         Command::cargo_bin("diskrement").expect("binary builds")
     }
 
-    /// The happy path, end to end, in a temp dir: init → scan → status.
+    /// The happy path, end to end, in a temp dir: init → plan → status.
     #[test]
-    fn init_scan_status_round_trip() {
+    fn init_plan_status_round_trip() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("src/sub")).unwrap();
@@ -52,7 +52,7 @@ mod init_scan_status {
             .stdout(contains("Created project p (id 1)."));
 
         base(&catalog)
-            .args(["scan", "p"])
+            .args(["plan", "p"])
             .env("DISKREMENT_HASH_PARALLELISM", "2")
             .assert()
             .success()
@@ -71,19 +71,21 @@ mod init_scan_status {
                     .and(contains("Current files: 0      Last burn: never")),
             );
 
-        // The staged scan and the sidecar exist where the contract says.
+        // The staged scan, the staged plan and the sidecar exist where the
+        // contract says.
         assert!(work.join("staged/scan.json").is_file());
+        assert!(work.join("staged/plan.json").is_file());
         assert!(root.join("catalog/cat.p.scancache.sqlite").is_file());
 
-        // A second scan reuses the staged scan: no Hashed line.
+        // A second plan scans afresh; the sidecar answers every fingerprint.
         base(&catalog)
-            .args(["scan", "p"])
+            .args(["plan", "p"])
             .assert()
             .success()
             .stdout(contains(
                 "Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged.",
             ))
-            .stdout(contains("Hashed").not());
+            .stdout(contains("Hashed 0 of 2 files (2 fingerprints reused)."));
     }
 
     #[test]
@@ -104,22 +106,9 @@ mod init_scan_status {
     }
 
     #[test]
-    fn scan_on_an_unknown_project_also_exits_2() {
-        let dir = tempfile::TempDir::new().unwrap();
-        cmd()
-            .arg("--catalog")
-            .arg(dir.path().join("cat.sqlite"))
-            .args(["scan", "nosuch"])
-            .assert()
-            .failure()
-            .code(2)
-            .stderr(contains("project not found: nosuch"));
-    }
-
-    #[test]
     fn an_argument_parse_error_exits_1_with_clap_wording() {
         cmd()
-            .args(["scan"])
+            .args(["plan"])
             .assert()
             .failure()
             .code(1) // the contract's argument-error exit; wording may drift (§3.2)
@@ -135,9 +124,9 @@ mod plan {
     }
 
     /// A scratch project with `sizes` written into the source tree, already
-    /// init'd and scanned. Returns the temp dir, the catalog path and the work
-    /// dir.
-    fn scanned_project(
+    /// init'd; `plan` scans. Returns the temp dir, the catalog path and the
+    /// work dir.
+    fn initialized_project(
         sizes: &[(&str, usize)],
     ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let dir = tempfile::TempDir::new().unwrap();
@@ -159,18 +148,12 @@ mod plan {
             .arg(&work)
             .assert()
             .success();
-        cmd()
-            .arg("--catalog")
-            .arg(&catalog)
-            .args(["scan", "p"])
-            .assert()
-            .success();
         (dir, catalog, work)
     }
 
     #[test]
     fn plan_stages_a_plan_and_prints_the_summary() {
-        let (_dir, catalog, work) = scanned_project(&[("a.bin", 800)]);
+        let (_dir, catalog, work) = initialized_project(&[("a.bin", 800)]);
         cmd()
             .arg("--catalog")
             .arg(&catalog)
@@ -189,7 +172,7 @@ mod plan {
 
     #[test]
     fn plan_finalize_seals_the_disc() {
-        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800)]);
+        let (_dir, catalog, _work) = initialized_project(&[("a.bin", 800)]);
         cmd()
             .arg("--catalog")
             .arg(&catalog)
@@ -201,7 +184,7 @@ mod plan {
 
     #[test]
     fn plan_disc_type_overrides_the_projects_default() {
-        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800)]);
+        let (_dir, catalog, _work) = initialized_project(&[("a.bin", 800)]);
         cmd()
             .arg("--catalog")
             .arg(&catalog)
@@ -215,7 +198,7 @@ mod plan {
     /// against a 1000-byte disc: the plan spills and seals.
     #[test]
     fn the_disc_bytes_override_shrinks_capacity_and_spills() {
-        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800), ("b.bin", 800)]);
+        let (_dir, catalog, _work) = initialized_project(&[("a.bin", 800), ("b.bin", 800)]);
         cmd()
             .arg("--catalog")
             .arg(&catalog)
@@ -232,7 +215,7 @@ mod plan {
     /// override can never plan past the safety margin.
     #[test]
     fn the_disc_bytes_override_never_grows_capacity() {
-        let (_dir, catalog, _work) = scanned_project(&[("a.bin", 800), ("b.bin", 800)]);
+        let (_dir, catalog, _work) = initialized_project(&[("a.bin", 800), ("b.bin", 800)]);
         cmd()
             .arg("--catalog")
             .arg(&catalog)
@@ -245,7 +228,7 @@ mod plan {
 
     #[test]
     fn an_oversized_file_is_listed_but_the_plan_still_succeeds() {
-        let (_dir, catalog, _work) = scanned_project(&[("big.bin", 800), ("small.bin", 100)]);
+        let (_dir, catalog, _work) = initialized_project(&[("big.bin", 800), ("small.bin", 100)]);
         cmd()
             .arg("--catalog")
             .arg(&catalog)
@@ -352,7 +335,7 @@ fn base(p: &Project) -> Command {
     c
 }
 
-fn init_scan_plan(p: &Project) {
+fn init_and_plan(p: &Project) {
     base(p)
         .args(["init", "p", "--source"])
         .arg(&p.source)
@@ -360,7 +343,6 @@ fn init_scan_plan(p: &Project) {
         .arg(&p.work)
         .assert()
         .success();
-    base(p).args(["scan", "p"]).assert().success();
     base(p).args(["plan", "p"]).assert().success();
 }
 
@@ -370,7 +352,7 @@ struct Fixture {
     work: std::path::PathBuf,
 }
 
-/// init → scan → plan → burn, leaving one burned disc with two files staged.
+/// init → plan → burn, leaving one burned disc with two files staged.
 /// Every assertion that starts from a burn starts here.
 fn burned_project() -> Fixture {
     let dir = tempfile::TempDir::new().unwrap();
@@ -395,7 +377,6 @@ fn burned_project() -> Fixture {
         .arg(&work)
         .assert()
         .success();
-    run(&catalog).args(["scan", "p"]).assert().success();
     run(&catalog).args(["plan", "p"]).assert().success();
     run(&catalog)
         .args(["burn", "p", "--yes"])
@@ -425,7 +406,6 @@ mod copies {
             .args(["--copies", "2"])
             .assert()
             .success();
-        base(&p).args(["scan", "p"]).assert().success();
         base(&p).args(["plan", "p"]).assert().success();
         base(&p).args(["burn", "p", "--yes"]).assert().success();
         base(&p)
@@ -495,7 +475,7 @@ mod burn {
     #[test]
     fn burn_writes_the_disc_and_reports_it() {
         let p = project();
-        init_scan_plan(&p);
+        init_and_plan(&p);
 
         base(&p)
             .args(["burn", "p", "--yes"])
@@ -522,7 +502,7 @@ mod burn {
     #[test]
     fn burning_twice_fails_with_the_staged_state_error() {
         let p = project();
-        init_scan_plan(&p);
+        init_and_plan(&p);
         base(&p).args(["burn", "p", "--yes"]).assert().success();
 
         base(&p)
@@ -535,7 +515,7 @@ mod burn {
     #[test]
     fn burning_an_unknown_project_exits_two() {
         let p = project();
-        init_scan_plan(&p);
+        init_and_plan(&p);
         base(&p)
             .args(["burn", "nosuch", "--yes"])
             .assert()
@@ -548,7 +528,7 @@ mod burn {
     #[test]
     fn declining_the_prompt_is_a_successful_no_op() {
         let p = project();
-        init_scan_plan(&p);
+        init_and_plan(&p);
 
         base(&p)
             .args(["burn", "p"])
@@ -592,7 +572,6 @@ mod burn {
             .arg(&p.work)
             .assert()
             .success();
-        with_shrink(&p).args(["scan", "p"]).assert().success();
         with_shrink(&p).args(["plan", "p"]).assert().success();
         with_shrink(&p)
             .args(["burn", "p", "--yes"])
@@ -601,7 +580,6 @@ mod burn {
             .stdout(contains("✔ Wrote disc 1"))
             .stdout(contains("more discs of changes remain"));
 
-        with_shrink(&p).args(["scan", "p"]).assert().success();
         with_shrink(&p).args(["plan", "p"]).assert().success();
         with_shrink(&p)
             .args(["burn", "p", "--yes"])
@@ -834,12 +812,10 @@ mod mark_dead {
             .arg(&work)
             .assert()
             .success();
-        run(&f, &["scan", "p"]).success();
         run(&f, &["plan", "p"]).success();
         run(&f, &["burn", "p", "--yes"]).success();
 
         std::fs::write(f.source.join("b.bin"), vec![b'B'; 800]).unwrap();
-        run(&f, &["scan", "p"]).success();
         run(&f, &["plan", "p"]).success();
         run(&f, &["burn", "p", "--yes"]).success();
         f
@@ -946,7 +922,7 @@ mod mark_dead {
     }
 
     /// The whole point of the phase: the live files come back. After the
-    /// coaster, `scan` sees both paths as *added*, `plan` opens a fresh disc
+    /// coaster, `plan` scans both paths as *added* and opens a fresh disc
     /// 2, and the recovery burn restores them — while `history` keeps both
     /// dead copies visible as LOST.
     #[test]
@@ -954,11 +930,11 @@ mod mark_dead {
         let f = two_session_disc();
         run(&f, &["disc", "mark-dead", "p", "1", "--yes"]).success();
 
-        run(&f, &["scan", "p"]).success().stdout(contains(
-            "Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged.",
-        ));
         run(&f, &["plan", "p"])
             .success()
+            .stdout(contains(
+                "Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged.",
+            ))
             .stdout(contains("Plan: disc 2 (new disc, BD_R) — 2 files"));
         run(&f, &["burn", "p", "--yes"])
             .success()
@@ -1026,7 +1002,7 @@ mod real_backend {
             return;
         }
         let p = project();
-        init_scan_plan(&p);
+        init_and_plan(&p);
 
         Command::cargo_bin("diskrement")
             .expect("binary builds")
@@ -1060,7 +1036,7 @@ mod real_backend {
     #[test]
     fn a_real_burn_without_xorriso_says_what_to_install() {
         let p = project();
-        init_scan_plan(&p);
+        init_and_plan(&p);
 
         Command::cargo_bin("diskrement")
             .expect("binary builds")
@@ -1131,12 +1107,10 @@ mod unplaceable_catch_up {
             .args(["--copies", "2"])
             .assert()
             .success();
-        run(&p.catalog, &["scan", "p"], None).success();
         run(&p.catalog, &["plan", "p"], None).success();
         run(&p.catalog, &["burn", "p", "--yes"], None).success();
         run(&p.catalog, &["disc", "mark-dead", "p", "1B", "--yes"], None).success();
 
-        run(&p.catalog, &["scan", "p", "--force"], None).success();
         run(&p.catalog, &["plan", "p"], Some("500"))
             .success()
             .stdout(contains("Catch-up copies too large for BD_R (skipped;"))

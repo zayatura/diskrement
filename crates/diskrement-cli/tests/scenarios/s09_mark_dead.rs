@@ -20,14 +20,12 @@ fn a_dead_discs_live_content_replans_and_the_superseded_version_is_lost() {
     cli.init(&s, "p");
 
     // Cycle 1: a + b to disc 1, left open.
-    cli.run(&["scan", "p"]);
     cli.run(&["plan", "p"]);
     cli.run(&["burn", "p", "--yes"]);
 
     // Cycle 2: modify b. Session 2 tops off disc 1, superseding b@v0 in
     // place — which is what makes the loss below unrecoverable.
     support::modify(&s.source, "b.txt", 128);
-    cli.run(&["scan", "p"]);
     cli.run(&["plan", "p"]);
     cli.run(&["burn", "p", "--yes"]);
 
@@ -56,12 +54,9 @@ fn a_dead_discs_live_content_replans_and_the_superseded_version_is_lost() {
     // Recovery cycle: everything live re-plans onto a fresh disc 2. The
     // dead disc's content is gone from the burned view, so both files read
     // as added rather than unchanged.
-    let sc = cli.run(&["scan", "p"]);
-    assert_eq!(sc.code, 0);
-    assert!(sc.out_has("Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged."));
-
     let pl = cli.run(&["plan", "p"]);
     assert_eq!(pl.code, 0);
+    assert!(pl.out_has("Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged."));
     assert!(pl.out_has("new disc"));
 
     let b2 = cli.run(&["burn", "p", "--yes"]);
@@ -99,7 +94,6 @@ fn a_declined_confirmation_aborts_cleanly_and_marks_nothing() {
     support::write(&s.source, "a.txt", 128);
 
     cli.init(&s, "p");
-    cli.run(&["scan", "p"]);
     cli.run(&["plan", "p"]);
     cli.run(&["burn", "p", "--yes"]);
 
