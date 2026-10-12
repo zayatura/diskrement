@@ -355,10 +355,14 @@ impl<'a> Pipeline<'a> {
             .catalog
             .read_view(p.id)
             .map_err(|e| partial(&done, None, &[], Self::failed(e)))?;
+        let current = self
+            .catalog
+            .fingerprints(p.id)
+            .map_err(|e| partial(&done, None, &[], Self::failed(e)))?;
         Ok(BurnReport {
             discs: written,
             remaining,
-            coverage: replication::coverage(&view, p.copies),
+            coverage: replication::coverage(&view, &sizes(&current), p.copies),
             deferred_deletions,
         })
     }
@@ -589,6 +593,7 @@ impl<'a> Pipeline<'a> {
         let p = self.project(name)?;
         let discs = self.catalog.read_disc_states(p.id).map_err(Self::failed)?;
         let view = self.catalog.read_view(p.id).map_err(Self::failed)?;
+        let current = self.catalog.fingerprints(p.id).map_err(Self::failed)?;
         let burned = self
             .catalog
             .sessions_by_state(p.id, SessionState::Burned)
@@ -612,8 +617,8 @@ impl<'a> Pipeline<'a> {
         }
         Ok(StatusReport {
             open_discs,
-            coverage: replication::coverage(&view, p.copies),
-            total_current_files: view.current.len(),
+            coverage: replication::coverage(&view, &sizes(&current), p.copies),
+            total_current_files: current.len(),
             discs,
             last_burn_at,
         })
@@ -830,6 +835,14 @@ impl DiscFailure {
 /// Remove a committed disc's staging tree, best-effort. The burned disc and
 /// its commit are the record, so a failure here costs only space: it is
 /// reported with the path and never fails the burn. Absent is fine.
+/// Each current version's size, for `replication::coverage`.
+fn sizes(current: &BTreeMap<RelPath, FileFingerprint>) -> BTreeMap<RelPath, u64> {
+    current
+        .iter()
+        .map(|(path, f)| (path.clone(), f.size_bytes))
+        .collect()
+}
+
 fn discard_staging(dir: &Path) {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => {}
@@ -1346,7 +1359,7 @@ mod tests {
 mod burn_tests {
     use super::*;
     use chrono::{TimeZone as _, Utc};
-    use diskrement_core::{DiscKey, DiscType, RelPath, ScannedFile, SetCoverage};
+    use diskrement_core::{Coverage, DiscKey, DiscType, RelPath, ScannedFile, SetCoverage};
 
     use crate::burn::testkit::{ScriptedExec, ScriptedOperator, BLANK};
     use crate::burn::xorriso::burner::XorrisoBurner;
@@ -2010,7 +2023,10 @@ mod burn_tests {
         assert_eq!(count("placement"), 4);
         assert_eq!(
             report.coverage,
-            vec![SetCoverage::default(), SetCoverage::default()]
+            Coverage {
+                sets: vec![SetCoverage::default(); 2],
+                no_live_copy: SetCoverage::default(),
+            }
         );
         assert!(
             staged::read_plan(&env.work).unwrap().is_none(),
@@ -3205,9 +3221,14 @@ mod mark_dead_tests {
             Some(DiscStatus::Dead)
         );
         assert!(status.open_discs.is_empty());
+        // Both are still current versions, now with no live copy (#6).
+        assert_eq!(status.total_current_files, 2);
         assert_eq!(
-            status.total_current_files, 0,
-            "the view drops versions whose only copy is dead"
+            status.coverage.no_live_copy,
+            diskrement_core::SetCoverage {
+                missing_files: 2,
+                missing_bytes: 7,
+            }
         );
 
         // The recovery cycle plans both live files onto a brand-new disc 2.
@@ -3276,6 +3297,51 @@ mod mark_dead_tests {
             history[1].content_hash, history[2].content_hash,
             "the last two versions share a hash — LOST is about the copy, not the bytes"
         );
+    }
+
+    /// A file whose only copy dies between `plan` and `burn` is not on the
+    /// disc this burn writes, so the burn report must not call it covered.
+    #[test]
+    fn a_burn_after_the_last_copy_died_reports_the_file_as_having_no_live_copy() {
+        let mut e = env();
+        let sink = NoopSink;
+        let burner = Burner::Simulated(SimulatedBurner::new(&sink, 2));
+        let paths = |e: &Env| PipelinePaths {
+            work_dir: e.work.clone(),
+            scan_cache: e.scan_cache.clone(),
+        };
+
+        // Disc 1: a.txt, sealed, so the next cycle opens disc 2.
+        stage(&e, &[("a.txt", b"aaaa")]);
+        {
+            let p = paths(&e);
+            let mut pipeline = Pipeline::new(&mut e.catalog, p, &sink);
+            pipeline.plan("p", None, true).unwrap();
+            pipeline.burn("p", at(1), &burner).unwrap();
+        }
+
+        // Cycle 2 plans b.txt onto disc 2; a.txt is unchanged and stays on
+        // disc 1, which dies before the burn.
+        stage(&e, &[("a.txt", b"aaaa"), ("b.txt", b"bbbbbb")]);
+        {
+            let p = paths(&e);
+            let pipeline = Pipeline::new(&mut e.catalog, p, &sink);
+            pipeline.plan("p", None, false).unwrap();
+        }
+        run_mark_dead(&mut e, "1").expect("mark-dead succeeds");
+
+        let report = {
+            let p = paths(&e);
+            let mut pipeline = Pipeline::new(&mut e.catalog, p, &sink);
+            pipeline.burn("p", at(600), &burner).unwrap()
+        };
+        assert_eq!(report.discs.len(), 1, "disc 2 is written");
+        let gone = diskrement_core::SetCoverage {
+            missing_files: 1,
+            missing_bytes: 4,
+        };
+        assert_eq!(report.coverage.no_live_copy, gone);
+        assert_eq!(report.coverage.sets, vec![gone]);
     }
 }
 
@@ -3352,7 +3418,7 @@ mod copies_tests {
         let mut env = burned_twice();
         let s = pipeline(&mut env).status("p").unwrap();
         assert_eq!(s.open_discs, vec![DiscKey::new(1, 0), DiscKey::new(1, 1)]);
-        assert!(s.coverage.iter().all(|c| c.missing_files == 0));
+        assert!(s.coverage.sets.iter().all(|c| c.missing_files == 0));
     }
 
     #[test]
@@ -3365,7 +3431,31 @@ mod copies_tests {
         assert!(report.lost.is_empty() && report.reburn.is_empty());
         assert_eq!(report.degraded.len(), 1);
         let s = pipeline(&mut env).status("p").unwrap();
-        assert_eq!(s.coverage[1].missing_files, 1);
+        assert_eq!(s.coverage.sets[1].missing_files, 1);
+        assert_eq!(
+            s.coverage.no_live_copy.missing_files, 0,
+            "a.bin is still on 1A"
+        );
+    }
+
+    #[test]
+    fn marking_both_twins_dead_leaves_no_set_complete_and_still_counts_the_file() {
+        let mut env = burned_twice();
+        pipeline(&mut env)
+            .mark_dead("p", "1A".parse::<DiscArg>().unwrap(), at(2))
+            .unwrap();
+        pipeline(&mut env)
+            .mark_dead("p", "1B".parse::<DiscArg>().unwrap(), at(3))
+            .unwrap();
+        let s = pipeline(&mut env).status("p").unwrap();
+        // a.bin is 4 bytes ("aaaa").
+        let gone = diskrement_core::SetCoverage {
+            missing_files: 1,
+            missing_bytes: 4,
+        };
+        assert_eq!(s.coverage.no_live_copy, gone);
+        assert_eq!(s.coverage.sets, vec![gone, gone]);
+        assert_eq!(s.total_current_files, 1, "a.bin is still a current version");
     }
 
     #[test]

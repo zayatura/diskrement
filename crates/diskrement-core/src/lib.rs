@@ -28,7 +28,7 @@ pub use model::{
     RelPath, ScannedFile, MAX_COPIES,
 };
 pub use planner::{BurnPlan, DiscState, DiscStatus, PlannedDisc};
-pub use replication::{DiscContents, SetCoverage};
+pub use replication::{Coverage, DiscContents, SetCoverage};
 
 #[cfg(test)]
 mod tests {

@@ -49,6 +49,9 @@ fn a_dead_discs_live_content_replans_and_the_superseded_version_is_lost() {
 
     let status = cli.run(&["status", "p"]);
     assert!(status.out_has("DEAD"));
+    // a.txt and b.txt are still current, but neither has a copy left.
+    assert!(status.out_has("No live copy: 2 files"), "{}", status.stdout);
+    assert!(status.out_has("Current files: 2"), "{}", status.stdout);
 
     // Recovery cycle: everything live re-plans onto a fresh disc 2. The
     // dead disc's content is gone from the burned view, so both files read
@@ -68,6 +71,8 @@ fn a_dead_discs_live_content_replans_and_the_superseded_version_is_lost() {
         disc::data_files(&s.disc_dir(2)),
         support::set(&["a.txt", "b.txt"])
     );
+    let status = cli.run(&["status", "p"]);
+    assert!(!status.out_has("No live copy"), "{}", status.stdout);
 
     let verify = cli.run(&["verify", "p"]);
     assert_eq!(verify.code, 0);

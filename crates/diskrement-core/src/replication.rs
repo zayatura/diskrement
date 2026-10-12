@@ -5,8 +5,10 @@
 //! version should have a live copy in every series; these functions are the
 //! whole definition of "should".
 
+use std::collections::BTreeMap;
+
 use crate::diff::ChangeSet;
-use crate::model::{CatalogView, ScannedFile};
+use crate::model::{CatalogView, RelPath, ScannedFile};
 
 /// For each copy set, the unchanged files whose current version has no live
 /// copy in that set — the catch-up copies its next disc must carry. Indexed by
@@ -69,11 +71,35 @@ pub struct SetCoverage {
     pub missing_bytes: u64,
 }
 
-/// Coverage of every copy set, indexed by set.
-pub fn coverage(view: &CatalogView, copies: u32) -> Vec<SetCoverage> {
-    (0..copies)
+/// Copy coverage of the whole project.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Coverage {
+    /// Indexed by copy set: current versions with no live copy in that set,
+    /// including those with no live copy anywhere.
+    pub sets: Vec<SetCoverage>,
+    /// Current versions with no live copy in any set. The next scan re-adds
+    /// them (the REBURN path), but until then no set holds them.
+    pub no_live_copy: SetCoverage,
+}
+
+/// Coverage of every copy set over every current version.
+///
+/// `current` maps each current version's path to its size: every path whose
+/// latest change is not `DELETED`, whether or not a live copy remains
+/// (`Catalog::fingerprints`). `view` leaves out a version with no live copy,
+/// so a path in `current` but not in `view` is missing from every set and is
+/// counted in `no_live_copy`.
+pub fn coverage(view: &CatalogView, current: &BTreeMap<RelPath, u64>, copies: u32) -> Coverage {
+    let mut no_live_copy = SetCoverage::default();
+    for (path, &size) in current {
+        if !view.current.contains_key(path) {
+            no_live_copy.missing_files += 1;
+            no_live_copy.missing_bytes += size;
+        }
+    }
+    let sets = (0..copies)
         .map(|set| {
-            let mut c = SetCoverage::default();
+            let mut c = no_live_copy;
             for e in view.current.values() {
                 if !e.live_sets.contains(&set) {
                     c.missing_files += 1;
@@ -82,7 +108,8 @@ pub fn coverage(view: &CatalogView, copies: u32) -> Vec<SetCoverage> {
             }
             c
         })
-        .collect()
+        .collect();
+    Coverage { sets, no_live_copy }
 }
 
 #[cfg(test)]
@@ -134,21 +161,54 @@ mod tests {
         assert_eq!(paths(&c.copied), vec!["same"]);
     }
 
+    fn sizes(entries: &[(&str, u64)]) -> BTreeMap<RelPath, u64> {
+        entries
+            .iter()
+            .map(|(p, s)| (RelPath((*p).to_string()), *s))
+            .collect()
+    }
+
+    fn missing(files: usize, bytes: u64) -> SetCoverage {
+        SetCoverage {
+            missing_files: files,
+            missing_bytes: bytes,
+        }
+    }
+
     #[test]
     fn coverage_counts_files_and_bytes_missing_per_set() {
         let view = view_of(&[entry_in("a", "h", 10, &[0]), entry_in("b", "h", 5, &[1])]);
+        let c = coverage(&view, &sizes(&[("a", 10), ("b", 5)]), 2);
+        assert_eq!(c.sets, vec![missing(1, 5), missing(1, 10)]);
+        assert_eq!(c.no_live_copy, SetCoverage::default());
+    }
+
+    #[test]
+    fn a_current_version_with_no_live_copy_is_missing_from_every_set() {
+        // "gone" is current in the history, but every copy of it died, so
+        // the view leaves it out.
+        let view = view_of(&[entry_in("a", "h", 10, &[0, 1])]);
+        let c = coverage(&view, &sizes(&[("a", 10), ("gone", 7)]), 2);
+        assert_eq!(c.no_live_copy, missing(1, 7));
+        assert_eq!(c.sets, vec![missing(1, 7), missing(1, 7)]);
+    }
+
+    #[test]
+    fn a_single_copy_project_counts_a_file_with_no_live_copy() {
+        let c = coverage(&view_of(&[]), &sizes(&[("gone", 7)]), 1);
+        assert_eq!(c.sets, vec![missing(1, 7)]);
+        assert_eq!(c.no_live_copy, missing(1, 7));
+    }
+
+    #[test]
+    fn a_fully_covered_catalog_has_nothing_missing() {
+        let view = view_of(&[entry_in("a", "h", 10, &[0, 1])]);
         assert_eq!(
-            coverage(&view, 2),
-            vec![
-                SetCoverage {
-                    missing_files: 1,
-                    missing_bytes: 5
-                },
-                SetCoverage {
-                    missing_files: 1,
-                    missing_bytes: 10
-                },
-            ]
+            coverage(&view, &sizes(&[("a", 10)]), 2),
+            Coverage {
+                sets: vec![SetCoverage::default(); 2],
+                no_live_copy: SetCoverage::default(),
+            }
         );
     }
 
@@ -198,6 +258,52 @@ mod tests {
                 held_here.sort_unstable();
                 prop_assert!(received.iter().all(|p| held_here.binary_search(p).is_err()));
             }
+        }
+
+        /// Coverage against an independent oracle: a set misses exactly the
+        /// current files with no live copy in it, and `no_live_copy` is
+        /// exactly the current files with none in any set — which every set
+        /// therefore also misses.
+        #[test]
+        fn coverage_counts_every_current_file_missing_from_a_set(
+            files in scanned_files_strategy(),
+            held in proptest::collection::vec(0u8..8, 0..12),
+            copies in 1u32..=3,
+        ) {
+            // File i is current, live in the sets whose bit is set in
+            // held[i]; no bit (within `copies`) means no live copy, so the
+            // view leaves it out. Files beyond `held` are not current at all.
+            let live = |bits: u8, set: u32| bits & (1 << set) != 0;
+            let mut entries = Vec::new();
+            let mut current = BTreeMap::new();
+            for (f, &bits) in files.iter().zip(held.iter()) {
+                current.insert(f.rel_path.clone(), f.size_bytes);
+                let sets: Vec<u32> = (0..copies).filter(|&s| live(bits, s)).collect();
+                if !sets.is_empty() {
+                    entries.push(entry_in(f.rel_path.as_str(), f.content_hash.as_str(), f.size_bytes, &sets));
+                }
+            }
+            let c = coverage(&view_of(&entries), &current, copies);
+            let pairs: Vec<(&ScannedFile, u8)> =
+                files.iter().zip(held.iter().copied()).collect();
+
+            prop_assert_eq!(c.sets.len(), copies as usize);
+            for set in 0..copies {
+                let lacking: Vec<&ScannedFile> = pairs.iter()
+                    .filter(|(_, bits)| !live(*bits, set))
+                    .map(|(f, _)| *f)
+                    .collect();
+                prop_assert_eq!(c.sets[set as usize].missing_files, lacking.len());
+                prop_assert_eq!(
+                    c.sets[set as usize].missing_bytes,
+                    lacking.iter().map(|f| f.size_bytes).sum::<u64>()
+                );
+                prop_assert!(c.sets[set as usize].missing_files >= c.no_live_copy.missing_files);
+            }
+            let orphans = pairs.iter()
+                .filter(|(_, bits)| (0..copies).all(|s| !live(*bits, s)))
+                .count();
+            prop_assert_eq!(c.no_live_copy.missing_files, orphans);
         }
     }
 }
