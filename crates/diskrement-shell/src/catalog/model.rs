@@ -197,14 +197,21 @@ impl std::fmt::Display for VersionStatus {
     }
 }
 
-/// One version of a path in its full history, with where its bytes live.
+/// One copy of one version of a path in its full history: where its bytes
+/// live. A version kept in several copy sets has one entry per copy, all with
+/// the same `version`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileHistoryEntry {
+    /// 1-based, in the order the versions were recorded.
+    pub version: u32,
     pub content_hash: ContentHash,
     pub size_bytes: u64,
     pub disc: DiscKey,
     pub session_ordinal: u32,
     pub status: VersionStatus,
+    /// The copy's disc is dead. Only visible on a `Current` copy: any other
+    /// copy on a dead disc reads `Lost`.
+    pub on_dead_disc: bool,
 }
 
 /// A file version on a disc hidden by a later session of the SAME disc.

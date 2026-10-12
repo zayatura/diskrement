@@ -2,7 +2,9 @@
 //! is `PipelineError`'s `Display` and goes to stderr with its exit code.
 
 use diskrement_core::{set_letter, RelPath, SetCoverage};
-use diskrement_shell::catalog::model::{FileHistoryEntry, LostReport, Project, ProjectId};
+use diskrement_shell::catalog::model::{
+    FileHistoryEntry, LostReport, Project, ProjectId, VersionStatus,
+};
 use diskrement_shell::catalog::time;
 use diskrement_shell::error::PipelineError;
 use diskrement_shell::pipeline::reports::{
@@ -370,24 +372,57 @@ pub fn verify_exit(reports: &[VerifyReport]) -> u8 {
     }
 }
 
-/// `Render.history`. The path, then one `v<n>` line per version, oldest first.
+/// `Render.history`. The path, then each version, oldest first.
 ///
-/// The column spacing is contract: two spaces after `v<n>`, **three** after the
-/// session, two around the hash.
+/// At `copies = 1` a version has one copy and keeps its one-line form; the
+/// column spacing is contract: two spaces after `v<n>`, **three** after the
+/// session, two around the hash. At `copies > 1` a version prints its size and
+/// hash once, then one line per copy with its disc and status, so the copies
+/// of one version never read as separate versions (issue #7).
+///
+/// A `CURRENT` copy on a dead disc says so: the status precedence keeps it
+/// `CURRENT` (the source still has the file and the next burn re-writes it),
+/// but the copy itself is gone.
 pub fn history(rel_path: &RelPath, entries: &[FileHistoryEntry], copies: u32) -> String {
     if entries.is_empty() {
         return format!("No history for {}.", rel_path.as_str());
     }
+    let status = |e: &FileHistoryEntry| {
+        if e.on_dead_disc && e.status == VersionStatus::Current {
+            format!("{} (on a dead disc)", e.status)
+        } else {
+            e.status.to_string()
+        }
+    };
     let mut lines = vec![rel_path.as_str().to_string()];
+    if copies == 1 {
+        for e in entries {
+            lines.push(format!(
+                "  v{}  disc {} / session {}   {}  {}  {}",
+                e.version,
+                e.disc.name(copies),
+                e.session_ordinal,
+                gb(e.size_bytes),
+                e.content_hash,
+                status(e)
+            ));
+        }
+        return lines.join("\n");
+    }
     for (i, e) in entries.iter().enumerate() {
+        if i == 0 || entries[i - 1].version != e.version {
+            lines.push(format!(
+                "  v{}  {}  {}",
+                e.version,
+                gb(e.size_bytes),
+                e.content_hash
+            ));
+        }
         lines.push(format!(
-            "  v{}  disc {} / session {}   {}  {}  {}",
-            i + 1,
+            "      disc {} / session {}   {}",
             e.disc.name(copies),
             e.session_ordinal,
-            gb(e.size_bytes),
-            e.content_hash,
-            e.status
+            status(e)
         ));
     }
     lines.join("\n")
@@ -1317,12 +1352,22 @@ mod p6_render_tests {
         status: VersionStatus,
     ) -> FileHistoryEntry {
         FileHistoryEntry {
+            version: 1,
             content_hash: ContentHash(hash.to_string()),
             size_bytes: size,
             disc: diskrement_core::DiscKey::new(disc, 0),
             session_ordinal: session,
             status,
+            on_dead_disc: status == VersionStatus::Lost,
         }
+    }
+
+    /// Number single-copy entries v1, v2, … in order.
+    pub(super) fn numbered(mut entries: Vec<FileHistoryEntry>) -> Vec<FileHistoryEntry> {
+        for (i, e) in entries.iter_mut().enumerate() {
+            e.version = i as u32 + 1;
+        }
+        entries
     }
 
     #[test]
@@ -1426,11 +1471,11 @@ mod p6_render_tests {
         assert_eq!(
             history(
                 &RelPath("a.bin".to_string()),
-                &[
+                &numbered(vec![
                     entry(a1, 800, 1, 1, VersionStatus::Superseded),
                     entry(a2, 800, 3, 1, VersionStatus::Lost),
                     entry(a2, 800, 4, 1, VersionStatus::Current),
-                ],
+                ]),
                 1
             ),
             format!(
@@ -1453,6 +1498,53 @@ mod p6_render_tests {
                 1
             ),
             format!("b.bin\n\x20 v1  disc 2 / session 1   0.0 GB  {b1}  DELETED")
+        );
+    }
+
+    /// At copies > 1 each version prints once, with its copies under it, twins
+    /// together (#7). A copy on a dead disc reads LOST, or says it is on a dead
+    /// disc where the status is still CURRENT.
+    #[test]
+    fn a_two_copy_history_lists_each_versions_copies_under_it() {
+        let copy = |version, disc, set, status, dead| FileHistoryEntry {
+            version,
+            content_hash: ContentHash(if version == 1 { "h1" } else { "h2" }.to_string()),
+            size_bytes: 2_000_000_000,
+            disc: diskrement_core::DiscKey::new(disc, set),
+            session_ordinal: 1,
+            status,
+            on_dead_disc: dead,
+        };
+        assert_eq!(
+            history(
+                &RelPath("a.bin".to_string()),
+                &[
+                    copy(1, 1, 0, VersionStatus::Superseded, false),
+                    copy(1, 1, 1, VersionStatus::Lost, true),
+                    copy(2, 2, 0, VersionStatus::Current, false),
+                    copy(2, 2, 1, VersionStatus::Current, true),
+                ],
+                2
+            ),
+            "a.bin\n\
+             \x20 v1  2.0 GB  h1\n\
+             \x20     disc 1A / session 1   SUPERSEDED\n\
+             \x20     disc 1B / session 1   LOST\n\
+             \x20 v2  2.0 GB  h2\n\
+             \x20     disc 2A / session 1   CURRENT\n\
+             \x20     disc 2B / session 1   CURRENT (on a dead disc)"
+        );
+    }
+
+    /// The annotation is not a copies>1 feature: at copies=1 a current
+    /// version whose only copy died says so until it is re-burned.
+    #[test]
+    fn a_single_copy_current_version_on_a_dead_disc_says_so() {
+        let mut gone = entry("h", 800, 3, 1, VersionStatus::Current);
+        gone.on_dead_disc = true;
+        assert_eq!(
+            history(&RelPath("a.bin".to_string()), &[gone], 1),
+            "a.bin\n\x20 v1  disc 3 / session 1   0.0 GB  h  CURRENT (on a dead disc)"
         );
     }
 
@@ -1774,11 +1866,13 @@ mod snapshots {
 
     fn version(hash: &str, size: u64, d: u32, s: u32, status: VersionStatus) -> FileHistoryEntry {
         FileHistoryEntry {
+            version: 1,
             content_hash: ContentHash(hash.to_string()),
             size_bytes: size,
             disc: diskrement_core::DiscKey::new(d, 0),
             session_ordinal: s,
             status,
+            on_dead_disc: status == VersionStatus::Lost,
         }
     }
 
@@ -2048,11 +2142,11 @@ mod snapshots {
                     "three versions, one lost (run-manifest step 16)",
                     history(
                         &RelPath("a.bin".to_string()),
-                        &[
+                        &super::p6_render_tests::numbered(vec![
                             version(a1, 800, 1, 1, VersionStatus::Superseded),
                             version(a2, 800, 3, 1, VersionStatus::Lost),
                             version(a2, 800, 4, 1, VersionStatus::Current),
-                        ],
+                        ]),
                         1,
                     ),
                 ),

@@ -398,6 +398,41 @@ fn burned_project() -> Fixture {
 mod copies {
     use super::*;
 
+    /// One version, two copies, one of them on a dead disc: `history` prints
+    /// the version once with both copies under it (#7).
+    #[test]
+    fn history_lists_a_versions_copies_under_it() {
+        let p = project();
+        base(&p)
+            .args(["init", "p", "--source"])
+            .arg(&p.source)
+            .arg("--work-dir")
+            .arg(&p.work)
+            .args(["--copies", "2"])
+            .assert()
+            .success();
+        base(&p).args(["scan", "p"]).assert().success();
+        base(&p).args(["plan", "p"]).assert().success();
+        base(&p).args(["burn", "p", "--yes"]).assert().success();
+        base(&p)
+            .args(["disc", "mark-dead", "p", "1B", "--yes"])
+            .assert()
+            .success();
+
+        // `a.bin` is 800 bytes of `a`.
+        let hash = "0868513521f77faae1cf5200d9ff9603007fa04e0caef9f81183b44d46cbba86";
+        base(&p)
+            .args(["history", "p", "a.bin"])
+            .assert()
+            .success()
+            .stdout(format!(
+                "a.bin\n\
+                 \x20 v1  0.0 GB  {hash}\n\
+                 \x20     disc 1A / session 1   CURRENT\n\
+                 \x20     disc 1B / session 1   CURRENT (on a dead disc)\n"
+            ));
+    }
+
     #[test]
     fn copies_outside_one_to_twenty_six_is_a_usage_error() {
         for n in ["0", "27"] {
