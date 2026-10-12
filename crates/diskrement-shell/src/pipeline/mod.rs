@@ -618,7 +618,7 @@ impl<'a> Pipeline<'a> {
         Ok(StatusReport {
             open_discs,
             coverage: replication::coverage(&view, &sizes(&current), p.copies),
-            total_current_files: view.current.len(),
+            total_current_files: current.len(),
             discs,
             last_burn_at,
         })
@@ -3221,9 +3221,14 @@ mod mark_dead_tests {
             Some(DiscStatus::Dead)
         );
         assert!(status.open_discs.is_empty());
+        // Both are still current versions, now with no live copy (#6).
+        assert_eq!(status.total_current_files, 2);
         assert_eq!(
-            status.total_current_files, 0,
-            "the view drops versions whose only copy is dead"
+            status.coverage.no_live_copy,
+            diskrement_core::SetCoverage {
+                missing_files: 2,
+                missing_bytes: 7,
+            }
         );
 
         // The recovery cycle plans both live files onto a brand-new disc 2.
@@ -3292,6 +3297,51 @@ mod mark_dead_tests {
             history[1].content_hash, history[2].content_hash,
             "the last two versions share a hash — LOST is about the copy, not the bytes"
         );
+    }
+
+    /// A file whose only copy dies between `plan` and `burn` is not on the
+    /// disc this burn writes, so the burn report must not call it covered.
+    #[test]
+    fn a_burn_after_the_last_copy_died_reports_the_file_as_having_no_live_copy() {
+        let mut e = env();
+        let sink = NoopSink;
+        let burner = Burner::Simulated(SimulatedBurner::new(&sink, 2));
+        let paths = |e: &Env| PipelinePaths {
+            work_dir: e.work.clone(),
+            scan_cache: e.scan_cache.clone(),
+        };
+
+        // Disc 1: a.txt, sealed, so the next cycle opens disc 2.
+        stage(&e, &[("a.txt", b"aaaa")]);
+        {
+            let p = paths(&e);
+            let mut pipeline = Pipeline::new(&mut e.catalog, p, &sink);
+            pipeline.plan("p", None, true).unwrap();
+            pipeline.burn("p", at(1), &burner).unwrap();
+        }
+
+        // Cycle 2 plans b.txt onto disc 2; a.txt is unchanged and stays on
+        // disc 1, which dies before the burn.
+        stage(&e, &[("a.txt", b"aaaa"), ("b.txt", b"bbbbbb")]);
+        {
+            let p = paths(&e);
+            let pipeline = Pipeline::new(&mut e.catalog, p, &sink);
+            pipeline.plan("p", None, false).unwrap();
+        }
+        run_mark_dead(&mut e, "1").expect("mark-dead succeeds");
+
+        let report = {
+            let p = paths(&e);
+            let mut pipeline = Pipeline::new(&mut e.catalog, p, &sink);
+            pipeline.burn("p", at(600), &burner).unwrap()
+        };
+        assert_eq!(report.discs.len(), 1, "disc 2 is written");
+        let gone = diskrement_core::SetCoverage {
+            missing_files: 1,
+            missing_bytes: 4,
+        };
+        assert_eq!(report.coverage.no_live_copy, gone);
+        assert_eq!(report.coverage.sets, vec![gone]);
     }
 }
 
@@ -3386,6 +3436,26 @@ mod copies_tests {
             s.coverage.no_live_copy.missing_files, 0,
             "a.bin is still on 1A"
         );
+    }
+
+    #[test]
+    fn marking_both_twins_dead_leaves_no_set_complete_and_still_counts_the_file() {
+        let mut env = burned_twice();
+        pipeline(&mut env)
+            .mark_dead("p", "1A".parse::<DiscArg>().unwrap(), at(2))
+            .unwrap();
+        pipeline(&mut env)
+            .mark_dead("p", "1B".parse::<DiscArg>().unwrap(), at(3))
+            .unwrap();
+        let s = pipeline(&mut env).status("p").unwrap();
+        // a.bin is 4 bytes ("aaaa").
+        let gone = diskrement_core::SetCoverage {
+            missing_files: 1,
+            missing_bytes: 4,
+        };
+        assert_eq!(s.coverage.no_live_copy, gone);
+        assert_eq!(s.coverage.sets, vec![gone, gone]);
+        assert_eq!(s.total_current_files, 1, "a.bin is still a current version");
     }
 
     #[test]

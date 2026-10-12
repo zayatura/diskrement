@@ -24,6 +24,7 @@ pub struct ScanReport {
 pub struct StatusReport {
     pub discs: Vec<DiscState>,
     pub open_discs: Vec<DiscKey>,
+    /// Every current version, including those with no live copy left.
     pub total_current_files: usize,
     pub last_burn_at: Option<DateTime<Utc>>,
     pub coverage: Coverage,
