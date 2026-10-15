@@ -105,6 +105,14 @@ pub enum PipelineError {
         work_dir: std::path::PathBuf,
         detail: String,
     },
+    /// Two roots that would archive the same files: the same directory, or
+    /// one inside the other, after resolving symlinks. The paths are as the
+    /// operator gave them. An environment problem, so exit 3.
+    #[error("roots {a} and {b} overlap: each file must belong to exactly one root")]
+    OverlappingRoots {
+        a: std::path::PathBuf,
+        b: std::path::PathBuf,
+    },
     /// Source file names that cannot be recorded as text. An environment
     /// problem the operator fixes by renaming, so exit 3.
     #[error(
@@ -248,6 +256,7 @@ impl PipelineError {
             | PipelineError::StalePlan(_) => 2,
             PipelineError::NotSameFilesystem { .. }
             | PipelineError::NotCowCapable { .. }
+            | PipelineError::OverlappingRoots { .. }
             | PipelineError::NonUtf8FileNames(_)
             | PipelineError::OversizedFiles(_) => 3,
             // An aborted burn is a successful run that wrote nothing; every
@@ -287,6 +296,14 @@ mod tests {
             .exit_code(),
             3
         );
+        assert_eq!(
+            PipelineError::OverlappingRoots {
+                a: "/lib".into(),
+                b: "/lib/u1".into()
+            }
+            .exit_code(),
+            3
+        );
         assert_eq!(PipelineError::Failed("x".into()).exit_code(), 5);
     }
 
@@ -311,6 +328,14 @@ mod tests {
             }
             .to_string(),
             "work dir is not CoW-capable: /w [clone said no]"
+        );
+        assert_eq!(
+            PipelineError::OverlappingRoots {
+                a: "/lib".into(),
+                b: "/lib/u1".into()
+            }
+            .to_string(),
+            "roots /lib and /lib/u1 overlap: each file must belong to exactly one root"
         );
         assert_eq!(
             PipelineError::Failed("project already exists: p".into()).to_string(),

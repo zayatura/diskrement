@@ -5,6 +5,9 @@ pub mod planning;
 pub mod reports;
 pub mod staged;
 
+#[cfg(test)]
+mod roots_tests;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -13,6 +16,7 @@ use chrono::{DateTime, Utc};
 use diskrement_core::{
     diff, manifest, replication, Capacity, CatalogView, Coverage, DiscArg, DiscContents, DiscKey,
     DiscState, DiscStatus, DiscType, FillOrder, PlannedDisc, RelPath, ScannedFile, SessionManifest,
+    Sources,
 };
 
 use crate::burn::verifier::{DiscExpectation, Verifier};
@@ -115,6 +119,9 @@ impl<'a> Pipeline<'a> {
                     work,
                 });
             }
+        }
+        if let Some((a, b)) = overlapping_roots(&pi.sources).map_err(Self::failed)? {
+            return Err(PipelineError::OverlappingRoots { a, b });
         }
         snapshot::check_cow_capable(&work).map_err(|e| PipelineError::NotCowCapable {
             work_dir: work,
@@ -965,12 +972,37 @@ fn resolve_disc(p: &Project, arg: DiscArg, states: &[DiscState]) -> Result<DiscK
 }
 
 /// `getFileStore` equality via `st_dev` (`PipelineLive.sameFilesystem`): both
-/// paths must exist and carry the same device id.
+/// paths must exist and carry the same device id. An error names the path,
+/// so a missing root says which one.
 fn same_filesystem(source: &Path, work: &Path) -> std::io::Result<(u64, u64)> {
-    Ok((
-        std::fs::metadata(source)?.dev(),
-        std::fs::metadata(work)?.dev(),
-    ))
+    let dev = |p: &Path| {
+        std::fs::metadata(p)
+            .map(|m| m.dev())
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))
+    };
+    Ok((dev(source)?, dev(work)?))
+}
+
+/// Two roots that would archive the same files: the same directory, or one
+/// inside the other. Compared after resolving symlinks, component by
+/// component (`/lib/u1` does not hold `/lib/u10`), and returned as given. A
+/// single source has nothing to overlap.
+fn overlapping_roots(sources: &Sources) -> std::io::Result<Option<(PathBuf, PathBuf)>> {
+    let Sources::Rooted(roots) = sources else {
+        return Ok(None);
+    };
+    let canonical = roots
+        .iter()
+        .map(|(_, given)| given.canonicalize().map(|c| (c, given)))
+        .collect::<std::io::Result<Vec<(PathBuf, &PathBuf)>>>()?;
+    for (i, (a, a_given)) in canonical.iter().enumerate() {
+        for (b, b_given) in &canonical[i + 1..] {
+            if a.starts_with(b) || b.starts_with(a) {
+                return Ok(Some(((*a_given).clone(), (*b_given).clone())));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The catalog write for one disc: its files split by commit-time
