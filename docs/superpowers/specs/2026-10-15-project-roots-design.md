@@ -231,7 +231,7 @@ Exit codes stay within the contract in `error.rs`.
 | `--source` with `--root`, neither given, `--root` value without `=` | clap | 1 |
 | Bad name syntax (§3.2) | clap `value_parser` on `--root` | 1 |
 | Duplicate names; a name a component prefix of another | CLI after parsing, a clap `ValueValidation` error, before the catalog opens | 1 |
-| Missing root at `init` | `same_filesystem` → `Failed`, as `--source` today | 5 |
+| Missing root at `init` | `same_filesystem` → `Failed`, as `--source` today, now naming the path | 5 |
 | Root on a different filesystem from the work dir | `NotSameFilesystem { src: <that root>, work }` | 3 |
 | Two roots with the same canonical path, or nested | new `PipelineError::OverlappingRoots { a, b }` | 3 |
 | Missing root at `plan` | `SourceMissing(path)` → `Failed`, as today | 5 |
@@ -242,8 +242,11 @@ environment errors and are checked in `Pipeline::init`.
 
 ## 7. Output and docs
 
-- `init` prints a rooted project's roots as `name → path` lines in place of the
-  single source line.
+- `status` is where a project's source is printed (`init` only says
+  `Created project …`). For a rooted project, its header says `N roots` (`1 root`)
+  in place of `source PATH`, and a `Roots:` block of `  name → path` lines follows,
+  in name order, before `Discs:`. A plain project's `status` is unchanged, byte for
+  byte.
 - `--help` documents `--root NAME=PATH` and says it is exclusive with `--source`.
 - CLAUDE.md gains:
   - an invariant: a rooted project's snapshot is composed from its roots under their
@@ -278,7 +281,7 @@ environment errors and are checked in `Pipeline::init`.
   files equal 1A's. A missing root at `plan` names its path.
 
 **cli**
-- `binary.rs`: every row of §6's table, and `init` output listing the roots.
+- `binary.rs`: every row of §6's table, and `status` output listing the roots.
 - `tests/scenarios/`: one end-to-end scenario for a rooted project, gated on a CoW
   `TMPDIR` like the others.
 
