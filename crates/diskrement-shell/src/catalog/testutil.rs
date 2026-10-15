@@ -6,8 +6,10 @@
 //! Hold the returned `TempDir` for as long as the catalog — dropping it deletes
 //! the directory.
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, TimeZone, Utc};
-use diskrement_core::{ContentHash, DiscStatus, DiscType, RelPath};
+use diskrement_core::{ContentHash, DiscStatus, DiscType, RelPath, Sources};
 use tempfile::TempDir;
 
 use super::model::{CatalogUpdate, DiscWrite, FileWrite, ProjectId, ProjectInit, SessionWrite};
@@ -28,7 +30,7 @@ pub(crate) fn ts() -> DateTime<Utc> {
 pub(crate) fn project_init(name: &str) -> ProjectInit {
     ProjectInit {
         name: name.to_string(),
-        source_root: "/src".to_string(),
+        sources: Sources::Single(PathBuf::from("/src")),
         work_dir: "/work".to_string(),
         default_disc_type: DiscType::BdR,
         margin_percent: 2.0,

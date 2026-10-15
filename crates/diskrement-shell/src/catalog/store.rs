@@ -5,7 +5,7 @@
 //! makes "this operation mutates the catalog" a fact the compiler knows rather
 //! than a convention. Readers take `&self` and live in `read.rs`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -18,12 +18,20 @@ use super::model::{
 use super::time;
 use super::Catalog;
 use crate::error::{is_unique_violation, CatalogError};
-use diskrement_core::{ContentHash, DiscKey, DiscStatus, DiscType, ManifestChangeKind, RelPath};
+use diskrement_core::{
+    ContentHash, DiscKey, DiscStatus, DiscType, ManifestChangeKind, RelPath, RootName, Sources,
+};
 
 impl Catalog {
-    /// Insert a project row, returning its new id.
+    /// Insert a project row and, for a rooted project, its roots, in one
+    /// transaction, returning the new id. A rooted project stores `''` in
+    /// `source_root`.
     pub fn create_project(&mut self, p: &ProjectInit) -> Result<ProjectId, CatalogError> {
         let name = p.name.clone();
+        let source_root = match &p.sources {
+            Sources::Single(path) => path.to_string_lossy().into_owned(),
+            Sources::Rooted(_) => String::new(),
+        };
         self.tx(|tx| {
             let inserted = tx.execute(
                 "insert into project
@@ -32,7 +40,7 @@ impl Catalog {
                  values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     p.name,
-                    p.source_root,
+                    source_root,
                     p.work_dir,
                     p.default_disc_type.as_str(),
                     p.margin_percent,
@@ -40,15 +48,28 @@ impl Catalog {
                     time::format(&p.created_at),
                 ],
             );
-            match inserted {
-                Ok(_) => Ok(ProjectId(tx.last_insert_rowid())),
-                Err(e) if is_unique_violation(&e) => Err(CatalogError::DuplicateProject(name)),
-                Err(e) => Err(CatalogError::from_sqlite(e)),
+            let id = match inserted {
+                Ok(_) => ProjectId(tx.last_insert_rowid()),
+                Err(e) if is_unique_violation(&e) => {
+                    return Err(CatalogError::DuplicateProject(name))
+                }
+                Err(e) => return Err(CatalogError::from_sqlite(e)),
+            };
+            if let Sources::Rooted(roots) = &p.sources {
+                for (root, path) in roots {
+                    tx.execute(
+                        "insert into project_root (project_id, name, path)
+                         values (?1, ?2, ?3)",
+                        params![id.0, root.as_str(), path.to_string_lossy().into_owned()],
+                    )
+                    .map_err(CatalogError::from_sqlite)?;
+                }
             }
+            Ok(id)
         })
     }
 
-    /// Look a project up by its unique name.
+    /// Look a project up by its unique name, with its roots if it has any.
     pub fn find_project(&self, name: &str) -> Result<Option<Project>, CatalogError> {
         let row = self
             .conn
@@ -72,23 +93,49 @@ impl Catalog {
             )
             .optional()
             .map_err(CatalogError::from_sqlite)?;
+        let Some((id, name, source_root, work_dir, disc_type, margin, copies, created_at)) = row
+        else {
+            return Ok(None);
+        };
 
-        row.map(
-            |(id, name, source_root, work_dir, disc_type, margin, copies, created_at)| {
-                Ok(Project {
-                    id: ProjectId(id),
-                    name,
-                    source_root,
-                    work_dir,
-                    default_disc_type: DiscType::from_str(&disc_type)
-                        .map_err(CatalogError::ConstraintViolation)?,
-                    margin_percent: margin,
-                    copies: copies as u32,
-                    created_at: time::parse(&created_at)?,
-                })
-            },
-        )
-        .transpose()
+        let roots = self.project_roots(id)?;
+        let sources = if roots.is_empty() {
+            Sources::Single(PathBuf::from(source_root))
+        } else {
+            Sources::rooted(roots).map_err(|e| CatalogError::ConstraintViolation(e.to_string()))?
+        };
+        Ok(Some(Project {
+            id: ProjectId(id),
+            name,
+            sources,
+            work_dir,
+            default_disc_type: DiscType::from_str(&disc_type)
+                .map_err(CatalogError::ConstraintViolation)?,
+            margin_percent: margin,
+            copies: copies as u32,
+            created_at: time::parse(&created_at)?,
+        }))
+    }
+
+    /// A project's `project_root` rows; empty for a single-source project.
+    fn project_roots(&self, project: i64) -> Result<Vec<(RootName, PathBuf)>, CatalogError> {
+        let mut stmt = self
+            .conn
+            .prepare("select name, path from project_root where project_id = ?1")
+            .map_err(CatalogError::from_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(CatalogError::from_sqlite)?;
+        rows.map(|row| {
+            let (name, path) = row.map_err(CatalogError::from_sqlite)?;
+            let name = name
+                .parse::<RootName>()
+                .map_err(CatalogError::ConstraintViolation)?;
+            Ok((name, PathBuf::from(path)))
+        })
+        .collect()
     }
 
     /// Persist one successful burn: every disc touched, its single new session,
@@ -637,9 +684,11 @@ fn disc_versions(
 
 #[cfg(test)]
 mod tests {
-    use diskrement_core::{DiscStatus, DiscType};
+    use std::path::PathBuf;
 
-    use crate::catalog::model::{CatalogUpdate, DiscWrite, SessionWrite};
+    use diskrement_core::{DiscStatus, DiscType, Sources};
+
+    use crate::catalog::model::{CatalogUpdate, DiscWrite, ProjectInit, SessionWrite};
     use crate::catalog::testutil::{count, fw, project_init, temp_catalog, ts, update};
     use crate::error::CatalogError;
     #[test]
@@ -653,7 +702,7 @@ mod tests {
         assert_eq!(project.id, id);
         assert_eq!(project.name, "photos");
         assert_eq!(project.default_disc_type, DiscType::BdR);
-        assert_eq!(project.source_root, "/src");
+        assert_eq!(project.sources, Sources::Single(PathBuf::from("/src")));
         assert_eq!(project.work_dir, "/work");
         assert_eq!(project.margin_percent, 2.0);
         assert_eq!(project.copies, 1);
@@ -679,6 +728,65 @@ mod tests {
     fn find_project_returns_none_for_an_unknown_name() {
         let (_dir, cat) = temp_catalog();
         assert!(cat.find_project("nope").expect("query succeeds").is_none());
+    }
+
+    #[test]
+    fn a_rooted_project_round_trips_its_roots_and_leaves_source_root_empty() {
+        let (_dir, mut cat) = temp_catalog();
+        let sources = Sources::rooted(vec![
+            ("others/cecil".parse().unwrap(), PathBuf::from("/lib/u3")),
+            ("family/anna".parse().unwrap(), PathBuf::from("/lib/u1")),
+        ])
+        .unwrap();
+        cat.create_project(&ProjectInit {
+            sources: sources.clone(),
+            ..project_init("fam")
+        })
+        .expect("project is created");
+        // A second rooted project: its roots must not leak into the first's.
+        cat.create_project(&ProjectInit {
+            sources: Sources::rooted(vec![("zed".parse().unwrap(), PathBuf::from("/lib/z"))])
+                .unwrap(),
+            ..project_init("other")
+        })
+        .expect("second project is created");
+
+        let project = cat
+            .find_project("fam")
+            .expect("query succeeds")
+            .expect("the project exists");
+        assert_eq!(project.sources, sources);
+        let source_root: String = cat
+            .raw_connection_for_tests()
+            .query_row(
+                "select source_root from project where name = 'fam'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_root, "");
+        assert_eq!(count(&cat, "project_root"), 3);
+    }
+
+    #[test]
+    fn a_refused_project_writes_none_of_its_roots() {
+        let (_dir, mut cat) = temp_catalog();
+        cat.create_project(&project_init("fam"))
+            .expect("first create");
+        let rooted = ProjectInit {
+            sources: Sources::rooted(vec![("anna".parse().unwrap(), PathBuf::from("/lib/u1"))])
+                .unwrap(),
+            ..project_init("fam")
+        };
+        assert!(matches!(
+            cat.create_project(&rooted),
+            Err(CatalogError::DuplicateProject(_))
+        ));
+        assert_eq!(count(&cat, "project_root"), 0);
+        assert_eq!(
+            cat.find_project("fam").unwrap().unwrap().sources,
+            Sources::Single(PathBuf::from("/src"))
+        );
     }
 
     #[test]

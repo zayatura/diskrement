@@ -9,7 +9,9 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use diskrement_core::{ContentHash, DiscKey, DiscState, DiscStatus, ManifestChangeKind, RelPath};
+use diskrement_core::{
+    ContentHash, DiscKey, DiscState, DiscStatus, ManifestChangeKind, RelPath, Sources,
+};
 use diskrement_shell::catalog::model::{
     ArchivePointer, FileHistoryEntry, SessionState, VersionStatus,
 };
@@ -82,6 +84,26 @@ fn the_initial_catalog_holds_a_project_and_no_discs() {
         .sessions_by_state(project.id, SessionState::Burned)
         .expect("sessions")
         .is_empty());
+}
+
+/// A catalog written before roots existed reads back as a single source:
+/// V4 adds an empty `project_root` and changes no project row.
+#[test]
+fn a_v2_catalog_reads_back_as_a_single_source() {
+    let (_dir, cat) = open("catalog/01-after-init.sqlite");
+    let project = cat
+        .find_project("p")
+        .expect("query")
+        .expect("project exists");
+    assert_eq!(
+        project.sources,
+        Sources::Single("/tmp/diskrement-harvest.RENbbg/source".into())
+    );
+    let roots: i64 = cat
+        .raw_connection_for_tests()
+        .query_row("select count(*) from project_root", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(roots, 0);
 }
 
 #[test]
@@ -363,7 +385,7 @@ fn a_v2_catalog_migrates_to_v3_keeping_every_disc_id() {
     let version: i64 = conn
         .query_row("select version from schema_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4, "V3, then V4 on top");
     let dangling: i64 = conn
         .query_row("select count(*) from pragma_foreign_key_check", [], |r| {
             r.get(0)

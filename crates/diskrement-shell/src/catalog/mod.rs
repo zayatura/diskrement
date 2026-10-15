@@ -76,13 +76,13 @@ mod tests {
     use super::testutil::temp_catalog;
 
     #[test]
-    fn a_fresh_database_migrates_to_version_3_with_every_domain_table() {
+    fn a_fresh_database_migrates_to_version_4_with_every_domain_table() {
         let (_dir, cat) = temp_catalog();
         let version: i64 = cat
             .conn
             .query_row("select max(version) from schema_version", [], |r| r.get(0))
             .expect("schema_version is populated");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         let mut stmt = cat
             .conn
@@ -102,6 +102,7 @@ mod tests {
             "lost_version",
             "placement",
             "project",
+            "project_root",
             "session",
         ] {
             assert!(tables.contains(&expected.to_string()), "missing {expected}");
@@ -124,7 +125,31 @@ mod tests {
             .expect("versions are integers")
             .map(|r| r.expect("readable row"))
             .collect();
-        assert_eq!(versions, vec![3], "the version table must hold one row");
+        assert_eq!(versions, vec![4], "the version table must hold one row");
+    }
+
+    #[test]
+    fn a_v3_catalog_gains_project_root_and_keeps_its_projects() {
+        let (dir, mut cat) = temp_catalog();
+        cat.create_project(&super::testutil::project_init("p"))
+            .expect("project");
+        cat.conn
+            .execute_batch("drop table project_root; update schema_version set version = 3;")
+            .expect("back to V3");
+        drop(cat);
+
+        let cat = super::Catalog::open(&dir.path().join("catalog.sqlite")).expect("V3 → V4");
+        let version: i64 = cat
+            .conn
+            .query_row("select version from schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        let roots: i64 = cat
+            .conn
+            .query_row("select count(*) from project_root", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(roots, 0);
+        assert!(cat.find_project("p").unwrap().is_some());
     }
 
     #[test]

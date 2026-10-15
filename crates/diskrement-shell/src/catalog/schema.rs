@@ -1,7 +1,7 @@
 //! The catalog schema, transcribed from the Scala `Migrations` object.
 //!
 //! V1 and V2 are the schema the Scala build wrote, transcribed verbatim. V3
-//! adds copy sets (multiple-copies spec §5.2). The two `check`
+//! adds copy sets (multiple-copies spec §5.2), V4 named source roots. The two `check`
 //! constraints are load-bearing, not decoration: `status in ('OPEN','FINALIZED')`
 //! is what makes the derived-`DEAD` invariant enforceable by the database, and
 //! `kind in ('MARKED_DEAD')` is what keeps `disc_event` a closed vocabulary.
@@ -120,7 +120,19 @@ const V3: &[&str] = &[
     "alter table disc_v3 rename to disc",
 ];
 
-const MIGRATIONS: &[(i64, &[&str])] = &[(1, V1), (2, V2), (3, V3)];
+// Named source roots (project-roots spec §3.4). Written once, by `init`, in
+// the project row's transaction, and never updated or deleted. A project with
+// no rows here has a single source in `project.source_root`; a rooted project
+// stores '' there, because relaxing that column's `not null` would mean
+// rebuilding `project`, which every other table references.
+const V4: &[&str] = &["create table if not exists project_root (
+       project_id integer not null references project(id),
+       name       text    not null,
+       path       text    not null,
+       unique (project_id, name)
+     )"];
+
+const MIGRATIONS: &[(i64, &[&str])] = &[(1, V1), (2, V2), (3, V3), (4, V4)];
 
 /// Apply every migration whose version exceeds the stored one, in order.
 pub(crate) fn run(conn: &mut Connection) -> Result<(), CatalogError> {

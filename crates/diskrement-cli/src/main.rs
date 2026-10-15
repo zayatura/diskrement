@@ -15,6 +15,7 @@ use std::process::ExitCode;
 
 use args::Command;
 use clap::Parser as _;
+use diskrement_core::Sources;
 use diskrement_shell::burn::cmd::{self, CmdOutput, Exec};
 use diskrement_shell::burn::verifier::{DiscVerifier, StagingVerifier, Verifier};
 use diskrement_shell::burn::xorriso::burner::XorrisoBurner;
@@ -122,7 +123,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             );
             let pi = ProjectInit {
                 name: name.clone(),
-                source_root: source.display().to_string(),
+                sources: Sources::Single(source),
                 work_dir: work_dir.display().to_string(),
                 default_disc_type: disc_type,
                 margin_percent: margin,

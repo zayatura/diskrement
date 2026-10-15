@@ -13,7 +13,6 @@ use chrono::{DateTime, Utc};
 use diskrement_core::{
     diff, manifest, replication, Capacity, CatalogView, Coverage, DiscArg, DiscContents, DiscKey,
     DiscState, DiscStatus, DiscType, FillOrder, PlannedDisc, RelPath, ScannedFile, SessionManifest,
-    Sources,
 };
 
 use crate::burn::verifier::{DiscExpectation, Verifier};
@@ -100,16 +99,22 @@ impl<'a> Pipeline<'a> {
             .ok_or_else(|| PipelineError::ProjectNotFound(name.to_string()))
     }
 
-    /// `init`: same-filesystem check, CoW probe, then the one project row. No
-    /// snapshot, no scan, no other rows (`PipelineLive.init`).
+    /// `init`: same-filesystem check for every root, CoW probe, then the
+    /// project row and its roots. No snapshot, no scan, no other rows
+    /// (`PipelineLive.init`).
     pub fn init(&mut self, pi: &ProjectInit) -> Result<ProjectId, PipelineError> {
-        let src = PathBuf::from(&pi.source_root);
         let work = PathBuf::from(&pi.work_dir);
-        // `getFileStore` equality via st_dev; a missing source surfaces here
-        // as Failed (exit 5), exactly like the Scala getFileStore throw.
-        let (sdev, wdev) = same_filesystem(&src, &work).map_err(Self::failed)?;
-        if sdev != wdev {
-            return Err(PipelineError::NotSameFilesystem { src, work });
+        for src in pi.sources.paths() {
+            // `getFileStore` equality via st_dev; a missing source surfaces
+            // here as Failed (exit 5), exactly like the Scala getFileStore
+            // throw.
+            let (sdev, wdev) = same_filesystem(src, &work).map_err(Self::failed)?;
+            if sdev != wdev {
+                return Err(PipelineError::NotSameFilesystem {
+                    src: src.to_path_buf(),
+                    work,
+                });
+            }
         }
         snapshot::check_cow_capable(&work).map_err(|e| PipelineError::NotCowCapable {
             work_dir: work,
@@ -123,13 +128,10 @@ impl<'a> Pipeline<'a> {
         p: &Project,
         rehash: bool,
     ) -> Result<(Vec<ScannedFile>, usize), PipelineError> {
-        // Until `Project` carries its `Sources` (the next task), a project is
-        // its one `source_root`.
-        let sources = Sources::Single(PathBuf::from(&p.source_root));
         // Snapshot failures (missing source, non-CoW, I/O) are Failed here —
         // exit 5 — because only `init` produces the typed 3s (`PipelineLive`
         // maps SnapshotError to Failed in freshScan).
-        let handle = snapshot::create(&sources, &self.paths.work_dir).map_err(Self::failed)?;
+        let handle = snapshot::create(&p.sources, &self.paths.work_dir).map_err(Self::failed)?;
         let prior: BTreeMap<RelPath, FileFingerprint> =
             self.catalog.fingerprints(p.id).map_err(Self::failed)?;
         // The cache never fails a scan; a read failure falls back to empty.
@@ -260,7 +262,7 @@ impl<'a> Pipeline<'a> {
             cap,
             finalize,
             p.copies,
-            &FillOrder::Path,
+            &FillOrder::from(&p.sources),
             |disc| next.get(&disc).copied().unwrap_or(1),
         );
         staged::write_plan(&self.paths.work_dir, &report).map_err(Self::failed)?;
@@ -1059,7 +1061,7 @@ mod tests {
     fn project_init(env: &Env) -> ProjectInit {
         ProjectInit {
             name: "p".into(),
-            source_root: env.src.display().to_string(),
+            sources: diskrement_core::Sources::Single(env.src.clone()),
             work_dir: env.work.display().to_string(),
             default_disc_type: DiscType::BdR,
             margin_percent: 2.0,
@@ -1528,7 +1530,7 @@ mod burn_tests {
         catalog
             .create_project(&ProjectInit {
                 name: "p".to_string(),
-                source_root: source.display().to_string(),
+                sources: diskrement_core::Sources::Single(source.clone()),
                 work_dir: work.display().to_string(),
                 default_disc_type: DiscType::BdR,
                 margin_percent: 2.0,
@@ -2868,7 +2870,7 @@ mod verify_tests {
         catalog
             .create_project(&ProjectInit {
                 name: "p".to_string(),
-                source_root: source.display().to_string(),
+                sources: diskrement_core::Sources::Single(source.clone()),
                 work_dir: work.display().to_string(),
                 default_disc_type: DiscType::BdR,
                 margin_percent: 2.0,
@@ -3239,7 +3241,7 @@ mod mark_dead_tests {
         catalog
             .create_project(&ProjectInit {
                 name: "p".to_string(),
-                source_root: source.display().to_string(),
+                sources: diskrement_core::Sources::Single(source.clone()),
                 work_dir: work.display().to_string(),
                 default_disc_type: DiscType::BdR,
                 margin_percent: 2.0,
@@ -3662,7 +3664,7 @@ mod copies_tests {
         };
         let pi = ProjectInit {
             name: "p".into(),
-            source_root: env.source.display().to_string(),
+            sources: diskrement_core::Sources::Single(env.source.clone()),
             work_dir: env.work.display().to_string(),
             default_disc_type: DiscType::BdR,
             margin_percent: 2.0,
@@ -4049,7 +4051,7 @@ mod copies_tests {
             // disc per set.
             let init = ProjectInit {
                 name: "p".into(),
-                source_root: env.source.display().to_string(),
+                sources: diskrement_core::Sources::Single(env.source.clone()),
                 work_dir: env.work.display().to_string(),
                 default_disc_type: DiscType::BdR,
                 margin_percent: 99.999,
