@@ -90,9 +90,11 @@ becomes that root's directory on every disc. `RootName` is a validated newtype i
 
 - it is empty, or any component is empty (a leading, trailing or doubled `/`);
 - any component is `.` or `..`;
-- it contains NUL or `=`.
+- any component is longer than 255 bytes (Linux `NAME_MAX`, also the Rock Ridge limit);
+- it contains a control character (NUL, newline, tab, escape, ...) or `=`.
 
-Anything else is accepted, including spaces and non-ASCII characters.
+Anything else is accepted, including spaces, backslashes, a leading `-` and
+non-ASCII characters.
 
 Across the set of roots, `init` also refuses:
 
@@ -257,8 +259,8 @@ environment errors and are checked in `Pipeline::init`.
 ## 8. Tests
 
 **core**
-- `RootName`: every refusal in §3.2, and acceptance of spaces, non-ASCII and
-  multi-component names.
+- `RootName`: every refusal in §3.2, and acceptance of spaces, non-ASCII,
+  backslashes, a leading `-`, a 255-byte component and multi-component names.
 - `FillOrder::key`: four roots interleave by date; roots at different depths
   (`family/anna` with `cecil`); a tie on the path below the root falls back to root
   name; a path under no root; `family` does not match `familyx/…`.

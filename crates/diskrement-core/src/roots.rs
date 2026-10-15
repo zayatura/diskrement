@@ -12,12 +12,17 @@ use std::path::{Path, PathBuf};
 
 use crate::model::RelPath;
 
+/// The longest a single path component may be, in bytes (Linux `NAME_MAX`, also
+/// the Rock Ridge limit).
+const NAME_MAX: usize = 255;
+
 /// A root's name: the relative directory its files sit under on every disc.
 ///
 /// One or more `/`-separated components. No component may be empty, `.` or
-/// `..`, and the name may not contain NUL or `=` (`=` separates the name from
-/// the path in `--root NAME=PATH`). Anything else is allowed, spaces and
-/// non-ASCII included.
+/// `..`, no component may exceed 255 bytes, and the name may not contain a
+/// control character (NUL included) or `=` (`=` separates the name from the
+/// path in `--root NAME=PATH`). Anything else is allowed, spaces, backslashes,
+/// a leading `-` and non-ASCII included.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RootName(String);
 
@@ -44,8 +49,8 @@ impl std::str::FromStr for RootName {
         if s.is_empty() {
             return Err("a root name cannot be empty".to_string());
         }
-        if s.contains('\0') {
-            return Err(format!("root name {s:?} contains NUL"));
+        if s.chars().any(char::is_control) {
+            return Err(format!("root name {s:?} contains a control character"));
         }
         if s.contains('=') {
             return Err(format!(
@@ -62,6 +67,11 @@ impl std::str::FromStr for RootName {
                 }
                 "." | ".." => return Err(format!("root name {s:?} has a {component:?} component")),
                 _ => {}
+            }
+            if component.len() > NAME_MAX {
+                return Err(format!(
+                    "root name {s:?} has a component longer than {NAME_MAX} bytes"
+                ));
             }
         }
         Ok(RootName(s.to_string()))
@@ -136,10 +146,14 @@ impl std::fmt::Display for RootsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RootsError::Empty => f.write_str("a project needs at least one root"),
-            RootsError::Duplicate(name) => write!(f, "root name {name} is given twice"),
+            RootsError::Duplicate(name) => {
+                write!(f, "root name {:?} is given twice", name.as_str())
+            }
             RootsError::Nested { outer, inner } => write!(
                 f,
-                "root {inner} would sit inside root {outer}; root names must not nest"
+                "root {:?} would sit inside root {:?}; root names must not nest",
+                inner.as_str(),
+                outer.as_str()
             ),
         }
     }
@@ -173,10 +187,12 @@ impl FillOrder {
     /// `Path`, and for a path under no root (which a rooted snapshot cannot
     /// produce), it is `(path, "")`.
     ///
-    /// No two paths share a key: no name holds another, so a path has at most
-    /// one root, and the key spells the path back out. The order is therefore
-    /// total, and a plan still depends only on the set of files, not on the
-    /// order they arrive in.
+    /// No two paths share a key. A matched key `(rest, name)` spells back to
+    /// `name/rest`, and an unmatched key has `""` as its second element, which
+    /// a matched key never has. Names that do not nest (guaranteed by
+    /// [`Sources::rooted`]) are what make a path's root well-defined. The
+    /// order is therefore total, and a plan still depends only on the set of
+    /// files, not on the order they arrive in.
     pub fn key<'a>(&self, path: &'a RelPath) -> (&'a str, &'a str) {
         let p = path.as_str();
         match self {
@@ -206,7 +222,16 @@ mod tests {
 
     #[test]
     fn a_root_name_may_have_several_components_spaces_and_accents() {
-        for ok in ["anna", "family/anna", "Ilona Dóra", "a.b/c-d_e"] {
+        let longest = "x".repeat(255);
+        for ok in [
+            "anna",
+            "family/anna",
+            "Ilona Dóra",
+            "a.b/c-d_e",
+            r"a\b",
+            "-x",
+            &longest,
+        ] {
             assert_eq!(ok.parse::<RootName>().unwrap().as_str(), ok);
         }
     }
@@ -223,7 +248,12 @@ mod tests {
             "family/../x",
             "./x",
             "a\0b",
+            "a\nb",
+            "a\tb",
+            "a\u{1b}b",
             "a=b",
+            &"x".repeat(256),
+            &format!("family/{}", "x".repeat(256)),
         ] {
             assert!(bad.parse::<RootName>().is_err(), "{bad:?} was accepted");
         }
