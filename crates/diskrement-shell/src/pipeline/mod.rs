@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use diskrement_core::{
     diff, manifest, replication, Capacity, CatalogView, Coverage, DiscArg, DiscContents, DiscKey,
-    DiscState, DiscStatus, DiscType, PlannedDisc, RelPath, ScannedFile, SessionManifest,
+    DiscState, DiscStatus, DiscType, FillOrder, PlannedDisc, RelPath, ScannedFile, SessionManifest,
 };
 
 use crate::burn::verifier::{DiscExpectation, Verifier};
@@ -257,6 +257,7 @@ impl<'a> Pipeline<'a> {
             cap,
             finalize,
             p.copies,
+            &FillOrder::Path,
             |disc| next.get(&disc).copied().unwrap_or(1),
         );
         staged::write_plan(&self.paths.work_dir, &report).map_err(Self::failed)?;
@@ -1543,6 +1544,7 @@ mod burn_tests {
             diskrement_core::Capacity::new(1_000_000),
             finalize,
             copies,
+            &diskrement_core::FillOrder::Path,
             |_| 1,
         );
         staged::write_plan(&work, &report).unwrap();
@@ -2087,6 +2089,7 @@ mod burn_tests {
             diskrement_core::Capacity::new(1_000_000),
             false,
             1,
+            &diskrement_core::FillOrder::Path,
             |_| 1,
         );
         report.sets[0].disc.ordinal = 1;
@@ -2881,6 +2884,7 @@ mod verify_tests {
             diskrement_core::Capacity::new(1_000_000),
             finalize,
             1,
+            &diskrement_core::FillOrder::Path,
             |_| 1,
         );
         staged::write_plan(&work, &report).unwrap();

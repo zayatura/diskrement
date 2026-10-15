@@ -1,6 +1,7 @@
 //! Pure, deterministic ordered-fill disc planner.
 
 use crate::model::{RelPath, ScannedFile};
+use crate::roots::FillOrder;
 
 /// Whether a disc can still receive new sessions.
 ///
@@ -160,24 +161,32 @@ pub fn plan(changes: &ChangeSet, discs: &[DiscState], new_disc_cap: Capacity) ->
         .chain(changes.modified.iter())
         .cloned()
         .collect();
-    plan_set(0, &to_place, &changes.deleted, discs, new_disc_cap)
+    plan_set(
+        0,
+        &to_place,
+        &changes.deleted,
+        discs,
+        new_disc_cap,
+        &FillOrder::Path,
+    )
 }
 
 /// Plan one copy set: top off that set's newest open disc, then spill onto
-/// fresh discs numbered within the set.
+/// fresh discs numbered within the set, placing files in `order`.
 ///
 /// `discs` may hold every set's discs; only those in `copy_set` are
 /// considered. Deterministic — the result depends only on the set of files to
-/// place, not on their order.
+/// place, not on their order, because `order`'s key is total.
 pub fn plan_set(
     copy_set: u32,
     to_place: &[ScannedFile],
     tombstones: &[RelPath],
     discs: &[DiscState],
     new_disc_cap: Capacity,
+    order: &FillOrder,
 ) -> BurnPlan {
     let mut to_place: Vec<ScannedFile> = to_place.to_vec();
-    to_place.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    to_place.sort_by(|a, b| order.key(&a.rel_path).cmp(&order.key(&b.rel_path)));
     let discs: Vec<&DiscState> = discs.iter().filter(|d| d.copy_set == copy_set).collect();
 
     // The newest open disc is the one to top off. A dead or finalized disc is
@@ -656,7 +665,7 @@ mod tests {
             state(1, 0, DiscStatus::Open, 10),
             state(1, 1, DiscStatus::Open, 50),
         ];
-        let p = plan_set(1, &[sf("a", 10)], &[], &discs, CAP100);
+        let p = plan_set(1, &[sf("a", 10)], &[], &discs, CAP100, &FillOrder::Path);
         assert_eq!(p.discs.len(), 1);
         assert_eq!((p.discs[0].ordinal, p.discs[0].copy_set), (1, 1));
         assert!(!p.discs[0].is_new);
@@ -670,14 +679,21 @@ mod tests {
             state(3, 0, DiscStatus::Open, 0),
             state(1, 1, DiscStatus::Finalized, 100),
         ];
-        let p = plan_set(1, &[sf("a", 10)], &[], &discs, CAP100);
+        let p = plan_set(1, &[sf("a", 10)], &[], &discs, CAP100, &FillOrder::Path);
         assert_eq!((p.discs[0].ordinal, p.discs[0].copy_set), (2, 1));
         assert!(p.discs[0].is_new);
     }
 
     #[test]
     fn plan_set_stamps_every_planned_disc_with_its_set() {
-        let p = plan_set(2, &[sf("a", 60), sf("b", 60)], &[], &[], CAP100);
+        let p = plan_set(
+            2,
+            &[sf("a", 60), sf("b", 60)],
+            &[],
+            &[],
+            CAP100,
+            &FillOrder::Path,
+        );
         assert_eq!(p.discs.len(), 2);
         assert!(p.discs.iter().all(|d| d.copy_set == 2));
         assert_eq!(p.discs[0].ordinal, 1);
@@ -694,11 +710,82 @@ mod tests {
         };
         assert_eq!(
             plan(&cs, &[], CAP100),
-            plan_set(0, &[sf("a", 10), sf("b", 10)], &cs.deleted, &[], CAP100)
+            plan_set(
+                0,
+                &[sf("a", 10), sf("b", 10)],
+                &cs.deleted,
+                &[],
+                CAP100,
+                &FillOrder::Path
+            )
         );
     }
 
-    use crate::testutil::{planner_input_strategy, reshuffled_planner_input_strategy};
+    // --- fill order ---
+
+    fn rooted(names: &[&str]) -> FillOrder {
+        FillOrder::Rooted(names.iter().map(|n| n.parse().unwrap()).collect())
+    }
+
+    /// Four Immich-style files, two per 100-byte disc.
+    fn four_dated_files() -> Vec<ScannedFile> {
+        vec![
+            sf("family/anna/2021/a.jpg", 40),
+            sf("family/anna/2023/d.jpg", 40),
+            sf("family/bela/2020/b.jpg", 40),
+            sf("others/cecil/2022/c.jpg", 40),
+        ]
+    }
+
+    #[test]
+    fn a_rooted_fill_interleaves_roots_by_the_path_below_them() {
+        let order = rooted(&["family/anna", "family/bela", "others/cecil"]);
+        let p = plan_set(0, &four_dated_files(), &[], &[], CAP100, &order);
+        assert_eq!(
+            disc_paths(&p.discs[0]),
+            vec!["family/bela/2020/b.jpg", "family/anna/2021/a.jpg"]
+        );
+        assert_eq!(
+            disc_paths(&p.discs[1]),
+            vec!["others/cecil/2022/c.jpg", "family/anna/2023/d.jpg"]
+        );
+    }
+
+    #[test]
+    fn the_path_order_keeps_each_root_together() {
+        let p = plan_set(0, &four_dated_files(), &[], &[], CAP100, &FillOrder::Path);
+        assert_eq!(
+            disc_paths(&p.discs[0]),
+            vec!["family/anna/2021/a.jpg", "family/anna/2023/d.jpg"]
+        );
+    }
+
+    #[test]
+    fn a_rooted_fill_tops_off_the_open_disc_in_the_same_order() {
+        // Open disc 1 has 40 bytes free: the older file tops it off, whichever
+        // root it is under, and the newer one spills.
+        let order = rooted(&["family/anna", "family/bela"]);
+        let open = state(1, 0, DiscStatus::Open, 60);
+        let p = plan_set(
+            0,
+            &[
+                sf("family/anna/2024/e.jpg", 40),
+                sf("family/bela/2019/f.jpg", 40),
+            ],
+            &[],
+            &[open],
+            CAP100,
+            &order,
+        );
+        assert_eq!((p.discs[0].ordinal, p.discs[0].is_new), (1, false));
+        assert_eq!(disc_paths(&p.discs[0]), vec!["family/bela/2019/f.jpg"]);
+        assert_eq!(disc_paths(&p.discs[1]), vec!["family/anna/2024/e.jpg"]);
+    }
+
+    use crate::testutil::{
+        planner_input_strategy, reshuffled_planner_input_strategy, rooted_planner_input_strategy,
+        ROOTS,
+    };
     use proptest::prelude::*;
 
     fn placeable(cs: &ChangeSet) -> Vec<&ScannedFile> {
@@ -726,8 +813,8 @@ mod tests {
                 d.status = DiscStatus::Open;
                 d
             }));
-            let own = plan_set(0, &to_place, &[], &discs, cap);
-            let other = plan_set(1, &to_place, &[], &mixed, cap);
+            let own = plan_set(0, &to_place, &[], &discs, cap, &FillOrder::Path);
+            let other = plan_set(1, &to_place, &[], &mixed, cap, &FillOrder::Path);
             prop_assert_eq!(own.discs.len(), other.discs.len());
             for (a, b) in own.discs.iter().zip(other.discs.iter()) {
                 prop_assert_eq!(b.copy_set, 1);
@@ -866,6 +953,60 @@ mod tests {
                 .map(|d| d.added_bytes())
                 .sum();
             prop_assert_eq!(a, b);
+        }
+
+        /// 9. Rooted order: placed files are in `FillOrder::key` order across
+        ///    all discs.
+        #[test]
+        fn rooted_placed_files_are_in_key_order_across_discs(
+            (files, discs, cap) in rooted_planner_input_strategy()
+        ) {
+            let order = rooted(&ROOTS);
+            let p = plan_set(0, &files, &[], &discs, cap, &order);
+            let placed: Vec<&RelPath> = p
+                .discs
+                .iter()
+                .flat_map(|d| d.files.iter())
+                .map(|f| &f.rel_path)
+                .collect();
+            let mut sorted = placed.clone();
+            sorted.sort_by(|a, b| order.key(a).cmp(&order.key(b)));
+            prop_assert_eq!(placed, sorted);
+        }
+
+        /// 10. Rooted determinism: shuffling the input changes nothing.
+        #[test]
+        fn a_rooted_plan_ignores_input_order(
+            ((files, discs, cap), shuffled) in rooted_planner_input_strategy()
+                .prop_flat_map(|input| {
+                    let files = input.0.clone();
+                    (Just(input), Just(files).prop_shuffle())
+                })
+        ) {
+            let order = rooted(&ROOTS);
+            prop_assert_eq!(
+                plan_set(0, &files, &[], &discs, cap, &order),
+                plan_set(0, &shuffled, &[], &discs, cap, &order)
+            );
+        }
+
+        /// 11. One root fills exactly like the path order: a single library
+        ///     under a readable name fills as it would as a plain source.
+        #[test]
+        fn a_single_root_fills_like_the_path_order(
+            (cs, discs, cap) in planner_input_strategy()
+        ) {
+            let files: Vec<ScannedFile> = placeable(&cs)
+                .into_iter()
+                .map(|f| ScannedFile {
+                    rel_path: RelPath(format!("anna/{}", f.rel_path)),
+                    ..f.clone()
+                })
+                .collect();
+            prop_assert_eq!(
+                plan_set(0, &files, &[], &discs, cap, &rooted(&["anna"])),
+                plan_set(0, &files, &[], &discs, cap, &FillOrder::Path)
+            );
         }
     }
 

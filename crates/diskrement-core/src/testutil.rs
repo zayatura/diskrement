@@ -224,3 +224,31 @@ pub fn entry_in(path: &str, hash: &str, size: u64, sets: &[u32]) -> CatalogEntry
         live_sets: sets.iter().copied().collect(),
     }
 }
+
+/// The roots the rooted planner properties use. Their first components
+/// differ, so prefixing distinct paths with them never makes two paths equal,
+/// and no name holds another.
+pub const ROOTS: [&str; 3] = ["anna", "family/bela", "others/cecil"];
+
+/// A planner input whose files each sit under one of [`ROOTS`]: the files of
+/// `planner_input_strategy`, each prefixed with a root picked per file.
+pub fn rooted_planner_input_strategy(
+) -> impl Strategy<Value = (Vec<ScannedFile>, Vec<DiscState>, Capacity)> {
+    (
+        planner_input_strategy(),
+        proptest::collection::vec(0..ROOTS.len(), 12),
+    )
+        .prop_map(|((cs, discs, cap), picks)| {
+            let files = cs
+                .added
+                .iter()
+                .chain(cs.modified.iter())
+                .zip(picks)
+                .map(|(f, i)| ScannedFile {
+                    rel_path: RelPath(format!("{}/{}", ROOTS[i], f.rel_path)),
+                    ..f.clone()
+                })
+                .collect();
+            (files, discs, cap)
+        })
+}

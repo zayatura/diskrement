@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use diskrement_core::{
-    diff, planner, replication, Capacity, CatalogView, DiscKey, DiscState, DiscType, PlannedDisc,
-    RelPath, ScannedFile,
+    diff, planner, replication, Capacity, CatalogView, DiscKey, DiscState, DiscType, FillOrder,
+    PlannedDisc, RelPath, ScannedFile,
 };
 
 use crate::pipeline::reports::{PlanReport, RemainingEstimate, SetPlan};
@@ -65,6 +65,9 @@ pub fn effective_capacity(normal: Capacity, override_bytes: Option<u64>) -> Capa
 /// `next_session` returns the session ordinal an existing disc gets next; it
 /// is recorded per set so `burn` can tell a disc it already committed from one
 /// it has not.
+///
+/// `order` is the project's fill order. Every set uses the same one, so
+/// twin discs hold the same files.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_from(
     view: &CatalogView,
@@ -75,6 +78,7 @@ pub fn plan_from(
     cap: Capacity,
     finalize: bool,
     copies: u32,
+    order: &FillOrder,
     next_session: impl Fn(DiscKey) -> u32,
 ) -> PlanReport {
     let changes = diff::diff(view, scanned);
@@ -91,7 +95,7 @@ pub fn plan_from(
     let mut unplaceable_catch_up: Vec<ScannedFile> = Vec::new();
     for (copy_set, extra) in (0..copies).zip(catch_up.iter()) {
         let to_place: Vec<ScannedFile> = new_files.iter().chain(extra.iter()).cloned().collect();
-        let full = planner::plan_set(copy_set, &to_place, &tombstones, states, cap);
+        let full = planner::plan_set(copy_set, &to_place, &tombstones, states, cap, order);
         for f in full.oversized {
             // `shortfall` never lists a new or modified file, so a path in
             // `extra` is a copy of something already burned.
@@ -271,6 +275,7 @@ mod tests {
             Capacity::new(1_000),
             false,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         assert_eq!(report.sets[0].disc.ordinal, 1);
@@ -301,6 +306,7 @@ mod tests {
             Capacity::new(1_000),
             false,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         assert_eq!(report.sets[0].disc.files.len(), 1);
@@ -330,6 +336,7 @@ mod tests {
             Capacity::new(1_000),
             false,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         let sealed = plan_from(
@@ -341,6 +348,7 @@ mod tests {
             Capacity::new(1_000),
             true,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         assert!(!open.sets[0].disc.will_finalize);
@@ -367,6 +375,7 @@ mod tests {
             Capacity::new(1_000),
             true,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         assert_eq!(report.sets[0].disc.ordinal, 4);
@@ -400,6 +409,7 @@ mod tests {
             Capacity::new(1_000),
             false,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         assert_eq!(
@@ -424,6 +434,7 @@ mod tests {
             Capacity::new(1_000),
             false,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         assert_eq!(report.oversized.len(), 1);
@@ -443,6 +454,7 @@ mod tests {
             Capacity::new(1_000),
             false,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         assert_eq!(report.sets.len(), 1);
@@ -462,6 +474,7 @@ mod tests {
             Capacity::new(1_000),
             false,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         assert!(report.sets.is_empty());
@@ -478,6 +491,7 @@ mod tests {
             Capacity::new(1_000_000),
             false,
             1,
+            &FillOrder::Path,
             |_| 1,
         )
     }
@@ -529,6 +543,7 @@ mod tests {
             Capacity::new(1_000),
             finalize,
             1,
+            &FillOrder::Path,
             |_| 1,
         )
     }
@@ -548,6 +563,7 @@ mod tests {
             Capacity::new(1_000),
             finalize,
             2,
+            &FillOrder::Path,
             |_| 7,
         )
     }
@@ -666,6 +682,7 @@ mod tests {
             Capacity::new(1_000),
             false,
             2,
+            &FillOrder::Path,
             |_| 7,
         );
         assert!(report.sets.is_empty(), "no disc, in either set");
@@ -685,6 +702,7 @@ mod tests {
             Capacity::new(1_000),
             false,
             1,
+            &FillOrder::Path,
             |_| 1,
         );
         assert!(report.sets.is_empty(), "no fresh empty disc for tombstones");
@@ -714,6 +732,7 @@ mod tests {
             Capacity::new(1_000),
             true,
             2,
+            &FillOrder::Path,
             |_| 7,
         );
         assert_eq!(report.sets.len(), 2);
@@ -745,6 +764,7 @@ mod tests {
             Capacity::new(1_000),
             true,
             2,
+            &FillOrder::Path,
             |_| 7,
         );
         assert!(report.sets.is_empty(), "nothing open to seal in either set");
@@ -765,6 +785,7 @@ mod tests {
             Capacity::new(1_000),
             true,
             2,
+            &FillOrder::Path,
             |_| 7,
         );
         assert_eq!(report.sets.len(), 1);
@@ -779,5 +800,41 @@ mod tests {
         let report = plan1(&CatalogView::empty(), &[file("a.bin", 300)], &[], false);
         assert_eq!(report.copies, 1);
         assert_eq!(report.sets.len(), 1);
+    }
+
+    #[test]
+    fn every_set_fills_in_the_projects_order() {
+        let files = vec![
+            file("family/anna/2021/a.jpg", 400),
+            file("family/anna/2023/d.jpg", 400),
+            file("family/bela/2020/b.jpg", 400),
+        ];
+        let order = FillOrder::Rooted(vec![
+            "family/anna".parse().unwrap(),
+            "family/bela".parse().unwrap(),
+        ]);
+        let report = plan_from(
+            &CatalogView::empty(),
+            &files,
+            Vec::new(),
+            &[],
+            DiscType::BdR,
+            Capacity::new(1_000),
+            false,
+            2,
+            &order,
+            |_| 1,
+        );
+        assert_eq!(report.sets.len(), 2);
+        for set in &report.sets {
+            assert_eq!(
+                set.disc
+                    .files
+                    .iter()
+                    .map(|f| f.rel_path.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["family/bela/2020/b.jpg", "family/anna/2021/a.jpg"]
+            );
+        }
     }
 }
