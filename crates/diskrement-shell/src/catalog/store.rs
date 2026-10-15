@@ -26,11 +26,30 @@ impl Catalog {
     /// Insert a project row and, for a rooted project, its roots, in one
     /// transaction, returning the new id. A rooted project stores `''` in
     /// `source_root`.
+    ///
+    /// `Sources::Rooted` is a public variant, so a hand-built list could skip
+    /// `Sources::rooted`'s checks: it is re-checked here, and refused (as is
+    /// an empty single source, which would read back as neither) before
+    /// anything is written. `find_project` checks the same on the way out.
     pub fn create_project(&mut self, p: &ProjectInit) -> Result<ProjectId, CatalogError> {
         let name = p.name.clone();
         let source_root = match &p.sources {
+            Sources::Single(path) if path.as_os_str().is_empty() => {
+                return Err(CatalogError::ConstraintViolation(format!(
+                    "project {name} has an empty source"
+                )))
+            }
             Sources::Single(path) => path.to_string_lossy().into_owned(),
-            Sources::Rooted(_) => String::new(),
+            Sources::Rooted(roots) => {
+                let checked = Sources::rooted(roots.clone())
+                    .map_err(|e| CatalogError::ConstraintViolation(e.to_string()))?;
+                if checked != p.sources {
+                    return Err(CatalogError::ConstraintViolation(format!(
+                        "the roots of project {name} are not sorted by name"
+                    )));
+                }
+                String::new()
+            }
         };
         self.tx(|tx| {
             let inserted = tx.execute(
@@ -98,11 +117,17 @@ impl Catalog {
             return Ok(None);
         };
 
-        let roots = self.project_roots(id)?;
-        let sources = if roots.is_empty() {
-            Sources::Single(PathBuf::from(source_root))
+        let roots = self.project_roots(id, &name)?;
+        let sources = if !roots.is_empty() {
+            Sources::rooted(roots).map_err(|e| {
+                CatalogError::ConstraintViolation(format!("project_root of project {name}: {e}"))
+            })?
+        } else if source_root.is_empty() {
+            return Err(CatalogError::ConstraintViolation(format!(
+                "project {name} has neither a source nor roots"
+            )));
         } else {
-            Sources::rooted(roots).map_err(|e| CatalogError::ConstraintViolation(e.to_string()))?
+            Sources::Single(PathBuf::from(source_root))
         };
         Ok(Some(Project {
             id: ProjectId(id),
@@ -118,7 +143,12 @@ impl Catalog {
     }
 
     /// A project's `project_root` rows; empty for a single-source project.
-    fn project_roots(&self, project: i64) -> Result<Vec<(RootName, PathBuf)>, CatalogError> {
+    /// `name` is the project's, for the error message.
+    fn project_roots(
+        &self,
+        project: i64,
+        name: &str,
+    ) -> Result<Vec<(RootName, PathBuf)>, CatalogError> {
         let mut stmt = self
             .conn
             .prepare("select name, path from project_root where project_id = ?1")
@@ -129,11 +159,11 @@ impl Catalog {
             })
             .map_err(CatalogError::from_sqlite)?;
         rows.map(|row| {
-            let (name, path) = row.map_err(CatalogError::from_sqlite)?;
-            let name = name
-                .parse::<RootName>()
-                .map_err(CatalogError::ConstraintViolation)?;
-            Ok((name, PathBuf::from(path)))
+            let (root, path) = row.map_err(CatalogError::from_sqlite)?;
+            let root = root.parse::<RootName>().map_err(|e| {
+                CatalogError::ConstraintViolation(format!("project_root of project {name}: {e}"))
+            })?;
+            Ok((root, PathBuf::from(path)))
         })
         .collect()
     }
@@ -686,7 +716,7 @@ fn disc_versions(
 mod tests {
     use std::path::PathBuf;
 
-    use diskrement_core::{DiscStatus, DiscType, Sources};
+    use diskrement_core::{DiscStatus, DiscType, RootName, Sources};
 
     use crate::catalog::model::{CatalogUpdate, DiscWrite, ProjectInit, SessionWrite};
     use crate::catalog::testutil::{count, fw, project_init, temp_catalog, ts, update};
@@ -766,6 +796,63 @@ mod tests {
             .unwrap();
         assert_eq!(source_root, "");
         assert_eq!(count(&cat, "project_root"), 3);
+    }
+
+    #[test]
+    fn malformed_sources_are_refused_before_anything_is_written() {
+        let (_dir, mut cat) = temp_catalog();
+        let anna: RootName = "anna".parse().unwrap();
+        let bob: RootName = "bob".parse().unwrap();
+        let malformed = [
+            // `Sources::Rooted` is public, so each of these can be built by hand.
+            Sources::Rooted(vec![
+                (anna.clone(), PathBuf::from("/lib/u1")),
+                (anna.clone(), PathBuf::from("/lib/u2")),
+            ]),
+            Sources::Rooted(vec![
+                (bob, PathBuf::from("/lib/u2")),
+                (anna.clone(), PathBuf::from("/lib/u1")),
+            ]),
+            Sources::Rooted(vec![
+                (anna, PathBuf::from("/lib/u1")),
+                ("anna/x".parse().unwrap(), PathBuf::from("/lib/u2")),
+            ]),
+            Sources::Rooted(vec![]),
+            Sources::Single(PathBuf::new()),
+        ];
+        for sources in malformed {
+            let err = cat
+                .create_project(&ProjectInit {
+                    sources: sources.clone(),
+                    ..project_init("fam")
+                })
+                .expect_err("malformed sources are refused");
+            assert!(
+                matches!(err, CatalogError::ConstraintViolation(_)),
+                "{sources:?}: {err:?}"
+            );
+            assert_eq!(count(&cat, "project"), 0, "{sources:?}");
+            assert_eq!(count(&cat, "project_root"), 0, "{sources:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_with_neither_a_source_nor_roots_does_not_read_back() {
+        let (_dir, cat) = temp_catalog();
+        cat.raw_connection_for_tests()
+            .execute(
+                "insert into project
+                   (name, source_root, work_dir, default_disc_type, margin_percent,
+                    copies, created_at)
+                 values ('fam', '', '/work', 'BD_R', 2.0, 1, '2026-06-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let err = cat.find_project("fam").expect_err("corrupt row");
+        assert!(
+            matches!(&err, CatalogError::ConstraintViolation(m) if m.contains("neither a source nor roots")),
+            "{err:?}"
+        );
     }
 
     #[test]

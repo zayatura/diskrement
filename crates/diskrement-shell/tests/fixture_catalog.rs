@@ -346,10 +346,10 @@ fn the_final_catalog_reports_its_pointers_and_per_disc_contents() {
     assert_eq!((verified[0].disc.ordinal, verified[0].ordinal), (1, 1));
 }
 
-/// A V2 catalog the Scala build wrote migrates to V3 in place: every disc keeps
-/// its id, ordinal and status, lands in set A, and nothing dangles.
+/// A V2 catalog the Scala build wrote migrates in place (V3, then V4): every
+/// disc keeps its id, ordinal and status, lands in set A, and nothing dangles.
 #[test]
-fn a_v2_catalog_migrates_to_v3_keeping_every_disc_id() {
+fn a_v2_catalog_migrates_to_current_keeping_every_disc_id() {
     let before: Vec<(i64, i64, String)> = {
         let conn = support::open_fixture("catalog/11-after-finalize.sqlite");
         let mut stmt = conn
