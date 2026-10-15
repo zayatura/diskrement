@@ -46,6 +46,25 @@ fn classify(work_dir: &Path, e: std::io::Error) -> SnapshotError {
     }
 }
 
+/// `classify` for one root of a rooted project. A capability failure names the
+/// root and its path in its detail: with several roots, the usual cause is one
+/// that has moved to another filesystem since `init`, and the work dir alone
+/// would not say which.
+fn classify_root(
+    work_dir: &Path,
+    name: &diskrement_core::RootName,
+    src: &Path,
+    e: std::io::Error,
+) -> SnapshotError {
+    match classify(work_dir, e) {
+        SnapshotError::NotCowCapable { work_dir, detail } => SnapshotError::NotCowCapable {
+            work_dir,
+            detail: format!("root {name} ({}): {detail}", src.display()),
+        },
+        other => other,
+    }
+}
+
 /// Recursively clone `src` to `dst` by reflinking each regular file. Not
 /// atomic; the caller has already removed any stale `dst`. Symlinks are
 /// excluded, matching the scanner's walk.
@@ -130,7 +149,7 @@ pub fn create_with(
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent).map_err(SnapshotError::Io)?;
                 }
-                clone(src, &target).map_err(|e| classify(work_dir, e))?;
+                clone(src, &target).map_err(|e| classify_root(work_dir, name, src, e))?;
             }
         }
     }
@@ -267,12 +286,40 @@ mod tests {
         let (_d, anna, _cecil, work) = libraries();
         let gone = work.join("gone");
         let sources = Sources::rooted(vec![named("anna", &anna), named("bela", &gone)]).unwrap();
+        std::fs::create_dir_all(work.join("snapshot")).unwrap();
+        std::fs::write(work.join("snapshot/old.txt"), b"stale").unwrap();
         let err = create_with(&sources, &work, ok_cloner).unwrap_err();
         assert!(
             matches!(&err, SnapshotError::SourceMissing(p) if *p == gone),
             "{err:?}"
         );
-        assert!(!work.join("snapshot").exists());
+        // Nothing was removed and nothing was cloned.
+        assert!(work.join("snapshot/old.txt").exists());
+        assert!(!work.join("snapshot/anna").exists());
+    }
+
+    #[test]
+    fn a_rooted_clone_that_cannot_reflink_names_its_root() {
+        let (_d, anna, cecil, work) = libraries();
+        let sources = Sources::rooted(vec![named("anna", &anna), named("cecil", &cecil)]).unwrap();
+        let moved = cecil.clone();
+        let err = create_with(&sources, &work, |src, dst| {
+            if src == moved {
+                Err(std::io::Error::from_raw_os_error(18)) // EXDEV
+            } else {
+                copy_tree(src, dst)
+            }
+        })
+        .unwrap_err();
+        match err {
+            SnapshotError::NotCowCapable { work_dir, detail } => {
+                assert_eq!(work_dir, work);
+                assert!(detail.contains("root cecil"), "{detail}");
+                assert!(detail.contains(&cecil.display().to_string()), "{detail}");
+                assert!(!detail.contains("root anna"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// `reflink_tree` restores each file's mtime, and it does so in every root.
