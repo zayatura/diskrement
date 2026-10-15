@@ -216,6 +216,9 @@ the order from `Project::sources`.
 The `oversized` and `unplaceable_catch_up` reports stay sorted by `rel_path`. They are
 lists for people to read, not a fill order.
 
+A rooted disc's `manifest.json` lists and its catalog rows follow the disc's fill order
+rather than `rel_path` order. That is harmless: nothing reads them back in order.
+
 What the order controls: each cycle writes at most one disc per set, so the order
 decides which unburned files reach that disc first. On the first cycle, those are the
 oldest files across all roots. Later, new files top off the open disc and spill onto

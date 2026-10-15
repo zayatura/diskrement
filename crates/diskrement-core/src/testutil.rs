@@ -231,24 +231,35 @@ pub fn entry_in(path: &str, hash: &str, size: u64, sets: &[u32]) -> CatalogEntry
 pub const ROOTS: [&str; 3] = ["anna", "family/bela", "others/cecil"];
 
 /// A planner input whose files each sit under one of [`ROOTS`]: the files of
-/// `planner_input_strategy`, each prefixed with a root picked per file.
+/// `planner_input_strategy`, each prefixed with a root picked per file. Some
+/// files also appear a second time under a different root, so the same path
+/// below two roots (two users' `2024/2024-01-15/IMG_0001.jpg`) is exercised
+/// and the root name has to break the tie.
 pub fn rooted_planner_input_strategy(
 ) -> impl Strategy<Value = (Vec<ScannedFile>, Vec<DiscState>, Capacity)> {
     (
         planner_input_strategy(),
         proptest::collection::vec(0..ROOTS.len(), 12),
+        proptest::collection::vec(proptest::option::of(0..ROOTS.len()), 12),
     )
-        .prop_map(|((cs, discs, cap), picks)| {
-            let files = cs
+        .prop_map(|((cs, discs, cap), picks, twins)| {
+            let under = |root: usize, f: &ScannedFile| ScannedFile {
+                rel_path: RelPath(format!("{}/{}", ROOTS[root], f.rel_path)),
+                ..f.clone()
+            };
+            let mut files = Vec::new();
+            for ((f, own), twin) in cs
                 .added
                 .iter()
                 .chain(cs.modified.iter())
                 .zip(picks)
-                .map(|(f, i)| ScannedFile {
-                    rel_path: RelPath(format!("{}/{}", ROOTS[i], f.rel_path)),
-                    ..f.clone()
-                })
-                .collect();
+                .zip(twins)
+            {
+                files.push(under(own, f));
+                if let Some(other) = twin.filter(|t| *t != own) {
+                    files.push(under(other, f));
+                }
+            }
             (files, discs, cap)
         })
 }
