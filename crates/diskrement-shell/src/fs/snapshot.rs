@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use diskrement_core::Sources;
+
 /// `Reflink.scala`'s "this filesystem cannot reflink here", translated from
 /// English-cp-stderr sniffing (which forced `LC_ALL=C`) to the errnos
 /// `ioctl(FICLONE)` returns for it: `EXDEV` (18, cross-device) and
@@ -100,13 +102,19 @@ pub(crate) fn copy_file_times_and_mode(src: &Path, dst: &Path) -> std::io::Resul
 /// check, stale-snapshot removal, work-dir creation, then the clone. A
 /// clone-unsupported failure is **hard** — there is no plain-copy fallback
 /// for the source freeze.
+///
+/// A single source is cloned to `snapshot/` itself. A rooted project's roots
+/// are each cloned to `snapshot/<name>`, in name order; a name's parent
+/// directories (`family/` for `family/anna`) are plain directories that exist
+/// only here. Every root is checked to exist before anything is removed or
+/// cloned, so a missing one fails with its own path.
 pub fn create_with(
-    source_root: &Path,
+    sources: &Sources,
     work_dir: &Path,
     clone: impl Fn(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<SnapshotHandle, SnapshotError> {
-    if !source_root.exists() {
-        return Err(SnapshotError::SourceMissing(source_root.to_path_buf()));
+    if let Some(missing) = sources.paths().into_iter().find(|p| !p.exists()) {
+        return Err(SnapshotError::SourceMissing(missing.to_path_buf()));
     }
     let dst = work_dir.join("snapshot");
     if dst.exists() {
@@ -114,12 +122,23 @@ pub fn create_with(
     }
     std::fs::create_dir_all(work_dir).map_err(SnapshotError::Io)?;
     // NotCowCapable's work_dir is the work dir itself (cp's dst.getParent).
-    clone(source_root, &dst).map_err(|e| classify(work_dir, e))?;
+    match sources {
+        Sources::Single(src) => clone(src, &dst).map_err(|e| classify(work_dir, e))?,
+        Sources::Rooted(roots) => {
+            for (name, src) in roots {
+                let target = dst.join(name.as_str());
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(SnapshotError::Io)?;
+                }
+                clone(src, &target).map_err(|e| classify(work_dir, e))?;
+            }
+        }
+    }
     Ok(SnapshotHandle { root: dst })
 }
 
-pub fn create(source_root: &Path, work_dir: &Path) -> Result<SnapshotHandle, SnapshotError> {
-    create_with(source_root, work_dir, reflink_tree)
+pub fn create(sources: &Sources, work_dir: &Path) -> Result<SnapshotHandle, SnapshotError> {
+    create_with(sources, work_dir, reflink_tree)
 }
 
 /// Best-effort recursive delete (`release`): the snapshot is disposable by
@@ -201,10 +220,104 @@ mod tests {
         (dir, src, work)
     }
 
+    fn single(p: &Path) -> Sources {
+        Sources::Single(p.to_path_buf())
+    }
+
+    fn named(name: &str, path: &Path) -> (diskrement_core::RootName, PathBuf) {
+        (name.parse().unwrap(), path.to_path_buf())
+    }
+
+    /// Two libraries, `lib/anna` (one file in a subdirectory) and `lib/cecil`
+    /// (one file), and a work dir.
+    fn libraries() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let anna = dir.path().join("lib/anna");
+        let cecil = dir.path().join("lib/cecil");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(anna.join("2021")).unwrap();
+        std::fs::create_dir_all(&cecil).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(anna.join("2021/a.jpg"), b"anna").unwrap();
+        std::fs::write(cecil.join("c.jpg"), b"cecil").unwrap();
+        (dir, anna, cecil, work)
+    }
+
+    #[test]
+    fn a_rooted_snapshot_puts_each_root_under_its_name() {
+        let (_d, anna, cecil, work) = libraries();
+        let sources =
+            Sources::rooted(vec![named("family/anna", &anna), named("cecil", &cecil)]).unwrap();
+        let h = create_with(&sources, &work, ok_cloner).unwrap();
+        assert_eq!(
+            std::fs::read(h.root.join("family/anna/2021/a.jpg")).unwrap(),
+            b"anna"
+        );
+        assert_eq!(std::fs::read(h.root.join("cecil/c.jpg")).unwrap(), b"cecil");
+        let mut top: Vec<String> = std::fs::read_dir(&h.root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        top.sort();
+        assert_eq!(top, vec!["cecil", "family"]);
+    }
+
+    #[test]
+    fn a_missing_root_fails_with_its_path_before_anything_is_cloned() {
+        let (_d, anna, _cecil, work) = libraries();
+        let gone = work.join("gone");
+        let sources = Sources::rooted(vec![named("anna", &anna), named("bela", &gone)]).unwrap();
+        let err = create_with(&sources, &work, ok_cloner).unwrap_err();
+        assert!(
+            matches!(&err, SnapshotError::SourceMissing(p) if *p == gone),
+            "{err:?}"
+        );
+        assert!(!work.join("snapshot").exists());
+    }
+
+    /// `reflink_tree` restores each file's mtime, and it does so in every root.
+    #[test]
+    fn the_real_reflink_keeps_mtimes_in_every_root_or_skips_loudly() {
+        let (_d, anna, cecil, work) = libraries();
+        let probe = work.join("cow-probe.src");
+        std::fs::write(&probe, b"0").unwrap();
+        let cow = reflink_copy::reflink(&probe, work.join("cow-probe.clone")).is_ok();
+        let _ = std::fs::remove_file(&probe);
+        let _ = std::fs::remove_file(work.join("cow-probe.clone"));
+        if !cow {
+            eprintln!(
+                "SKIP: {} is not on a CoW filesystem; this test needs TMPDIR on \
+                 btrfs/XFS/bcachefs to execute.",
+                work.display()
+            );
+            return;
+        }
+        let stamp =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        for f in [anna.join("2021/a.jpg"), cecil.join("c.jpg")] {
+            std::fs::File::options()
+                .write(true)
+                .open(&f)
+                .unwrap()
+                .set_modified(stamp)
+                .unwrap();
+        }
+        let sources =
+            Sources::rooted(vec![named("family/anna", &anna), named("cecil", &cecil)]).unwrap();
+        let h = create(&sources, &work).unwrap();
+        for f in ["family/anna/2021/a.jpg", "cecil/c.jpg"] {
+            let mtime = std::fs::metadata(h.root.join(f))
+                .unwrap()
+                .modified()
+                .unwrap();
+            assert_eq!(mtime, stamp, "{f}");
+        }
+    }
+
     #[test]
     fn create_reflinks_the_source_into_workdir_snapshot() {
         let (_d, src, work) = fixture();
-        let h = create_with(&src, &work, ok_cloner).unwrap();
+        let h = create_with(&single(&src), &work, ok_cloner).unwrap();
         assert_eq!(h.root, work.join("snapshot"));
         assert_eq!(std::fs::read(h.root.join("f.txt")).unwrap(), b"hello");
         assert_eq!(std::fs::read(h.root.join("sub/g.txt")).unwrap(), b"world");
@@ -215,7 +328,7 @@ mod tests {
         let (_d, src, work) = fixture();
         std::fs::create_dir_all(work.join("snapshot")).unwrap();
         std::fs::write(work.join("snapshot/old.txt"), b"stale").unwrap();
-        let h = create_with(&src, &work, ok_cloner).unwrap();
+        let h = create_with(&single(&src), &work, ok_cloner).unwrap();
         assert!(!h.root.join("old.txt").exists());
         assert!(h.root.join("f.txt").exists());
     }
@@ -223,28 +336,28 @@ mod tests {
     #[test]
     fn a_missing_source_fails_with_sourcemissing() {
         let (_d, _src, work) = fixture();
-        let err = create_with(&work.join("nope"), &work, ok_cloner).unwrap_err();
+        let err = create_with(&single(&work.join("nope")), &work, ok_cloner).unwrap_err();
         assert!(matches!(err, SnapshotError::SourceMissing(_)));
     }
 
     #[test]
     fn a_notcowcapable_clone_error_propagates_as_is() {
         let (_d, src, work) = fixture();
-        let err = create_with(&src, &work, unsupported_cloner).unwrap_err();
+        let err = create_with(&single(&src), &work, unsupported_cloner).unwrap_err();
         assert!(matches!(err, SnapshotError::NotCowCapable { .. }));
     }
 
     #[test]
     fn an_ioerror_from_the_cloner_propagates_as_is() {
         let (_d, src, work) = fixture();
-        let err = create_with(&src, &work, other_cloner).unwrap_err();
+        let err = create_with(&single(&src), &work, other_cloner).unwrap_err();
         assert!(matches!(err, SnapshotError::Io(_)));
     }
 
     #[test]
     fn release_removes_the_snapshot_dir() {
         let (_d, src, work) = fixture();
-        let h = create_with(&src, &work, ok_cloner).unwrap();
+        let h = create_with(&single(&src), &work, ok_cloner).unwrap();
         release(&h);
         assert!(!h.root.exists());
     }
@@ -281,7 +394,7 @@ mod tests {
         let src = work.join("src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("f.txt"), b"hello").unwrap();
-        let h = create(&src, &work).unwrap();
+        let h = create(&single(&src), &work).unwrap();
         assert_eq!(std::fs::read(h.root.join("f.txt")).unwrap(), b"hello");
     }
 

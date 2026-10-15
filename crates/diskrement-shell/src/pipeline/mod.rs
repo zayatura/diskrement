@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use diskrement_core::{
     diff, manifest, replication, Capacity, CatalogView, Coverage, DiscArg, DiscContents, DiscKey,
     DiscState, DiscStatus, DiscType, FillOrder, PlannedDisc, RelPath, ScannedFile, SessionManifest,
+    Sources,
 };
 
 use crate::burn::verifier::{DiscExpectation, Verifier};
@@ -122,11 +123,13 @@ impl<'a> Pipeline<'a> {
         p: &Project,
         rehash: bool,
     ) -> Result<(Vec<ScannedFile>, usize), PipelineError> {
-        let src = PathBuf::from(&p.source_root);
+        // Until `Project` carries its `Sources` (the next task), a project is
+        // its one `source_root`.
+        let sources = Sources::Single(PathBuf::from(&p.source_root));
         // Snapshot failures (missing source, non-CoW, I/O) are Failed here —
         // exit 5 — because only `init` produces the typed 3s (`PipelineLive`
         // maps SnapshotError to Failed in freshScan).
-        let handle = snapshot::create(&src, &self.paths.work_dir).map_err(Self::failed)?;
+        let handle = snapshot::create(&sources, &self.paths.work_dir).map_err(Self::failed)?;
         let prior: BTreeMap<RelPath, FileFingerprint> =
             self.catalog.fingerprints(p.id).map_err(Self::failed)?;
         // The cache never fails a scan; a read failure falls back to empty.
