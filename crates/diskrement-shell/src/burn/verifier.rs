@@ -77,10 +77,10 @@ impl<'a> StagingVerifier<'a> {
             });
         }
 
-        let hashed = hash_tree(&data_dir, self.sink, &verifying_label(exp))?;
+        let hashed = hash_tree(&data_dir, self.sink, &verifying_label(exp));
         let mut mismatches: Vec<RelPath> = hashed
             .iter()
-            .filter(|(rel, actual)| exp.latest_session.get(rel) != Some(actual))
+            .filter(|(rel, actual)| mismatched(&exp.latest_session, rel, actual))
             .map(|(rel, _)| rel.clone())
             .collect();
         mismatches.sort();
@@ -100,6 +100,11 @@ fn verifying_label(exp: &DiscExpectation) -> String {
 
 /// Hash every file under `data_dir`, as one progress phase.
 ///
+/// A file that cannot be read comes back as `None`, and so does an entry the
+/// walk cannot read, named by its own path (`.` for `data_dir` itself): an
+/// unreadable file on a disc is a finding, not a reason to stop
+/// (burn-verify spec §5.3).
+///
 /// The walk comes first so the phase opens with its totals. The bar advances
 /// by bytes during each read, not once per file: from an optical drive at
 /// ~13 MB/s a multi-GB video would otherwise hold it still for minutes.
@@ -112,29 +117,80 @@ fn hash_tree(
     data_dir: &Path,
     sink: &dyn ProgressSink,
     label: &str,
-) -> Result<Vec<(RelPath, ContentHash)>, BurnError> {
-    let walk_err = |e: walkdir::Error| BurnError::Io(std::io::Error::other(e));
+) -> Vec<(RelPath, Option<ContentHash>)> {
     let mut files = Vec::new();
+    let mut unreadable = Vec::new();
     for entry in walkdir::WalkDir::new(data_dir).sort_by_file_name() {
-        let entry = entry.map_err(walk_err)?;
-        if entry.file_type().is_file() {
-            let size = entry.metadata().map_err(walk_err)?.len();
-            files.push((entry.into_path(), size));
+        match entry {
+            Ok(entry) if entry.file_type().is_file() => match entry.metadata() {
+                Ok(meta) => files.push((entry.into_path(), meta.len())),
+                Err(e) => unreadable.push(unreadable_path(data_dir, e.path())),
+            },
+            Ok(_) => {}
+            Err(e) => unreadable.push(unreadable_path(data_dir, e.path())),
         }
     }
 
     let total_bytes = files.iter().map(|(_, size)| size).sum();
-    progress::phase(sink, label, total_bytes, files.len(), || {
-        files
-            .iter()
-            .map(|(file, _)| {
-                let actual =
-                    hasher::hash_with(file, &mut |n| sink.advance(n, 0)).map_err(BurnError::Io)?;
-                sink.advance(0, 1);
-                Ok((relativize(data_dir, file), actual))
-            })
-            .collect()
-    })
+    let mut hashed: Vec<(RelPath, Option<ContentHash>)> =
+        progress::phase(sink, label, total_bytes, files.len(), || {
+            files
+                .iter()
+                .map(|(file, _)| {
+                    let actual = hasher::hash_with(file, &mut |n| sink.advance(n, 0)).ok();
+                    sink.advance(0, 1);
+                    (relativize(data_dir, file), actual)
+                })
+                .collect()
+        });
+    hashed.extend(unreadable.into_iter().map(|rel| (rel, None)));
+    hashed
+}
+
+/// Where a walk error happened, relative to `data_dir`: `.` for `data_dir`
+/// itself or an error that names no path.
+fn unreadable_path(data_dir: &Path, path: Option<&Path>) -> RelPath {
+    match path.filter(|p| *p != data_dir) {
+        Some(p) => relativize(data_dir, p),
+        None => RelPath(".".to_string()),
+    }
+}
+
+/// Whether one hashed entry is a mismatch against `expected`: unreadable,
+/// not expected at all, or carrying another hash.
+fn mismatched(
+    expected: &BTreeMap<RelPath, ContentHash>,
+    rel: &RelPath,
+    actual: &Option<ContentHash>,
+) -> bool {
+    actual.as_ref().is_none_or(|a| expected.get(rel) != Some(a))
+}
+
+/// Tier 1 against a disc's `/data` tree: every file on it hashed against
+/// `visible`, and every expected file missing from it counted as a mismatch.
+fn compare_visible(
+    data_dir: &Path,
+    exp: &DiscExpectation,
+    sink: &dyn ProgressSink,
+) -> (usize, Vec<RelPath>) {
+    let found: BTreeMap<RelPath, Option<ContentHash>> =
+        hash_tree(data_dir, sink, &verifying_label(exp))
+            .into_iter()
+            .collect();
+    let mut mismatches: Vec<RelPath> = found
+        .iter()
+        .filter(|(rel, actual)| mismatched(&exp.visible, rel, actual))
+        .map(|(rel, _)| rel.clone())
+        .collect();
+    let missing: Vec<RelPath> = exp
+        .visible
+        .keys()
+        .filter(|rel| !found.contains_key(*rel))
+        .cloned()
+        .collect();
+    let checked = found.len() + missing.len();
+    mismatches.extend(missing);
+    (checked, mismatches)
 }
 
 /// Read-back verification of physical (or image) media.
@@ -224,27 +280,7 @@ impl<'a> DiscVerifier<'a> {
         self.operator
             .progress(&format!("Mounting disc {}…", exp.disc_name));
         let reader = DiscReader::new(self.device.clone(), self.exec);
-        reader.with_data_tree(|data_dir| {
-            let found: BTreeMap<RelPath, ContentHash> =
-                hash_tree(data_dir, self.sink, &verifying_label(exp))?
-                    .into_iter()
-                    .collect();
-            let mut mismatches: Vec<RelPath> = found
-                .iter()
-                .filter(|(rel, actual)| exp.visible.get(*rel) != Some(*actual))
-                .map(|(rel, _)| rel.clone())
-                .collect();
-            let missing: Vec<RelPath> = exp
-                .visible
-                .keys()
-                .filter(|rel| !found.contains_key(*rel))
-                .cloned()
-                .collect();
-
-            let checked = found.len() + missing.len();
-            mismatches.extend(missing);
-            Ok((checked, mismatches))
-        })
+        reader.with_data_tree(|data_dir| Ok(compare_visible(data_dir, exp, self.sink)))
     }
 
     /// The versions later sessions of this same disc hid.
@@ -437,6 +473,78 @@ mod tests {
                 RelPath("z.bin".to_string()),
             ]
         );
+    }
+
+    /// Make `path` unreadable; `false` when that has no effect (running as
+    /// root), and the caller skips.
+    fn lock(path: &std::path::Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = if path.is_dir() {
+            std::fs::read_dir(path).is_ok()
+        } else {
+            std::fs::File::open(path).is_ok()
+        };
+        !readable
+    }
+
+    fn unlock(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A file that cannot be read is a mismatch for that file, and the rest of
+    /// the tree is still checked (burn-verify spec §5.3). Before, the read
+    /// error stopped `verify` with exit 6.
+    #[test]
+    fn an_unreadable_file_is_a_mismatch_and_the_rest_is_still_checked() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let staging = dir.path().join("staging");
+        let data = staging.join("disc-1/data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("a.txt"), b"hello").unwrap();
+        std::fs::write(data.join("locked.txt"), b"secret").unwrap();
+        if !lock(&data.join("locked.txt")) {
+            eprintln!(
+                "SKIP [an_unreadable_file_is_a_mismatch_and_the_rest_is_still_checked]: running as root"
+            );
+            return;
+        }
+        let out = StagingVerifier::new(staging, &NoopSink)
+            .verify(&expectation(
+                &[("a.txt", b"hello"), ("locked.txt", b"secret")],
+                1,
+            ))
+            .unwrap();
+        assert_eq!(
+            out,
+            VerifyOutcome {
+                files_checked: 2,
+                mismatches: vec![RelPath("locked.txt".to_string())],
+                skipped: false,
+            }
+        );
+    }
+
+    /// A directory the walk cannot read is a mismatch named by its own path.
+    #[test]
+    fn an_unreadable_directory_is_a_mismatch_named_by_its_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let staging = dir.path().join("staging");
+        let sub = staging.join("disc-1/data/sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("b.txt"), b"x").unwrap();
+        if !lock(&sub) {
+            unlock(&sub);
+            eprintln!(
+                "SKIP [an_unreadable_directory_is_a_mismatch_named_by_its_path]: running as root"
+            );
+            return;
+        }
+        let out = StagingVerifier::new(staging, &NoopSink)
+            .verify(&expectation(&[("sub/b.txt", b"x")], 1));
+        unlock(&sub);
+        assert_eq!(out.unwrap().mismatches, vec![RelPath("sub".to_string())]);
     }
 
     /// One phase per disc, sized to what is on it before the first read, so
