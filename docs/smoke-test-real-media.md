@@ -134,7 +134,7 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       discs read back clean at ~20 MB/s: `Read back: verified (2614 files).`,
       both sessions VERIFIED. (b) Not run; no append yet. This led to the xorriso
       fallback, item 13.)
-- [ ] 13. `burn --verify`'s xorriso fallback (burn-verify spec §8), on the next
+- [x] 13. `burn --verify`'s xorriso fallback (burn-verify spec §8), on the next
       blank: after `Writing done`, `Disc <name> is not mountable yet: … Reading
       it through xorriso instead, into <work_dir>/readback (needs N GB).`, then
       a `reading disc <name> through xorriso` bar that advances about once a
@@ -143,6 +143,15 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       eject. `<work_dir>/readback` is gone afterwards. (Pacifier cadence checked
       beforehand by extracting one 440 MB folder of disc 1B: one `files
       restored ( 431.1m) in 26 seconds , 5.3xB` line a second, ~24 MB/s.)
+      (Rust @ 85ff61b, 2026-10-16, immich-family 2A, a 24.5 GB blank BD-R,
+      Pioneer at `/dev/sr0`: exactly as described. The mount failed as before,
+      and `Disc 2A is not mountable yet: … Reading it through xorriso instead,
+      into …/immich-family/readback (needs 24.5 GB).` followed. `reading disc
+      2A through xorriso` advanced live to 24.5/24.5 GB at 20 MB/s, then
+      `verifying disc 2A … 2046/2046 files · 1005 MB/s`. No reinsert prompt;
+      the run went straight on to ask for 2B's blank. 2A's session is VERIFIED
+      and `readback/` was gone afterwards. Burn plus read-back took one hour,
+      unattended.)
 
 Run record: 2026-09-11, Rust binary @ commit b81b342 (release build), Pioneer
 BDR-UD04 at `/dev/sr1`, one CMC BD-R (POW caveat above did not apply — media
