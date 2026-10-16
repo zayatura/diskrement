@@ -64,6 +64,16 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   backend keeps them because `StagingVerifier` reads them. This is safe only because
   every disc, twins included, is staged from `work_dir/snapshot`: never stage a disc
   from another disc's tree, and never hardlink into staging.
+- **The pipeline ejects, not the burner.** `XorrisoBurner::burn` leaves the disc
+  in the drive; `burn_disc` calls `Burner::eject` after the commit, or under
+  `burn --verify` after the read-back (`pipeline/read_back.rs`). The read-back
+  happens before the commit, against expected contents read from the post-burn
+  work copy (`disc_expectation`), and a failed disc is never recorded.
+- **A read-back trusts the mount only if it shows the new session.** Without an
+  eject the kernel may still show the previous session; `DiscVerifier::read_back`
+  compares the mounted `/.diskrement/project.json` with the session just written
+  and calls a mismatch `Unverifiable` (reinsert), never `Failed`. Otherwise a
+  good appended disc would read as missing its new files.
 - **xorriso extracts over an existing file** (validated 2026-09-07, 1.5.8.pl02),
   but every extraction in this tree still targets a fresh path inside a
   `TempDir`, so nothing depends on that.

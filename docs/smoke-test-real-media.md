@@ -116,6 +116,14 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       · ETA 0m00s`, then `disc 2A: 9042 files OK ✓`. Read-back ran at ~20 MB/s.
       No superseded versions on this disc, so the tier-2 line was not
       exercised on real media.)
+- [ ] 12. `burn --verify` on real media, before relying on the flag (burn-verify
+      spec §2, §7.4). (a) A blank BD-R: after `Writing done`, `Reading disc <name>
+      back before it is recorded.`, `Mounting disc <name>…` and the verifying
+      line appear with no eject, then `Read back: verified (N files).`; the
+      drive ejects only then. (b) An append to an open disc: the same, and the
+      mount shows the new session. Record whether `udisksctl` mounted the new
+      session without a reload. If it did not, confirm that the `Couldn't verify
+      … Reinsert` prompt appeared and that the reinserted disc verified.
 
 Run record: 2026-09-11, Rust binary @ commit b81b342 (release build), Pioneer
 BDR-UD04 at `/dev/sr1`, one CMC BD-R (POW caveat above did not apply — media

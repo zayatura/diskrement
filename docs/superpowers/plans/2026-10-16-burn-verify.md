@@ -2229,4 +2229,9 @@ git push origin --delete feat/burn-verify
 
 ## Execution deviations
 
-(Append here during execution.)
+Executed inline on 2026-10-16 (not subagent-driven, at the user's choice), with one review subagent at the end.
+
+1. **`recording` returns `impl Exec + 'a`.** The planned `impl Fn(…) -> Result<…>` return type, and the same with a type alias, both fail `clippy::type_complexity`. `Exec` is the blanket-implemented trait the closure stands for anyway.
+2. **Seven read-back pipeline tests, not eight.** The plan counted Task 3's `a_real_burn_ejects_once_the_disc_is_committed` (the no-verify path) among them.
+3. **Tasks 1, 6 and 9 were not seen failing first.** Task 1's test is for test infrastructure, Task 6 is a refactor guarded by the existing tests, and scenario 16 was written after the feature it drives. Every other task's tests were run red before the implementation.
+4. **Test count:** 698 on `main` → 724 (`DISKREMENT_SCENARIOS_REQUIRED=1`, xorriso present, nothing skipped).
