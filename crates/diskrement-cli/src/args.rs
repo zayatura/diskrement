@@ -145,6 +145,10 @@ pub enum Command {
         /// A disc that reads back bad is not recorded.
         #[arg(long, default_value_t = false)]
         verify: bool,
+        /// Never eject, not even before a reinsert prompt. A diagnostic for
+        /// examining a freshly burned disc, so it is left out of `--help`.
+        #[arg(long, default_value_t = false, hide = true)]
+        no_eject: bool,
     },
     /// Discard staged plan state.
     Reset { name: String },
@@ -447,6 +451,30 @@ mod tests {
                 .command,
             Command::Burn { yes: true, .. }
         ));
+    }
+
+    /// `--no-eject` is a diagnostic: off by default and absent from `--help`.
+    #[test]
+    fn burn_no_eject_is_hidden_and_off_by_default() {
+        let no_eject = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Command::Burn { no_eject, .. } => no_eject,
+            _ => panic!("not burn"),
+        };
+        assert!(!no_eject(&["diskrement", "burn", "p"]));
+        assert!(no_eject(&[
+            "diskrement",
+            "burn",
+            "p",
+            "--verify",
+            "--no-eject"
+        ]));
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("burn")
+            .expect("burn exists")
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("no-eject"), "{help}");
     }
 
     #[test]

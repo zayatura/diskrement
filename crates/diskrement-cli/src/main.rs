@@ -177,7 +177,12 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             say(&render::status_report(&p, &report));
             Ok(0)
         }
-        Command::Burn { name, yes, verify } => {
+        Command::Burn {
+            name,
+            yes,
+            verify,
+            no_eject,
+        } => {
             // The project lookup comes first (`Runner.withProject` resolves the
             // project before `Prompt.confirm`), so an unknown project fails with
             // exit 2 without asking anything.
@@ -199,9 +204,14 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 backend::Backend::Simulated => {
                     Burner::Simulated(SimulatedBurner::new(&sink, par.value))
                 }
-                backend::Backend::Real(device) => Burner::Real(XorrisoBurner::new(
-                    device, &exec, &operator, &sink, par.value,
-                )),
+                backend::Backend::Real(device) => {
+                    let burner = XorrisoBurner::new(device, &exec, &operator, &sink, par.value);
+                    Burner::Real(if no_eject {
+                        burner.keeping_disc_in_drive()
+                    } else {
+                        burner
+                    })
+                }
             };
 
             if !prompt::confirm(&format!("Burn the staged plan for {name}?"), yes) {
