@@ -2234,4 +2234,11 @@ Executed inline on 2026-10-16 (not subagent-driven, at the user's choice), with 
 1. **`recording` returns `impl Exec + 'a`.** The planned `impl Fn(…) -> Result<…>` return type, and the same with a type alias, both fail `clippy::type_complexity`. `Exec` is the blanket-implemented trait the closure stands for anyway.
 2. **Seven read-back pipeline tests, not eight.** The plan counted Task 3's `a_real_burn_ejects_once_the_disc_is_committed` (the no-verify path) among them.
 3. **Tasks 1, 6 and 9 were not seen failing first.** Task 1's test is for test infrastructure, Task 6 is a refactor guarded by the existing tests, and scenario 16 was written after the feature it drives. Every other task's tests were run red before the implementation.
-4. **Test count:** 698 on `main` → 724 (`DISKREMENT_SCENARIOS_REQUIRED=1`, xorriso present, nothing skipped).
+4. **Final review (one subagent): no blockers.** It found one real hole. In `DiscVerifier::read_back`, a tier-2 setup error (`TempDir` creation) discarded tier 1's mismatches, so a known-bad disc read as unverifiable and was recorded if the operator declined the reinsert. Fixed with `combine_tiers`: tier-1 evidence stands whatever tier 2 does. The fix came with tests for the gaps it named:
+   - tier 2 under `read_back`
+   - a `read_back` error turning into a reinsert
+   - an unreadable identity
+   - a read error mid-hash on the disc verifier
+
+   Nits it raised that were left as they are: the failed disc and its retry share an identity; a retry that fails for another reason ends with that error rather than `VerifyFailed`; `StagingVerifier` does not count missing expected files (pre-existing, simulated only); an unreadable directory inflates the counts; the advice omits the project name, in line with the existing messages.
+5. **Test count:** 698 on `main` → 728 (`DISKREMENT_SCENARIOS_REQUIRED=1`, xorriso present, nothing skipped).

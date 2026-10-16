@@ -351,6 +351,36 @@ fn a_mount_still_showing_the_last_session_asks_for_the_disc_again() {
     assert_eq!(ejects, 2, "one before the reinsert, one when done");
 }
 
+/// A read-back that fails for a reason outside the disc (here xorriso's
+/// output cannot be parsed) asks for the disc again, like an unverifiable
+/// one, and never discards it (spec §4.2).
+#[test]
+fn a_read_back_error_asks_for_the_disc_again() {
+    let mut env = env(1);
+    stage(&mut env, &[("a.bin", b"aaaa")]);
+    let tree = env.work.join("staging/disc-1");
+    let garbage: &[&str] = &["garbage"];
+    let script = ScriptedExec::new()
+        .toc(&[BLANK, garbage, APPENDABLE])
+        .identities(&[Some(ID_1), Some(ID_1)])
+        .mounts(&[Some(&tree)]);
+    let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+    let op = ScriptedOperator::new(&[true, true]);
+
+    let report = burn_verifying(&mut env, &exec, &op).unwrap();
+
+    assert!(
+        op.said("Couldn't verify disc 1: xorriso failed"),
+        "{:?}",
+        op.log()
+    );
+    assert_eq!(
+        report.discs[0].read_back,
+        Some(DiscReadBack::Verified { files: 1 })
+    );
+    assert_eq!(sessions(&env, SessionState::Verified), vec![(1, 0, 1)]);
+}
+
 #[test]
 fn declining_to_reinsert_records_the_disc_unverified() {
     let mut env = env(1);

@@ -82,6 +82,31 @@ impl ReadBack {
     }
 }
 
+/// Tier 1's and tier 2's findings as one read-back. Tier 1's mismatches are
+/// evidence against the disc whatever tier 2 does: a tier 2 that failed to
+/// set up says nothing about the disc, and passing its error on would let a
+/// known-bad disc be treated as unverifiable and then recorded. Only with no
+/// evidence is it an error, which the pipeline treats as unverifiable.
+fn combine_tiers(
+    tier1: (usize, Vec<RelPath>),
+    tier2: Result<(usize, Vec<RelPath>), BurnError>,
+) -> Result<ReadBack, BurnError> {
+    let (checked_1, mut mismatches) = tier1;
+    let (checked_2, hidden) = match tier2 {
+        Ok(found) => found,
+        Err(_) if !mismatches.is_empty() => (0, Vec::new()),
+        Err(e) => return Err(e),
+    };
+    mismatches.extend(hidden);
+    mismatches.sort();
+    mismatches.dedup();
+    Ok(ReadBack::from_outcome(VerifyOutcome {
+        files_checked: checked_1 + checked_2,
+        mismatches,
+        skipped: false,
+    }))
+}
+
 /// This project's disc `exp.disc`, at exactly session `session`.
 fn is_session(exp: &DiscExpectation, session: u32, id: &DiscIdentity) -> bool {
     id.project_name == exp.project_name && id.disc() == exp.disc && id.session_ordinal == session
@@ -322,7 +347,7 @@ impl<'a> DiscVerifier<'a> {
                 None => Ok(compare_visible(data_dir, exp, self.sink)),
             })
         });
-        let (checked_1, mut mismatches) = match tier1 {
+        let (checked_1, mismatches) = match tier1 {
             Ok(Ok(found)) => found,
             Ok(Err(stale)) => return Ok(ReadBack::Unverifiable(stale)),
             Err(BurnError::MountFailed(why)) => {
@@ -330,15 +355,7 @@ impl<'a> DiscVerifier<'a> {
             }
             Err(e) => return Err(e),
         };
-        let (checked_2, tier2) = self.tier2(exp)?;
-        mismatches.extend(tier2);
-        mismatches.sort();
-        mismatches.dedup();
-        Ok(ReadBack::from_outcome(VerifyOutcome {
-            files_checked: checked_1 + checked_2,
-            mismatches,
-            skipped: false,
-        }))
+        combine_tiers((checked_1, mismatches), self.tier2(exp))
     }
 
     /// `Some(reason)` when the mounted tree is not session `session` of this
@@ -683,6 +700,37 @@ mod tests {
         assert_eq!(out.unwrap().mismatches, vec![RelPath("sub".to_string())]);
     }
 
+    fn rels(names: &[&str]) -> Vec<RelPath> {
+        names.iter().map(|n| RelPath((*n).to_string())).collect()
+    }
+
+    /// Tier 1's evidence stands whatever tier 2 does: a tier 2 that could not
+    /// even set up must not turn a known-bad disc into an unverifiable one,
+    /// which the operator may then record.
+    #[test]
+    fn a_tier_two_failure_never_hides_tier_one_mismatches() {
+        let setup = || Err(BurnError::Io(std::io::Error::other("no temp dir")));
+        assert_eq!(
+            combine_tiers((3, rels(&["b.txt"])), setup()).unwrap(),
+            ReadBack::Failed {
+                files: 3,
+                mismatches: rels(&["b.txt"])
+            }
+        );
+        assert!(combine_tiers((3, Vec::new()), setup()).is_err());
+        assert_eq!(
+            combine_tiers((3, rels(&["b.txt"])), Ok((2, rels(&["a.txt", "b.txt"])))).unwrap(),
+            ReadBack::Failed {
+                files: 5,
+                mismatches: rels(&["a.txt", "b.txt"])
+            }
+        );
+        assert_eq!(
+            combine_tiers((3, Vec::new()), Ok((2, Vec::new()))).unwrap(),
+            ReadBack::Passed { files: 5 }
+        );
+    }
+
     /// The simulated backend's read-back is its `verify` against the staged
     /// tree, with an absent tree reported as unverifiable, never a pass.
     #[test]
@@ -965,6 +1013,7 @@ mod tests {
                 ScriptedExec::new()
                     .toc(&[APPENDABLE])
                     .identities(&[Some(IDENTITY)]),
+                ScriptedExec::new().toc(&[APPENDABLE]).identities(&[None]),
                 ScriptedExec::new().toc(&[BLANK]),
             ] {
                 // Session 2 expected: IDENTITY is session 1.
@@ -999,6 +1048,72 @@ mod tests {
             assert!(
                 script.ran("udisksctl unmount"),
                 "the stale mount is released"
+            );
+        }
+
+        /// A file the mounted disc cannot read fails the read-back.
+        #[test]
+        fn an_unreadable_file_on_the_disc_fails_the_read_back() {
+            let disc = mounted(&[("a.txt", b"hello"), ("b.txt", b"keep")], IDENTITY);
+            if !lock(&disc.path().join("data/b.txt")) {
+                eprintln!(
+                    "SKIP [an_unreadable_file_on_the_disc_fails_the_read_back]: running as root"
+                );
+                return;
+            }
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[Some(disc.path())]);
+            let (out, _) = read_back(
+                &script,
+                &visible(&[("a.txt", b"hello"), ("b.txt", b"keep")]),
+                1,
+            );
+            assert_eq!(
+                out,
+                ReadBack::Failed {
+                    files: 2,
+                    mismatches: vec![RelPath("b.txt".to_string())],
+                }
+            );
+        }
+
+        /// An appended disc's read-back also extracts the versions its new
+        /// session hid (tier 2), and a bad one fails the disc. Read from an
+        /// image file, whose `/data` and single files `Toc` extracts.
+        #[test]
+        fn a_read_back_checks_the_versions_a_new_session_hid() {
+            let hidden = |old: &'static [u8]| DiscExpectation {
+                superseded: vec![SupersededVersion {
+                    session_ordinal: 1,
+                    rel_path: RelPath("a.txt".to_string()),
+                    content_hash: sha(old),
+                    size_bytes: old.len() as u64,
+                }],
+                ..visible(&[("a.txt", b"hello")])
+            };
+            let run = |exp: &DiscExpectation| {
+                let toc = Toc::with_data(&[IDENTITY_2], &[("a.txt", b"hello")]);
+                let exec = |c: &[String], l: &mut dyn FnMut(&str)| toc.respond(c, l);
+                let op = ScriptedOperator::new(&[]);
+                DiscVerifier::new(
+                    BurnDevice::ImageFile(std::path::PathBuf::from("/tmp/none.iso")),
+                    &exec,
+                    &op,
+                    &NoopSink,
+                )
+                .read_back(exp, 2)
+                .unwrap()
+            };
+            // Toc serves the session-1 extraction of a.txt with today's body.
+            assert_eq!(run(&hidden(b"hello")), ReadBack::Passed { files: 2 });
+            assert_eq!(
+                run(&hidden(b"older")),
+                ReadBack::Failed {
+                    files: 2,
+                    mismatches: vec![RelPath("a.txt".to_string())],
+                }
             );
         }
 
