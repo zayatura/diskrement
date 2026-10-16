@@ -141,6 +141,10 @@ pub enum Command {
         name: String,
         #[arg(long, short = 'y', default_value_t = false)]
         yes: bool,
+        /// Read each disc back before recording it, and eject it only after.
+        /// A disc that reads back bad is not recorded.
+        #[arg(long, default_value_t = false)]
+        verify: bool,
     },
     /// Discard staged plan state.
     Reset { name: String },
@@ -431,7 +435,7 @@ mod tests {
             vec!["diskrement", "burn", "p", "-y"],
         ] {
             let cli = Cli::try_parse_from(argv).unwrap();
-            let Command::Burn { name, yes } = cli.command else {
+            let Command::Burn { name, yes, .. } = cli.command else {
                 panic!("not burn")
             };
             assert_eq!(name, "p");
@@ -443,6 +447,16 @@ mod tests {
                 .command,
             Command::Burn { yes: true, .. }
         ));
+    }
+
+    #[test]
+    fn burn_verify_is_off_unless_asked_for() {
+        let verify = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Command::Burn { verify, .. } => verify,
+            _ => panic!("not burn"),
+        };
+        assert!(!verify(&["diskrement", "burn", "p"]));
+        assert!(verify(&["diskrement", "burn", "p", "--verify"]));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use diskrement_shell::catalog::model::{
 use diskrement_shell::catalog::time;
 use diskrement_shell::error::PipelineError;
 use diskrement_shell::pipeline::reports::{
-    BurnReport, PlanReport, ScanReport, StatusReport, VerifyReport,
+    BurnReport, DiscReadBack, PlanReport, ScanReport, StatusReport, VerifyReport,
 };
 
 pub fn init_done(name: &str, id: ProjectId) -> String {
@@ -193,6 +193,16 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
             }
             .to_string(),
         );
+        match d.read_back {
+            Some(DiscReadBack::Verified { files }) => {
+                lines.push(format!("Read back: verified ({files} files)."));
+            }
+            Some(DiscReadBack::Unverified) => lines.push(format!(
+                "Read back: recorded unverified — run verify --disc {}.",
+                d.disc.name(copies)
+            )),
+            None => {}
+        }
     }
     if copies > 1 {
         lines.extend(coverage_lines(&r.coverage.sets));
@@ -1266,6 +1276,22 @@ mod tests {
 mod burn_render_tests {
     use super::*;
     use diskrement_shell::pipeline::reports::{BurnReport, DiscBurn, RemainingEstimate};
+
+    #[test]
+    fn a_read_back_disc_says_whether_it_was_verified() {
+        use diskrement_shell::pipeline::reports::DiscReadBack;
+        let mut r = report(false, 0);
+        r.discs[0].read_back = Some(DiscReadBack::Verified { files: 9042 });
+        assert!(burn_report(&r, 1).contains(
+            "Status: left OPEN — may receive more sessions later.\nRead back: verified (9042 files)."
+        ));
+        r.discs[0].read_back = Some(DiscReadBack::Unverified);
+        assert!(
+            burn_report(&r, 1).contains("Read back: recorded unverified — run verify --disc 1.")
+        );
+        r.discs[0].read_back = None;
+        assert!(!burn_report(&r, 1).contains("Read back"));
+    }
 
     fn report(finalized: bool, more_discs: usize) -> BurnReport {
         BurnReport {

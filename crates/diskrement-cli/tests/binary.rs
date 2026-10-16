@@ -510,6 +510,22 @@ mod burn {
             .is_file());
     }
 
+    /// `burn --verify` on the simulated backend reads the staged disc back
+    /// and says so; a later sweep agrees.
+    #[test]
+    fn burn_verify_reports_the_disc_read_back() {
+        let p = project();
+        init_and_plan(&p);
+
+        base(&p)
+            .args(["burn", "p", "--yes", "--verify"])
+            .assert()
+            .success()
+            .stdout(contains("Reading disc 1 back before it is recorded."))
+            .stdout(contains("Read back: verified ("));
+        base(&p).args(["verify", "p"]).assert().success();
+    }
+
     /// A second burn with nothing staged is the state error, exit 2.
     #[test]
     fn burning_twice_fails_with_the_staged_state_error() {
@@ -1039,6 +1055,38 @@ mod real_backend {
             .success()
             .stdout(contains("Last burn: never"));
         // And the staged plan survives, so the operator can retry.
+        assert!(p.work.join("staged/plan.json").is_file());
+    }
+
+    /// `--verify` changes nothing before the disc prompt: with no stdin the
+    /// burn still aborts, exit 0, before the device is touched.
+    #[test]
+    fn a_real_burn_with_verify_still_asks_for_the_disc_first() {
+        if !has_xorriso() {
+            eprintln!(
+                "SKIP [a_real_burn_with_verify_still_asks_for_the_disc_first]: \
+                 xorriso is not installed; the burn path preflights it."
+            );
+            return;
+        }
+        let p = project();
+        init_and_plan(&p);
+
+        Command::cargo_bin("diskrement")
+            .expect("binary builds")
+            .arg("--catalog")
+            .arg(&p.catalog)
+            .args([
+                "--burner", "real", "--device", "/dev/sr0", "burn", "p", "--yes", "--verify",
+            ])
+            .env_remove("DISKREMENT_BURNER")
+            .env_remove("DISKREMENT_DEVICE")
+            .assert()
+            .code(0)
+            .stdout(contains(
+                "Insert a blank disc for 'p' disc 1 into /dev/sr0 and confirm. [y/N]",
+            ))
+            .stderr(contains("Aborted."));
         assert!(p.work.join("staged/plan.json").is_file());
     }
 
