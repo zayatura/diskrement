@@ -236,6 +236,9 @@ pub struct SupersededVersion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscRecordedContents {
     pub visible: BTreeMap<RelPath, ContentHash>,
+    /// The bytes of the `visible` versions: what a mount shows, and so what
+    /// reading the disc back into a directory needs room for.
+    pub visible_bytes: u64,
     pub superseded: Vec<SupersededVersion>,
 }
 

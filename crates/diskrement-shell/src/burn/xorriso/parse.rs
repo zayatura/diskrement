@@ -169,9 +169,61 @@ pub fn writing_per_mille(line: &str) -> Option<u32> {
     Some((whole * 10 + tenth).min(1000))
 }
 
+/// How many bytes an `-extract` has restored so far, from xorriso's pacifier:
+/// `xorriso : UPDATE :  31 files restored ( 490.0m) in 1 seconds` → 490 MiB.
+/// The suffix is a binary unit (k, m, g, t) or absent for bytes. `None` for
+/// every other line.
+pub fn restored_bytes(line: &str) -> Option<u64> {
+    let (_, rest) = line.split_once("files restored (")?;
+    let (amount, _) = rest.split_once(')')?;
+    let amount = amount.trim();
+    let (number, scale) = match amount.chars().last()? {
+        'k' => (&amount[..amount.len() - 1], 1u64 << 10),
+        'm' => (&amount[..amount.len() - 1], 1 << 20),
+        'g' => (&amount[..amount.len() - 1], 1 << 30),
+        't' => (&amount[..amount.len() - 1], 1 << 40),
+        _ => (amount, 1),
+    };
+    let value: f64 = number.parse().ok()?;
+    (value >= 0.0).then_some((value * scale as f64) as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// xorriso's restore pacifier, as printed by `-extract` (1.5.8.pl02),
+    /// scaled by its binary-unit suffix; anything else is `None`.
+    #[test]
+    fn a_restore_pacifier_gives_the_bytes_restored_so_far() {
+        assert_eq!(
+            restored_bytes(
+                "xorriso : UPDATE :      31 files restored ( 490.0m) in 1 seconds = 371.0xD"
+            ),
+            Some(490 * 1024 * 1024)
+        );
+        assert_eq!(
+            restored_bytes("xorriso : UPDATE :    2614 files restored ( 22.7g) in 1200 seconds"),
+            Some((22.7 * 1024.0 * 1024.0 * 1024.0) as u64)
+        );
+        assert_eq!(
+            restored_bytes("xorriso : UPDATE :       1 files restored (   12k) in 1 seconds"),
+            Some(12 * 1024)
+        );
+        assert_eq!(
+            restored_bytes("xorriso : UPDATE :       1 files restored (  512) in 1 seconds"),
+            Some(512)
+        );
+        assert_eq!(
+            restored_bytes("xorriso : UPDATE :       9 files restored ( 1.5t) in 9 seconds"),
+            Some((1.5 * 1024f64.powi(4)) as u64)
+        );
+        assert_eq!(
+            restored_bytes("xorriso : UPDATE :      32 nodes read in 1 seconds"),
+            None
+        );
+        assert_eq!(restored_bytes("files restored ( lots) in 1 seconds"), None);
+    }
 
     fn lines(text: &[&str]) -> Vec<String> {
         text.iter().map(|s| (*s).to_string()).collect()

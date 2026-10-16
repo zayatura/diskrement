@@ -1034,6 +1034,7 @@ fn disc_expectation(
         disc_name: disc.name(p.copies),
         latest_session,
         visible: recorded.visible,
+        visible_bytes: recorded.visible_bytes,
         superseded: recorded.superseded,
     })
 }

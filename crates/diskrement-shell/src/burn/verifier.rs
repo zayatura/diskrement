@@ -36,6 +36,9 @@ pub struct DiscExpectation {
     pub disc_name: String,
     pub latest_session: BTreeMap<RelPath, ContentHash>,
     pub visible: BTreeMap<RelPath, ContentHash>,
+    /// The bytes of `visible`: what reading the disc back into a directory
+    /// needs room for (burn-verify spec §8.2).
+    pub visible_bytes: u64,
     pub superseded: Vec<SupersededVersion>,
 }
 
@@ -516,6 +519,7 @@ mod tests {
                 .map(|(rel, body)| (RelPath((*rel).to_string()), sha(body)))
                 .collect(),
             visible: BTreeMap::new(),
+            visible_bytes: 0,
             superseded: Vec::new(),
         }
     }
@@ -831,6 +835,7 @@ mod tests {
                 disc_name: "1".to_string(),
                 latest_session: BTreeMap::new(),
                 visible: BTreeMap::new(),
+                visible_bytes: 0,
                 superseded: Vec::new(),
             }
         }

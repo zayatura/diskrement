@@ -206,6 +206,7 @@ fn two_tier_verification_passes_clean_mismatches_tampered_and_skips_declined() {
             (RelPath("a.txt".to_string()), sha256("v2")),
             (RelPath("b.txt".to_string()), sha256("keep")),
         ]),
+        visible_bytes: 6,
         superseded: vec![SupersededVersion {
             session_ordinal: 1,
             rel_path: RelPath("a.txt".to_string()),
@@ -287,6 +288,7 @@ fn a_file_missing_from_the_disc_is_a_mismatch() {
                 (RelPath("only.txt".to_string()), sha256("here")),
                 (RelPath("ghost.txt".to_string()), sha256("missing")),
             ]),
+            visible_bytes: 11,
             superseded: Vec::new(),
         })
         .expect("verification runs");
