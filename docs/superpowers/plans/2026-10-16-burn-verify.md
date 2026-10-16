@@ -2242,3 +2242,13 @@ Executed inline on 2026-10-16 (not subagent-driven, at the user's choice), with 
 
    Nits it raised that were left as they are: the failed disc and its retry share an identity; a retry that fails for another reason ends with that error rather than `VerifyFailed`; `StagingVerifier` does not count missing expected files (pre-existing, simulated only); an unreadable directory inflates the counts; the advice omits the project name, in line with the existing messages.
 5. **Test count:** 698 on `main` → 728 (`DISKREMENT_SCENARIOS_REQUIRED=1`, xorriso present, nothing skipped).
+
+## Follow-up: the xorriso fallback (spec §8)
+
+The first real burns showed that this drive and kernel cannot mount a freshly burned disc (spec §8.1). On the same day, with the operator's agreement, the read-back gained the xorriso fallback in spec §8.2. It was built inline on `feat/readback-xorriso` with a final review, and no separate plan doc: the addendum names the design and its tests.
+
+Two diagnostics came out of the first burns:
+
+- **The hidden `burn --no-eject` flag** (3473456). It kept 1B in the drive so the kernel's view could be examined.
+- **The extraction-pacifier cadence**, measured on the real drive before the parser was finalised. The real lines are pinned in `parse::tests`.
+
