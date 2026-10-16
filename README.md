@@ -112,6 +112,38 @@ diskrement disc mark-dead photos 1   # write off a destroyed disc; --yes to skip
 The per-project catalog defaults to `$XDG_DATA_HOME/diskrement/<name>.sqlite`
 (or systemd's `$STATE_DIRECTORY`), overridable with `--catalog`.
 
+### Several directories in one project
+
+Instead of one `--source`, a project can archive several directories onto one disc
+series, each under a name you choose:
+
+```
+diskrement init family --work-dir /srv/work \
+  --root family/anna=/srv/immich/library/65966390-… \
+  --root family/bela=/srv/immich/library/4efdf184-… \
+  --root others/cecil=/srv/immich/library/48199862-…
+```
+
+Each root's files appear on the discs under its name (`family/anna/2024/…`). Discs fill
+in order of the path *below* each root, then the root name, so libraries laid out by date
+(Immich's `YYYY/YYYY-MM-DD/`) interleave: the first disc holds the oldest files from
+every root, whichever group it sits in. `--source` and `--root` are exclusive, and `init`
+needs one of them. A `--root` value splits at its first `=`, so a path may contain `=`
+but a name may not.
+
+A name is one or more `/`-separated components. No component may be empty, `.` or `..`,
+or longer than 255 bytes, and the name may not contain a control character. Spaces and
+non-ASCII are fine. A bad name is a usage error (exit 1), as are a path that is not valid
+UTF-8, two equal names, and a name inside another (`family` with `family/anna`), which
+would put one root's files in another's directory; `family` with `familyx` is fine.
+`init` also refuses two roots that share a directory or sit one inside the other, after
+resolving symlinks, and reports their paths as you gave them (exit 3). It checks that
+every root exists and is on the work dir's filesystem.
+
+The roots are fixed at `init`: a name is permanent once files are burned under it,
+because renaming one would read as deleting and re-adding everything below it. `status`
+lists the roots before the discs.
+
 ### Real burning
 
 The default backend burns real media via `xorriso` (ISO 9660 level 3 + Rock Ridge,
