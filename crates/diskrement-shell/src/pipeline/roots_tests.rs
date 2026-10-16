@@ -1,3 +1,4 @@
+//! Rooted projects through the pipeline: `init`'s checks on the roots, and a
 //! full plan → burn → verify cycle whose discs fill by date across roots
 //! (project-roots spec §3.3, §4, §5).
 

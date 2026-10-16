@@ -107,6 +107,7 @@ pub enum Command {
         source: Option<PathBuf>,
         /// A named directory to archive, as NAME=PATH; repeat for each.
         /// Its files go under NAME/ on every disc, and NAME may contain '/'.
+        /// A NAME starting with '-' needs the --root=NAME=PATH form.
         /// Exclusive with --source.
         #[arg(long = "root", value_name = "NAME=PATH", value_parser = root_arg)]
         root: Vec<(RootName, PathBuf)>,

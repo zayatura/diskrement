@@ -104,8 +104,8 @@ impl<'a> Pipeline<'a> {
     }
 
     /// `init`: same-filesystem check for every root, overlap check across
-    /// roots, CoW probe, then the project row and its roots. No snapshot, no scan, no other rows
-    /// (`PipelineLive.init`).
+    /// roots, CoW probe, then the project row and its roots. No snapshot, no
+    /// scan, no other rows (`PipelineLive.init`).
     pub fn init(&mut self, pi: &ProjectInit) -> Result<ProjectId, PipelineError> {
         let work = PathBuf::from(&pi.work_dir);
         for src in pi.sources.paths() {

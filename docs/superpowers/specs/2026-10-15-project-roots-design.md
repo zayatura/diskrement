@@ -1,7 +1,7 @@
 # Project roots — design
 
 **Date:** 2026-10-15
-**Status:** Draft, awaiting review
+**Status:** Implemented (branch `feat/project-roots`)
 **Branch:** `feat/project-roots`
 
 ---

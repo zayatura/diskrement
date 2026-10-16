@@ -1,7 +1,8 @@
 //! Scenario 15: three Immich-style libraries as named roots of one project.
 //! Discs fill by date across the libraries rather than one library after
-//! another, in a copies=2 project like the real photo backup. Each disc carries the roots as readable top-level directories,
-//! and its embedded catalog records them. Unlike s05, which file lands on
+//! another, in a copies=2 project like the real photo backup. Each disc
+//! carries the roots as readable top-level directories, and its embedded
+//! catalog records them. Unlike s05, which file lands on
 //! which disc *is* the contract here (project-roots spec §5).
 
 use crate::{disc, support};
