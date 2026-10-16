@@ -5,8 +5,13 @@ pub mod planning;
 pub mod reports;
 pub mod staged;
 
+mod read_back;
+#[cfg(test)]
+mod read_back_tests;
 #[cfg(test)]
 mod roots_tests;
+
+pub use read_back::VerifyAfterBurn;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
@@ -34,8 +39,8 @@ use crate::fs::snapshot::{self, SnapshotHandle};
 use crate::progress::ProgressSink;
 
 use reports::{
-    BurnReport, DiscBurn, PlanOutcome, PlanReport, RemainingEstimate, ScanReport, SetPlan,
-    StatusReport, VerifyReport,
+    BurnReport, DiscBurn, DiscReadBack, PlanOutcome, PlanReport, RemainingEstimate, ScanReport,
+    SetPlan, StatusReport, VerifyReport,
 };
 
 /// The paths a pipeline needs, resolved by the CLI (`ProjectPaths` +
@@ -299,6 +304,16 @@ impl<'a> Pipeline<'a> {
         )
     }
 
+    /// `burn_with` without a read-back: plain `burn`.
+    pub fn burn(
+        &mut self,
+        name: &str,
+        now: DateTime<Utc>,
+        burner: &Burner<'_>,
+    ) -> Result<BurnReport, PipelineError> {
+        self.burn_with(name, now, burner, None)
+    }
+
     /// `burn`: write the staged plan's discs in set order, committing each one
     /// as soon as it is written.
     ///
@@ -313,11 +328,15 @@ impl<'a> Pipeline<'a> {
     ///
     /// `now` is supplied by the caller rather than read from the clock: it
     /// keeps the pipeline deterministic.
-    pub fn burn(
+    ///
+    /// With `read_back`, each disc is read back before it is recorded and
+    /// ejected after (burn-verify spec §5.1).
+    pub fn burn_with(
         &mut self,
         name: &str,
         now: DateTime<Utc>,
         burner: &Burner<'_>,
+        read_back: Option<&VerifyAfterBurn<'_>>,
     ) -> Result<BurnReport, PipelineError> {
         let p = self.project(name)?;
         if staged::is_legacy_plan(&self.paths.work_dir) {
@@ -374,7 +393,7 @@ impl<'a> Pipeline<'a> {
             }
         };
         while let Some(sp) = report.sets.first().cloned() {
-            match self.burn_disc(&p, &scanned, &report, &sp, now, burner) {
+            match self.burn_disc(&p, &scanned, &report, &sp, now, burner, read_back) {
                 Ok(burned) => {
                     done.push(sp.disc.key());
                     written.extend(burned);
@@ -392,7 +411,14 @@ impl<'a> Pipeline<'a> {
                     }
                 }
                 Err(DiscFailure::Unwritten(e)) => {
-                    return Err(partial(&done, None, &report.sets, e));
+                    // A disc that failed its read-back is named by the cause,
+                    // so it is not also listed as unwritten.
+                    let pending = if matches!(e, PipelineError::VerifyFailed { .. }) {
+                        &report.sets[1..]
+                    } else {
+                        &report.sets[..]
+                    };
+                    return Err(partial(&done, None, pending, e));
                 }
                 Err(DiscFailure::Unrecorded {
                     cause,
@@ -433,6 +459,8 @@ impl<'a> Pipeline<'a> {
     /// Write one planned disc and commit its session. `Ok(None)` means the
     /// catalog already holds the session this plan expected: an earlier run
     /// committed the disc and stopped before rewriting the staged plan.
+    // One disc's whole context; bundling it would only move the list.
+    #[allow(clippy::too_many_arguments)]
     fn burn_disc(
         &mut self,
         p: &Project,
@@ -441,6 +469,7 @@ impl<'a> Pipeline<'a> {
         sp: &SetPlan,
         now: DateTime<Utc>,
         burner: &Burner<'_>,
+        read_back: Option<&VerifyAfterBurn<'_>>,
     ) -> Result<Option<DiscBurn>, DiscFailure> {
         let disc = &sp.disc;
         let key = disc.key();
@@ -587,7 +616,23 @@ impl<'a> Pipeline<'a> {
             },
             close_disc: disc.will_finalize,
         };
-        let burned = burner.burn(&image).map_err(burner_failure)?;
+        let (burned, read_back_result, ejected) = match read_back {
+            None => (burner.burn(&image).map_err(burner_failure)?, None, false),
+            Some(step) => {
+                // Read before the burn, while nothing else holds the work
+                // copy; it already includes this disc's session.
+                let exp = {
+                    let work = Catalog::open(&tmp_catalog).map_err(DiscFailure::unwritten)?;
+                    disc_expectation(&work, p, key).map_err(DiscFailure::Unwritten)?
+                };
+                let done = read_back::burn_and_read_back(burner, step, &image, &exp)?;
+                let status = match done.verified_files {
+                    Some(files) => DiscReadBack::Verified { files },
+                    None => DiscReadBack::Unverified,
+                };
+                (done.burned, Some(status), done.ejected)
+            }
+        };
 
         // The crash-safe commit point: the disc exists, so the catalog may now
         // learn about it. The committed state equals the embedded snapshot.
@@ -598,12 +643,32 @@ impl<'a> Pipeline<'a> {
                 surely_written: true,
             })?;
         let _ = std::fs::remove_file(&tmp_catalog);
+        // A clean read-back marks the session VERIFIED, the same forward-only
+        // transition `verify` makes. If that write fails, the disc is still
+        // recorded, just unverified.
+        let read_back_result = match read_back_result {
+            Some(DiscReadBack::Verified { files }) => {
+                match self.catalog.mark_verified(p.id, key, sess_ord) {
+                    Ok(()) => Some(DiscReadBack::Verified { files }),
+                    Err(e) => {
+                        eprintln!(
+                            "disc {disc_name} read back clean but could not be marked verified ({e}); \
+                             run verify --disc {disc_name}"
+                        );
+                        Some(DiscReadBack::Unverified)
+                    }
+                }
+            }
+            other => other,
+        };
         // Only after the commit: until then the tree is part of what a retry
         // or an Unrecorded disc leaves behind.
         if !burner.retains_staging() {
             discard_staging(&burned.staging_dir);
         }
-        burner.eject();
+        if !ejected {
+            burner.eject();
+        }
 
         Ok(Some(DiscBurn {
             disc: key,
@@ -611,7 +676,7 @@ impl<'a> Pipeline<'a> {
             finalized: disc.will_finalize,
             staging_dir: burned.staging_dir,
             image_bytes: burned.image_bytes,
-            read_back: None,
+            read_back: read_back_result,
         }))
     }
 
