@@ -103,8 +103,8 @@ impl<'a> Pipeline<'a> {
             .ok_or_else(|| PipelineError::ProjectNotFound(name.to_string()))
     }
 
-    /// `init`: same-filesystem check for every root, CoW probe, then the
-    /// project row and its roots. No snapshot, no scan, no other rows
+    /// `init`: same-filesystem check for every root, overlap check across
+    /// roots, CoW probe, then the project row and its roots. No snapshot, no scan, no other rows
     /// (`PipelineLive.init`).
     pub fn init(&mut self, pi: &ProjectInit) -> Result<ProjectId, PipelineError> {
         let work = PathBuf::from(&pi.work_dir);
@@ -993,7 +993,12 @@ fn overlapping_roots(sources: &Sources) -> std::io::Result<Option<(PathBuf, Path
     };
     let canonical = roots
         .iter()
-        .map(|(_, given)| given.canonicalize().map(|c| (c, given)))
+        .map(|(_, given)| {
+            given
+                .canonicalize()
+                .map(|c| (c, given))
+                .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", given.display())))
+        })
         .collect::<std::io::Result<Vec<(PathBuf, &PathBuf)>>>()?;
     for (i, (a, a_given)) in canonical.iter().enumerate() {
         for (b, b_given) in &canonical[i + 1..] {

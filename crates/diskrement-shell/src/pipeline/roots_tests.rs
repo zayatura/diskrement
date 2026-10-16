@@ -190,9 +190,13 @@ fn init_refuses_two_roots_at_the_same_directory() {
 fn init_refuses_a_root_inside_another() {
     let mut e = env();
     let (lib, u1) = (e.lib.clone(), e.lib.join("u1"));
-    let err = refused_overlap(&mut e, vec![(name("all"), lib), (name("anna"), u1)]);
+    let err = refused_overlap(
+        &mut e,
+        vec![(name("all"), lib.clone()), (name("anna"), u1.clone())],
+    );
+    // Roots sort by name, so `all` comes first.
     assert!(
-        matches!(err, PipelineError::OverlappingRoots { .. }),
+        matches!(&err, PipelineError::OverlappingRoots { a, b } if *a == lib && *b == u1),
         "{err:?}"
     );
 }
@@ -202,9 +206,15 @@ fn init_resolves_symlinks_before_comparing_roots() {
     let mut e = env();
     let (u1, alias) = (e.lib.join("u1"), e.lib.join("alias"));
     std::os::unix::fs::symlink(&u1, &alias).unwrap();
-    let err = refused_overlap(&mut e, vec![(name("anna"), u1), (name("alias"), alias)]);
+    let err = refused_overlap(
+        &mut e,
+        vec![(name("anna"), u1.clone()), (name("alias"), alias.clone())],
+    );
+    // The error names the paths as given, not as resolved: `alias` is a
+    // symlink, so its canonical form is `u1`'s. Roots sort by name, so
+    // `alias` comes first.
     assert!(
-        matches!(err, PipelineError::OverlappingRoots { .. }),
+        matches!(&err, PipelineError::OverlappingRoots { a, b } if *a == alias && *b == u1),
         "{err:?}"
     );
 }
