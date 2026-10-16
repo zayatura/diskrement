@@ -2252,3 +2252,13 @@ Two diagnostics came out of the first burns:
 - **The hidden `burn --no-eject` flag** (3473456). It kept 1B in the drive so the kernel's view could be examined.
 - **The extraction-pacifier cadence**, measured on the real drive before the parser was finalised. The real lines are pinned in `parse::tests`.
 
+Final review of `feat/readback-xorriso`: no blockers. Fixed:
+
+- **A leftover read-back dir that could not be removed was extracted over.** xorriso merges, which could pass a bad disc. Such a leftover now makes the read-back unverifiable.
+- **xorriso's `b` byte suffix** is now parsed, and the test pins the real `( 11b)` form.
+- **One set of space figures** everywhere: the data plus a 1 GB margin.
+- **New tests:** the chmod-and-retry removal, an image file never falling back, and a real-xorriso extraction round trip that pins the layout.
+- **The spec now carries the shipped mount-failure wording** instead of "the system has not noticed the new disc yet".
+
+Tests: 730 → 742 (`DISKREMENT_SCENARIOS_REQUIRED=1`, xorriso present, nothing skipped).
+

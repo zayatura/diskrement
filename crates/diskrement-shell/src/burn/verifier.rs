@@ -128,22 +128,19 @@ fn gb(bytes: u64) -> String {
 /// Remove a read-back dir, absent or not. xorriso restores the disc's
 /// permissions, so a directory may come back without write permission, which
 /// would stop the removal; those are made writable and the removal retried.
-fn remove_readback(dir: &Path) {
+fn remove_readback(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
-        return;
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {}
     }
     for entry in walkdir::WalkDir::new(dir).into_iter().flatten() {
         if entry.file_type().is_dir() {
             let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o755));
         }
     }
-    if let Err(e) = std::fs::remove_dir_all(dir) {
-        eprintln!(
-            "could not remove the read-back dir {} ({e}); it is safe to delete by hand",
-            dir.display()
-        );
-    }
+    std::fs::remove_dir_all(dir)
 }
 
 /// This project's disc `exp.disc`, at exactly session `session`.
@@ -439,15 +436,23 @@ impl<'a> DiscVerifier<'a> {
             _ => return Err(not_mountable.to_string()),
         };
         let room = dir.parent().unwrap_or(dir);
-        remove_readback(dir);
+        // xorriso extracts into an existing directory by merging: a leftover
+        // tree would supply files the disc lacks. Never extract over one.
+        if let Err(e) = remove_readback(dir) {
+            return Err(format!(
+                "{not_mountable}; the leftover read-back dir {} could not be removed ({e})",
+                dir.display()
+            ));
+        }
         let need = exp.visible_bytes.saturating_add(READBACK_MARGIN_BYTES);
         match free_bytes(room) {
             Ok(free) if free >= need => {}
             Ok(free) => {
                 return Err(format!(
-                    "{not_mountable}; reading it through xorriso instead needs {} free in {}, \
-                     and only {} is",
-                    gb(need),
+                    "{not_mountable}; reading it through xorriso instead needs {} plus a {} \
+                     margin free in {}, and only {} is",
+                    gb(exp.visible_bytes),
+                    gb(READBACK_MARGIN_BYTES),
                     room.display(),
                     gb(free)
                 ))
@@ -494,7 +499,12 @@ impl<'a> DiscVerifier<'a> {
                 "{not_mountable}; reading it through xorriso failed too: {e}"
             )),
         };
-        remove_readback(dir);
+        if let Err(e) = remove_readback(dir) {
+            eprintln!(
+                "could not remove the read-back dir {} ({e}); it is safe to delete by hand",
+                dir.display()
+            );
+        }
         found
     }
 
@@ -1362,6 +1372,79 @@ mod tests {
                 "{out:?}"
             );
             assert!(!script.ran("-extract /data"));
+        }
+
+        /// A leftover that cannot be removed is never extracted over: xorriso
+        /// would merge into it, and its files could stand in for ones the disc
+        /// lacks. Unverifiable instead.
+        #[test]
+        fn a_leftover_that_cannot_be_removed_is_never_extracted_over() {
+            use std::os::unix::fs::PermissionsExt;
+            let work = tempfile::TempDir::new().unwrap();
+            std::fs::create_dir_all(work.path().join("readback/old")).unwrap();
+            std::fs::write(work.path().join("readback/old/a.txt"), b"hello").unwrap();
+            // A work dir the user cannot write: the leftover cannot be unlinked.
+            std::fs::set_permissions(work.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            if std::fs::write(work.path().join("probe"), b"").is_ok() {
+                std::fs::set_permissions(work.path(), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                eprintln!(
+                    "SKIP [a_leftover_that_cannot_be_removed_is_never_extracted_over]: running as root"
+                );
+                return;
+            }
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[None]);
+            let (out, _, _) =
+                read_back_via(&script, &sized(&[("a.txt", b"hello")]), 1, work.path());
+            std::fs::set_permissions(work.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                matches!(&out, ReadBack::Unverifiable(why) if why.contains("could not be removed")),
+                "{out:?}"
+            );
+            assert!(!script.ran("-extract /data"));
+        }
+
+        /// xorriso restores read-only directories; the removal makes them
+        /// writable and tries again.
+        #[test]
+        fn a_read_only_extracted_tree_is_still_removed() {
+            use std::os::unix::fs::PermissionsExt;
+            let work = tempfile::TempDir::new().unwrap();
+            let sub = work.path().join("readback/sub");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join("a.txt"), b"x").unwrap();
+            std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
+            remove_readback(&work.path().join("readback")).expect("removed");
+            assert!(!work.path().join("readback").exists());
+            remove_readback(&work.path().join("readback")).expect("absent is fine");
+        }
+
+        /// An image file is read by osirrox already, so a failed read of it is
+        /// never retried through the fallback.
+        #[test]
+        fn an_image_file_never_falls_back() {
+            let work = tempfile::TempDir::new().unwrap();
+            // One /data extraction, the image path's own, and it fails; a
+            // second would find the script empty and panic.
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .extractions(&[None]);
+            let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+            let op = ScriptedOperator::new(&[]);
+            let out = DiscVerifier::new(
+                BurnDevice::ImageFile(std::path::PathBuf::from("/tmp/none.iso")),
+                &exec,
+                &op,
+                &NoopSink,
+            )
+            .reading_back_through_xorriso_in(work.path())
+            .read_back(&sized(&[("a.txt", b"hello")]), 1)
+            .unwrap();
+            assert!(matches!(out, ReadBack::Unverifiable(_)), "{out:?}");
         }
 
         /// A leftover from a crashed read-back is cleared before extracting.

@@ -84,9 +84,11 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   disc) is compared via the mounted `/.diskrement/project.json` and treated
   like a failed mount, never `Failed`. Otherwise a good appended disc would
   read as missing its new files.
-- **xorriso extracts over an existing file** (validated 2026-09-07, 1.5.8.pl02),
-  but every extraction in this tree still targets a fresh path inside a
-  `TempDir`, so nothing depends on that.
+- **xorriso extracts over an existing file, and merges into an existing
+  directory** (validated 2026-09-07 and 2026-10-16, 1.5.8.pl02). Every
+  extraction here targets a fresh path: a `TempDir`, or `<work_dir>/readback`,
+  which `read_back` refuses to use unless it could remove the leftover first.
+  A merge into a leftover tree could pass a disc that lacks files.
 - **`-toc -tell_media_space` prints `Media status` twice**, once per
   sub-command. The parser takes the first match; do not "fix" it into an
   exactly-once assertion.

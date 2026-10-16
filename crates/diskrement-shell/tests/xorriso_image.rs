@@ -16,7 +16,7 @@ use diskrement_shell::burn::media::{MediaInspector, MediaStatus};
 use diskrement_shell::burn::reader::DiscReader;
 use diskrement_shell::burn::testkit::{has_xorriso, image_of, sha256, ScriptedOperator};
 use diskrement_shell::burn::verifier::{DiscExpectation, DiscVerifier, VerifyOutcome};
-use diskrement_shell::burn::xorriso::{args, burner::XorrisoBurner};
+use diskrement_shell::burn::xorriso::{args, burner::XorrisoBurner, parse};
 use diskrement_shell::burn::{BurnDevice, BurnError};
 use diskrement_shell::catalog::model::SupersededVersion;
 use diskrement_shell::progress::NoopSink;
@@ -182,6 +182,44 @@ fn the_reader_exposes_the_merged_tree_and_a_single_session() {
         .extract_from_session(1, "/data/a.txt", &old)
         .expect("session 1 is readable");
     assert_eq!(std::fs::read_to_string(&old).expect("read"), "v1");
+}
+
+/// The fallback's extraction against real xorriso (burn-verify spec §8):
+/// `/data`'s contents land directly under the destination, at the relative
+/// paths tier 1 compares, and the restore pacifier is one `parse` reads.
+#[test]
+fn extracting_the_data_tree_puts_its_files_directly_under_the_destination() {
+    if !ready("extracting_the_data_tree_puts_its_files_directly_under_the_destination") {
+        return;
+    }
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let iso = dir.path().join("disc.iso");
+    burn_session(
+        dir.path(),
+        &iso,
+        1,
+        &[("a.txt", "hello"), ("sub/b.txt", "keep")],
+    );
+
+    let exec = SYSTEM_EXEC;
+    let dest = dir.path().join("readback");
+    let mut lines = Vec::new();
+    DiscReader::new(BurnDevice::ImageFile(iso), &exec)
+        .extract_data_tree(&dest, &mut |l| lines.push(l.to_string()))
+        .expect("the extraction succeeds");
+
+    assert_eq!(
+        std::fs::read_to_string(dest.join("a.txt")).unwrap(),
+        "hello"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.join("sub/b.txt")).unwrap(),
+        "keep"
+    );
+    assert!(
+        lines.iter().any(|l| parse::restored_bytes(l).is_some()),
+        "a restore pacifier line: {lines:?}"
+    );
 }
 
 /// Two-tier verification against a real image: a clean disc passes, a

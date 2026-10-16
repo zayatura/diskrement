@@ -171,14 +171,15 @@ pub fn writing_per_mille(line: &str) -> Option<u32> {
 
 /// How many bytes an `-extract` has restored so far, from xorriso's pacifier:
 /// `xorriso : UPDATE :  31 files restored ( 490.0m) in 1 seconds` → 490 MiB.
-/// The suffix is a binary unit (k, m, g, t) or absent for bytes. `None` for
+/// The suffix is `b` for bytes or a binary unit (k, m, g, t). `None` for
 /// every other line.
 pub fn restored_bytes(line: &str) -> Option<u64> {
     let (_, rest) = line.split_once("files restored (")?;
     let (amount, _) = rest.split_once(')')?;
     let amount = amount.trim();
     let (number, scale) = match amount.chars().last()? {
-        'k' => (&amount[..amount.len() - 1], 1u64 << 10),
+        'b' => (&amount[..amount.len() - 1], 1u64),
+        'k' => (&amount[..amount.len() - 1], 1 << 10),
         'm' => (&amount[..amount.len() - 1], 1 << 20),
         'g' => (&amount[..amount.len() - 1], 1 << 30),
         't' => (&amount[..amount.len() - 1], 1 << 40),
@@ -210,9 +211,10 @@ mod tests {
             restored_bytes("xorriso : UPDATE :       1 files restored (   12k) in 1 seconds"),
             Some(12 * 1024)
         );
+        // Below a kilobyte xorriso prints bytes with a `b` (1.5.8.pl02).
         assert_eq!(
-            restored_bytes("xorriso : UPDATE :       1 files restored (  512) in 1 seconds"),
-            Some(512)
+            restored_bytes("xorriso : UPDATE :       2 files restored ( 11b) in 1 seconds"),
+            Some(11)
         );
         assert_eq!(
             restored_bytes("xorriso : UPDATE :       9 files restored ( 1.5t) in 9 seconds"),
