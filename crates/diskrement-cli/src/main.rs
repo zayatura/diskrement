@@ -221,11 +221,14 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
 
             // The verifier is chosen by the same decision as the burner, so a
             // simulated burn is read back from its staging tree.
+            // It may fall back to reading a disc the kernel cannot mount
+            // yet through xorriso, into the work dir (burn-verify spec §8).
             let verifier = verify.then(|| {
                 resolve_verifier(
                     cli.burner,
                     cli.device.as_deref(),
                     std::path::Path::new(&p.work_dir),
+                    true,
                     &exec,
                     &operator,
                     &sink,
@@ -270,10 +273,13 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             let operator = prompt::ConsoleOperator;
             // The read-back bar goes to stderr; stdout stays the report.
             let sink = progress::ConsoleProgress::new();
+            // Mount-only: plain `verify` is the check through the kernel's
+            // own ISO 9660 driver, the path a restore takes.
             let verifier = resolve_verifier(
                 cli.burner,
                 cli.device.as_deref(),
                 std::path::Path::new(&p.work_dir),
+                false,
                 &exec,
                 &operator,
                 &sink,
@@ -352,11 +358,14 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
 
 /// The verification backend, chosen by the same one decision that chooses the
 /// burner (spec §5.2): verifying a simulated burn by mounting a physical disc
-/// is meaningless, so the two arms move together.
+/// is meaningless, so the two arms move together. `xorriso_fallback` lets a
+/// real disc the kernel cannot mount be read back through xorriso into the
+/// work dir; only `burn --verify` asks for it.
 fn resolve_verifier<'a>(
     burner: Option<args::BurnerKind>,
     device: Option<&str>,
     work_dir: &Path,
+    xorriso_fallback: bool,
     exec: &'a dyn Exec,
     operator: &'a dyn diskrement_shell::burn::BurnOperator,
     sink: &'a dyn ProgressSink,
@@ -366,7 +375,12 @@ fn resolve_verifier<'a>(
             Verifier::Staging(StagingVerifier::new(work_dir.join("staging"), sink))
         }
         backend::Backend::Real(device) => {
-            Verifier::Disc(DiscVerifier::new(device, exec, operator, sink))
+            let verifier = DiscVerifier::new(device, exec, operator, sink);
+            Verifier::Disc(if xorriso_fallback {
+                verifier.reading_back_through_xorriso_in(work_dir)
+            } else {
+                verifier
+            })
         }
     }
 }

@@ -627,7 +627,10 @@ impl<'a> Pipeline<'a> {
                 };
                 let done = read_back::burn_and_read_back(burner, step, &image, &exp)?;
                 let status = match done.verified_files {
-                    Some(files) => DiscReadBack::Verified { files },
+                    Some(files) => DiscReadBack::Verified {
+                        files,
+                        through_xorriso: done.through_xorriso,
+                    },
                     None => DiscReadBack::Unverified,
                 };
                 (done.burned, Some(status), done.ejected)
@@ -647,9 +650,9 @@ impl<'a> Pipeline<'a> {
         // transition `verify` makes. If that write fails, the disc is still
         // recorded, just unverified.
         let read_back_result = match read_back_result {
-            Some(DiscReadBack::Verified { files }) => {
+            Some(verified @ DiscReadBack::Verified { .. }) => {
                 match self.catalog.mark_verified(p.id, key, sess_ord) {
-                    Ok(()) => Some(DiscReadBack::Verified { files }),
+                    Ok(()) => Some(verified),
                     Err(e) => {
                         eprintln!(
                             "disc {disc_name} read back clean but could not be marked verified ({e}); \

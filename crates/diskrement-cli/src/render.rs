@@ -194,9 +194,14 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
             .to_string(),
         );
         match d.read_back {
-            Some(DiscReadBack::Verified { files }) => {
-                lines.push(format!("Read back: verified ({files} files)."));
-            }
+            Some(DiscReadBack::Verified {
+                files,
+                through_xorriso,
+            }) => lines.push(if through_xorriso {
+                format!("Read back: verified ({files} files, read through xorriso).")
+            } else {
+                format!("Read back: verified ({files} files).")
+            }),
             Some(DiscReadBack::Unverified) => lines.push(format!(
                 "Read back: recorded unverified — run verify --disc {}.",
                 d.disc.name(copies)
@@ -1281,10 +1286,20 @@ mod burn_render_tests {
     fn a_read_back_disc_says_whether_it_was_verified() {
         use diskrement_shell::pipeline::reports::DiscReadBack;
         let mut r = report(false, 0);
-        r.discs[0].read_back = Some(DiscReadBack::Verified { files: 9042 });
+        r.discs[0].read_back = Some(DiscReadBack::Verified {
+            files: 9042,
+            through_xorriso: false,
+        });
         assert!(burn_report(&r, 1).contains(
             "Status: left OPEN — may receive more sessions later.\nRead back: verified (9042 files)."
         ));
+        r.discs[0].read_back = Some(DiscReadBack::Verified {
+            files: 9042,
+            through_xorriso: true,
+        });
+        assert!(
+            burn_report(&r, 1).contains("Read back: verified (9042 files, read through xorriso).")
+        );
         r.discs[0].read_back = Some(DiscReadBack::Unverified);
         assert!(
             burn_report(&r, 1).contains("Read back: recorded unverified — run verify --disc 1.")

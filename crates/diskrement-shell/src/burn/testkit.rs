@@ -128,6 +128,12 @@ pub const APPENDABLE: &[&str] = &[
     "Media space  : 500000s",
 ];
 
+/// A disc's `/data` tree as `(path, body)` pairs, for `ScriptedExec::extractions`.
+pub type Tree<'a> = &'a [(&'a str, &'a [u8])];
+
+/// A `Tree` the script owns.
+type OwnedTree = Vec<(String, Vec<u8>)>;
+
 /// A scripted `Exec` standing in for xorriso.
 ///
 /// `toc` and `identities` are queues consumed per matching invocation,
@@ -142,6 +148,7 @@ pub struct ScriptedExec {
     burn_lines: Vec<String>,
     calls: RefCell<Vec<String>>,
     mounts: RefCell<VecDeque<Option<PathBuf>>>,
+    trees: RefCell<VecDeque<Option<OwnedTree>>>,
 }
 
 impl Default for ScriptedExec {
@@ -160,6 +167,7 @@ impl ScriptedExec {
             burn_lines: vec!["xorriso : UPDATE : 100% done".to_string()],
             calls: RefCell::new(Vec::new()),
             mounts: RefCell::new(VecDeque::new()),
+            trees: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -182,6 +190,26 @@ impl ScriptedExec {
     /// disc at `dir`, `None` fails as udisks does when it cannot mount.
     pub fn mounts(mut self, points: &[Option<&Path>]) -> Self {
         self.mounts = RefCell::new(points.iter().map(|p| p.map(Path::to_path_buf)).collect());
+        self
+    }
+
+    /// What each `-extract /data` answers, in order: `Some(files)` writes
+    /// that tree (with a restore pacifier line, as xorriso prints one),
+    /// `None` fails the way xorriso does. Other extractions are identities.
+    pub fn extractions(mut self, trees: &[Option<Tree<'_>>]) -> Self {
+        self.trees = RefCell::new(
+            trees
+                .iter()
+                .map(|t| {
+                    t.map(|files| {
+                        files
+                            .iter()
+                            .map(|(rel, body)| ((*rel).to_string(), body.to_vec()))
+                            .collect()
+                    })
+                })
+                .collect(),
+        );
         self
     }
 
@@ -253,6 +281,38 @@ impl ScriptedExec {
             return Ok(CmdOutput {
                 exit_code: 0,
                 lines,
+            });
+        }
+        if has("-extract") && cmd.len() >= 2 && cmd[cmd.len() - 2] == "/data" {
+            let dest = Path::new(cmd.last().expect("a destination"));
+            let tree = self
+                .trees
+                .borrow_mut()
+                .pop_front()
+                .expect("the script ran out of /data extractions");
+            return Ok(match tree {
+                Some(files) => {
+                    std::fs::create_dir_all(dest).expect("writable destination");
+                    let mut bytes = 0;
+                    for (rel, body) in &files {
+                        let path = dest.join(rel);
+                        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+                        std::fs::write(&path, body).expect("writable destination");
+                        bytes += body.len();
+                    }
+                    on_line(&format!(
+                        "xorriso : UPDATE : {} files restored ( {bytes}) in 1 seconds",
+                        files.len()
+                    ));
+                    CmdOutput {
+                        exit_code: 0,
+                        lines: Vec::new(),
+                    }
+                }
+                None => CmdOutput {
+                    exit_code: 5,
+                    lines: vec!["FAILURE : cannot read the medium".to_string()],
+                },
             });
         }
         if has("-extract") {

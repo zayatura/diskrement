@@ -339,6 +339,7 @@ dependencies = [
  "rayon",
  "reflink-copy",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

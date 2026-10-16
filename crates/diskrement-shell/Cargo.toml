@@ -14,6 +14,9 @@ chrono = { workspace = true, features = ["clock"] }
 rayon.workspace = true
 reflink-copy.workspace = true
 rusqlite.workspace = true
+# statvfs, for the room a read-back through xorriso needs (burn-verify spec
+# §8.2). Already in the lockfile through tempfile.
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

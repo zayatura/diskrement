@@ -218,6 +218,21 @@ mod tests {
             restored_bytes("xorriso : UPDATE :       9 files restored ( 1.5t) in 9 seconds"),
             Some((1.5 * 1024f64.powi(4)) as u64)
         );
+        // Captured from the Pioneer BDR-UD04 extracting a folder of disc 1B,
+        // 2026-10-16: about one line a second, with a bare `k` early on and a
+        // speed after the time.
+        assert_eq!(
+            restored_bytes(
+                "xorriso : UPDATE :       0 files restored ( 10624k) in 6 seconds , 2.4xB"
+            ),
+            Some(10624 * 1024)
+        );
+        assert_eq!(
+            restored_bytes(
+                "xorriso : UPDATE :       1 files restored ( 431.1m) in 26 seconds , 5.3xB"
+            ),
+            Some((431.1 * 1024.0 * 1024.0) as u64)
+        );
         assert_eq!(
             restored_bytes("xorriso : UPDATE :      32 nodes read in 1 seconds"),
             None
