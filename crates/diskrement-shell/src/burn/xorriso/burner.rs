@@ -24,6 +24,8 @@ pub struct XorrisoBurner<'a> {
     operator: &'a dyn BurnOperator,
     progress: &'a dyn ProgressSink,
     parallelism: usize,
+    /// `burn --no-eject`: never open the tray (see `keeping_disc_in_drive`).
+    keep_in_drive: bool,
 }
 
 impl<'a> XorrisoBurner<'a> {
@@ -40,7 +42,16 @@ impl<'a> XorrisoBurner<'a> {
             operator,
             progress,
             parallelism,
+            keep_in_drive: false,
         }
+    }
+
+    /// `burn --no-eject`, a diagnostic: every eject is skipped, including the
+    /// one before a reinsert prompt, so a freshly burned disc can be examined
+    /// in the state the read-back found it in.
+    pub fn keeping_disc_in_drive(mut self) -> Self {
+        self.keep_in_drive = true;
+        self
     }
 
     pub fn burn(&self, image: &DiscImage) -> Result<BurnResult, BurnError> {
@@ -242,6 +253,11 @@ impl<'a> XorrisoBurner<'a> {
     /// hiccup must not turn a written disc into a failed run.
     pub fn eject(&self) {
         if let BurnDevice::ImageFile(_) = self.device {
+            return;
+        }
+        if self.keep_in_drive {
+            self.operator
+                .progress("Leaving the disc in the drive (--no-eject).");
             return;
         }
         let ok = self
@@ -737,6 +753,29 @@ mod tests {
             "xorriso 1.4.2 is too old (need 1.5 or newer)"
         );
         assert!(op.log().is_empty(), "the operator was never prompted");
+    }
+
+    /// `burn --no-eject`, a diagnostic: the disc stays in the drive, and the
+    /// operator is told so each time an eject is skipped.
+    #[test]
+    fn a_burner_keeping_the_disc_in_the_drive_never_ejects() {
+        let script = Script::new();
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+        let op = ScriptedOperator::new(&[]);
+        XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            &op,
+            &NoopSink,
+            2,
+        )
+        .keeping_disc_in_drive()
+        .eject();
+        assert!(!script.ran("-eject"));
+        assert_eq!(
+            op.log(),
+            vec!["Leaving the disc in the drive (--no-eject).".to_string()]
+        );
     }
 
     /// An image file has no tray, so nothing is ejected.
