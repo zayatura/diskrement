@@ -50,8 +50,14 @@ impl Cli {
     {
         let cli = Cli::try_parse_from(args)?;
         if let Command::Init { source, root, .. } = &cli.command {
-            init_sources(source.clone(), root.clone())
-                .map_err(|e| Cli::command().error(clap::error::ErrorKind::ValueValidation, e))?;
+            init_sources(source.clone(), root.clone()).map_err(|e| {
+                // Built against `init`, so the usage line shown is init's.
+                let mut cmd = Cli::command();
+                cmd.build();
+                cmd.find_subcommand_mut("init")
+                    .expect("init exists")
+                    .error(clap::error::ErrorKind::ValueValidation, e)
+            })?;
         }
         Ok(cli)
     }
@@ -72,6 +78,10 @@ pub fn init_sources(
 /// One `--root NAME=PATH`, split at the first `=`: a path may contain `=`,
 /// a name may not. The name is checked here; the names as a set are checked
 /// by `Cli::try_parse_checked_from`.
+///
+/// Parsing the value as `&str` is deliberate: a non-UTF-8 `--root` is rejected
+/// at parse time (exit 1) because the catalog stores paths as TEXT. Accepting
+/// such a path would store it lossily and create a project that can never plan.
 fn root_arg(raw: &str) -> Result<(RootName, PathBuf), String> {
     let (name, path) = raw
         .split_once('=')
@@ -652,6 +662,7 @@ mod tests {
                 clap::error::ErrorKind::ValueValidation,
                 "{first} {second}"
             );
+            assert!(err.to_string().contains("diskrement init"), "{err}");
         }
         assert!(Cli::try_parse_checked_from(init_args(&[
             "--root",

@@ -108,6 +108,9 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             margin,
             copies,
         } => {
+            // Cannot fail: `try_parse_checked_from` already accepted the roots.
+            let sources = args::init_sources(source, root)
+                .map_err(|e| PipelineError::Failed(e.to_string()))?;
             // The work dir exists before anything else (Runner.dispatch).
             std::fs::create_dir_all(&work_dir).map_err(|e| PipelineError::failed(&e))?;
             let mut catalog = open_catalog(&resolved.catalog)?;
@@ -121,9 +124,6 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 },
                 &sink,
             );
-            // Cannot fail: `try_parse_checked_from` already accepted the roots.
-            let sources = args::init_sources(source, root)
-                .map_err(|e| PipelineError::Failed(e.to_string()))?;
             let pi = ProjectInit {
                 name: name.clone(),
                 sources,
