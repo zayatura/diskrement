@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use diskrement_core::{ContentHash, DiscKey, RelPath};
 
 use crate::burn::cmd::Exec;
+use crate::burn::json::ProjectJson;
 use crate::burn::media::{MediaInspector, MediaStatus};
 use crate::burn::reader::DiscReader;
 use crate::burn::{BurnDevice, BurnError, BurnOperator, DiscIdentity};
@@ -48,6 +49,42 @@ pub struct VerifyOutcome {
     pub files_checked: usize,
     pub mismatches: Vec<RelPath>,
     pub skipped: bool,
+}
+
+/// What `burn --verify` learns from reading back the disc it just wrote,
+/// before it is recorded (burn-verify spec §4.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadBack {
+    /// Every file is there and hashes as recorded.
+    Passed { files: usize },
+    /// Evidence against the disc: mismatched, missing or unreadable files.
+    Failed {
+        files: usize,
+        mismatches: Vec<RelPath>,
+    },
+    /// Nothing was learned about the disc: it could not be mounted, the drive
+    /// holds another disc, or the mount still shows an older session.
+    Unverifiable(String),
+}
+
+impl ReadBack {
+    fn from_outcome(o: VerifyOutcome) -> Self {
+        if o.mismatches.is_empty() {
+            ReadBack::Passed {
+                files: o.files_checked,
+            }
+        } else {
+            ReadBack::Failed {
+                files: o.files_checked,
+                mismatches: o.mismatches,
+            }
+        }
+    }
+}
+
+/// This project's disc `exp.disc`, at exactly session `session`.
+fn is_session(exp: &DiscExpectation, session: u32, id: &DiscIdentity) -> bool {
+    id.project_name == exp.project_name && id.disc() == exp.disc && id.session_ordinal == session
 }
 
 /// Verifies a disc against the work-dir staging tree (the simulated backend).
@@ -90,6 +127,19 @@ impl<'a> StagingVerifier<'a> {
             mismatches,
             skipped: false,
         })
+    }
+
+    /// `verify` for the disc a simulated burn just staged. An absent tree is
+    /// unverifiable, never a pass.
+    pub fn read_back(&self, exp: &DiscExpectation) -> Result<ReadBack, BurnError> {
+        let out = self.verify(exp)?;
+        if out.skipped {
+            return Ok(ReadBack::Unverifiable(format!(
+                "disc {} has no staged tree",
+                exp.disc_name
+            )));
+        }
+        Ok(ReadBack::from_outcome(out))
     }
 }
 
@@ -241,6 +291,83 @@ impl<'a> DiscVerifier<'a> {
         })
     }
 
+    /// Read back the disc still in the drive after `burn --verify` wrote its
+    /// session `session`. There is no prompt. The disc must be this one at
+    /// exactly that session, first as xorriso reads the medium and then as the
+    /// mount shows it: a mount that still shows an older session means the
+    /// system has not noticed the new one, and would otherwise look like
+    /// missing files.
+    pub fn read_back(&self, exp: &DiscExpectation, session: u32) -> Result<ReadBack, BurnError> {
+        let status = MediaInspector::new(self.device.clone(), self.exec).inspect()?;
+        let found = match &status {
+            MediaStatus::Appendable {
+                identity: Some(id), ..
+            }
+            | MediaStatus::Closed(Some(id)) => Some(id),
+            _ => None,
+        };
+        if !found.is_some_and(|id| is_session(exp, session, id)) {
+            return Ok(ReadBack::Unverifiable(format!(
+                "the drive holds {status}, not disc {} at session {session}",
+                exp.disc_name
+            )));
+        }
+
+        self.operator
+            .progress(&format!("Mounting disc {}…", exp.disc_name));
+        let reader = DiscReader::new(self.device.clone(), self.exec);
+        let tier1 = reader.with_data_tree(|data_dir| {
+            Ok(match self.stale_mount(data_dir, exp, session) {
+                Some(stale) => Err(stale),
+                None => Ok(compare_visible(data_dir, exp, self.sink)),
+            })
+        });
+        let (checked_1, mut mismatches) = match tier1 {
+            Ok(Ok(found)) => found,
+            Ok(Err(stale)) => return Ok(ReadBack::Unverifiable(stale)),
+            Err(BurnError::MountFailed(why)) => {
+                return Ok(ReadBack::Unverifiable(format!("could not mount it: {why}")))
+            }
+            Err(e) => return Err(e),
+        };
+        let (checked_2, tier2) = self.tier2(exp)?;
+        mismatches.extend(tier2);
+        mismatches.sort();
+        mismatches.dedup();
+        Ok(ReadBack::from_outcome(VerifyOutcome {
+            files_checked: checked_1 + checked_2,
+            mismatches,
+            skipped: false,
+        }))
+    }
+
+    /// `Some(reason)` when the mounted tree is not session `session` of this
+    /// disc. Only a real device can lag; an image file is read by osirrox,
+    /// which sees the medium itself.
+    fn stale_mount(&self, data_dir: &Path, exp: &DiscExpectation, session: u32) -> Option<String> {
+        if !matches!(self.device, BurnDevice::RealDevice(_)) {
+            return None;
+        }
+        let file = data_dir
+            .parent()
+            .unwrap_or(data_dir)
+            .join(".diskrement/project.json");
+        let mounted = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<ProjectJson>(&text).ok())
+            .and_then(|p| p.to_identity().ok());
+        match mounted {
+            Some(id) if is_session(exp, session, &id) => None,
+            Some(id) => Some(format!(
+                "the mounted disc still shows session {} of disc {} \
+                 (the system has not noticed the new session)",
+                id.session_ordinal,
+                id.disc_name()
+            )),
+            None => Some("the mounted disc has no readable /.diskrement/project.json".to_string()),
+        }
+    }
+
     /// The insert loop. Unlike the burner's, *any* session ordinal of the
     /// right disc is acceptable, and a decline is a skip rather than an abort.
     fn await_disc(&self, exp: &DiscExpectation) -> Result<bool, BurnError> {
@@ -335,6 +462,15 @@ impl Verifier<'_> {
         match self {
             Verifier::Staging(v) => v.verify(exp),
             Verifier::Disc(v) => v.verify(exp),
+        }
+    }
+
+    /// `burn --verify`'s check of the disc just written, before it is
+    /// recorded. `session` is the session that burn wrote.
+    pub fn read_back(&self, exp: &DiscExpectation, session: u32) -> Result<ReadBack, BurnError> {
+        match self {
+            Verifier::Staging(v) => v.read_back(exp),
+            Verifier::Disc(v) => v.read_back(exp, session),
         }
     }
 }
@@ -547,6 +683,41 @@ mod tests {
         assert_eq!(out.unwrap().mismatches, vec![RelPath("sub".to_string())]);
     }
 
+    /// The simulated backend's read-back is its `verify` against the staged
+    /// tree, with an absent tree reported as unverifiable, never a pass.
+    #[test]
+    fn a_staging_read_back_passes_fails_or_cannot_tell() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let staging = dir.path().join("staging");
+        let data = staging.join("disc-1/data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("a.txt"), b"hello").unwrap();
+        let v = StagingVerifier::new(staging, &NoopSink);
+
+        assert_eq!(
+            v.read_back(&expectation(&[("a.txt", b"hello")], 1))
+                .unwrap(),
+            ReadBack::Passed { files: 1 }
+        );
+        assert_eq!(
+            v.read_back(&expectation(&[("a.txt", b"other")], 1))
+                .unwrap(),
+            ReadBack::Failed {
+                files: 1,
+                mismatches: vec![RelPath("a.txt".to_string())]
+            }
+        );
+        let absent = DiscExpectation {
+            disc: DiscKey::new(9, 0),
+            disc_name: "9".to_string(),
+            ..expectation(&[], 9)
+        };
+        assert!(matches!(
+            v.read_back(&absent).unwrap(),
+            ReadBack::Unverifiable(why) if why.contains("disc 9")
+        ));
+    }
+
     /// One phase per disc, sized to what is on it before the first read, so
     /// the bar has a total and an ETA from the start; it advances to exactly
     /// that total and closes.
@@ -687,6 +858,148 @@ mod tests {
                     lines: Vec::new(),
                 })
             }
+        }
+
+        use crate::burn::testkit::{ScriptedExec, BLANK};
+
+        const IDENTITY_2: &str = r#"{"projectName":"photos","discOrdinal":1,"sessionOrdinal":2,"createdAt":"2026-08-30T10:00:00Z"}"#;
+
+        /// A disc as its mount shows it: `files` under `data/`, and `id` as
+        /// its `/.diskrement/project.json`.
+        fn mounted(files: &[(&str, &[u8])], id: &str) -> tempfile::TempDir {
+            let dir = tempfile::TempDir::new().unwrap();
+            std::fs::create_dir_all(dir.path().join("data")).unwrap();
+            for (rel, body) in files {
+                std::fs::write(dir.path().join("data").join(rel), body).unwrap();
+            }
+            std::fs::create_dir_all(dir.path().join(".diskrement")).unwrap();
+            std::fs::write(dir.path().join(".diskrement/project.json"), id).unwrap();
+            dir
+        }
+
+        fn visible(pairs: &[(&str, &[u8])]) -> DiscExpectation {
+            DiscExpectation {
+                visible: pairs
+                    .iter()
+                    .map(|(rel, body)| (RelPath((*rel).to_string()), sha(body)))
+                    .collect(),
+                ..expectation()
+            }
+        }
+
+        /// `read_back` of session `session` on /dev/sr0, with the operator's
+        /// transcript. The operator has no answers: a read-back never prompts.
+        fn read_back(
+            script: &ScriptedExec,
+            exp: &DiscExpectation,
+            session: u32,
+        ) -> (ReadBack, Vec<String>) {
+            let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+            let op = ScriptedOperator::new(&[]);
+            let out = DiscVerifier::new(
+                BurnDevice::RealDevice("/dev/sr0".to_string()),
+                &exec,
+                &op,
+                &NoopSink,
+            )
+            .read_back(exp, session)
+            .unwrap();
+            (out, op.log())
+        }
+
+        #[test]
+        fn a_clean_disc_reads_back_without_a_prompt() {
+            let disc = mounted(&[("a.txt", b"hello")], IDENTITY);
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[Some(disc.path())]);
+            let (out, log) = read_back(&script, &visible(&[("a.txt", b"hello")]), 1);
+            assert_eq!(out, ReadBack::Passed { files: 1 });
+            assert_eq!(log, vec!["Mounting disc 1…".to_string()]);
+            assert!(script.ran("udisksctl unmount -b /dev/sr0"));
+        }
+
+        #[test]
+        fn a_wrong_or_missing_file_fails_the_read_back() {
+            let disc = mounted(&[("a.txt", b"HELLO")], IDENTITY);
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[Some(disc.path())]);
+            let (out, _) = read_back(
+                &script,
+                &visible(&[("a.txt", b"hello"), ("b.txt", b"keep")]),
+                1,
+            );
+            assert_eq!(
+                out,
+                ReadBack::Failed {
+                    files: 2,
+                    mismatches: vec![RelPath("a.txt".to_string()), RelPath("b.txt".to_string())],
+                }
+            );
+        }
+
+        #[test]
+        fn a_failed_mount_is_unverifiable() {
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[None]);
+            let (out, _) = read_back(&script, &visible(&[("a.txt", b"hello")]), 1);
+            assert!(
+                matches!(&out, ReadBack::Unverifiable(why) if why.contains("could not mount it")),
+                "{out:?}"
+            );
+        }
+
+        /// The drive must hold this disc at exactly the session just written;
+        /// otherwise nothing is mounted.
+        #[test]
+        fn another_disc_or_a_blank_is_unverifiable_and_never_mounted() {
+            for script in [
+                ScriptedExec::new()
+                    .toc(&[APPENDABLE])
+                    .identities(&[Some(OTHER_DISC)]),
+                ScriptedExec::new()
+                    .toc(&[APPENDABLE])
+                    .identities(&[Some(IDENTITY)]),
+                ScriptedExec::new().toc(&[BLANK]),
+            ] {
+                // Session 2 expected: IDENTITY is session 1.
+                let (out, _) = read_back(&script, &visible(&[]), 2);
+                assert!(
+                    matches!(&out, ReadBack::Unverifiable(why) if why.contains("not disc 1 at session 2")),
+                    "{out:?}"
+                );
+                assert!(!script.ran("udisksctl"));
+            }
+        }
+
+        /// xorriso already sees session 2, but the mount still shows session
+        /// 1: the system has not noticed the new session. Unverifiable, so a
+        /// good appended disc is never failed for files it seems to lack.
+        #[test]
+        fn a_mount_still_showing_the_previous_session_is_unverifiable() {
+            let disc = mounted(&[("a.txt", b"hello")], IDENTITY);
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY_2)])
+                .mounts(&[Some(disc.path())]);
+            let (out, _) = read_back(
+                &script,
+                &visible(&[("a.txt", b"hello"), ("b.txt", b"new")]),
+                2,
+            );
+            assert!(
+                matches!(&out, ReadBack::Unverifiable(why) if why.contains("still shows session 1")),
+                "{out:?}"
+            );
+            assert!(
+                script.ran("udisksctl unmount"),
+                "the stale mount is released"
+            );
         }
 
         /// Declining is a skip, not an abort: `verify` sweeps many discs and
