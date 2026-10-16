@@ -230,6 +230,15 @@ impl Burner<'_> {
         }
     }
 
+    /// Eject the disc once the pipeline is done with it: after the commit,
+    /// or after the read-back under `burn --verify`. Best-effort; the
+    /// simulated backend and an image file have no tray.
+    pub fn eject(&self) {
+        if let Burner::Real(b) = self {
+            b.eject();
+        }
+    }
+
     /// Whether a disc's staging tree must outlive its commit. The simulated
     /// backend's tree *is* the disc `StagingVerifier` reads back; a real disc
     /// carries its own record, so its tree is only scratch space, and a kept
@@ -283,6 +292,28 @@ mod tests {
 
         assert!(simulated.retains_staging());
         assert!(!real.retains_staging());
+    }
+
+    /// Only the real backend has a tray to open.
+    #[test]
+    fn only_the_real_backend_ejects() {
+        use crate::burn::testkit::{ScriptedExec, ScriptedOperator};
+        use crate::progress::NoopSink;
+
+        let script = ScriptedExec::new();
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+        let op = ScriptedOperator::new(&[]);
+        Burner::Simulated(simulated::SimulatedBurner::new(&NoopSink, 1)).eject();
+        assert!(!script.ran("-eject"));
+        Burner::Real(xorriso::burner::XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            &op,
+            &NoopSink,
+            1,
+        ))
+        .eject();
+        assert!(script.ran("-eject"));
     }
 
     /// A corrupt `project.json` read off media must not panic the burner:

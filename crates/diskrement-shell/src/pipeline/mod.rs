@@ -603,6 +603,7 @@ impl<'a> Pipeline<'a> {
         if !burner.retains_staging() {
             discard_staging(&burned.staging_dir);
         }
+        burner.eject();
 
         Ok(Some(DiscBurn {
             disc: key,
@@ -1692,6 +1693,27 @@ mod burn_tests {
             !env.work.join("staging/disc-1").exists(),
             "the committed disc's tree is gone"
         );
+    }
+
+    /// One eject, after the commit: by then the committed disc's tree has
+    /// been discarded (burn-verify spec §4.1).
+    #[test]
+    fn a_real_burn_ejects_once_the_disc_is_committed() {
+        let mut env = staged_env(&[("a.bin", b"aaaa")], false);
+        let script = ScriptedExec::new().toc(&[BLANK]).identities(&[Some(ID_1)]);
+        let tree = env.work.join("staging/disc-1");
+        let at_eject = std::cell::RefCell::new(Vec::new());
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| {
+            if c.iter().any(|a| a == "-eject") {
+                at_eject.borrow_mut().push(tree.exists());
+            }
+            script.respond(c, l)
+        };
+        let op = ScriptedOperator::new(&[true]);
+
+        run_real_burn_with(&mut env, &exec, &op).unwrap();
+
+        assert_eq!(*at_eject.borrow(), vec![false]);
     }
 
     /// Twins are staged from the snapshot, never from each other: 1A's tree

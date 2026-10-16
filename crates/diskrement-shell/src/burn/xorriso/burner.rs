@@ -1,9 +1,10 @@
 //! The real burner (`XorrisoBurner.scala`).
 //!
 //! Prompt for the disc, inspect it (strict identity check), stage with
-//! re-hash, check capacity, burn, sanity-check the result, eject. Any failure
-//! leaves the catalog uncommitted, because `Pipeline::burn` commits only after
-//! this returns.
+//! re-hash, check capacity, burn, sanity-check the result. The pipeline
+//! ejects afterwards (`Burner::eject`), once it has recorded the disc or,
+//! under `burn --verify`, read it back. Any failure leaves the catalog
+//! uncommitted, because `Pipeline::burn` commits only after this returns.
 
 use crate::burn::cmd::Exec;
 use crate::burn::media::{MediaInspector, MediaStatus};
@@ -49,7 +50,6 @@ impl<'a> XorrisoBurner<'a> {
         check_capacity(staged.image_bytes, free_bytes)?;
         self.write(image, staged.image_bytes)?;
         self.post_burn_check(&image.metadata.identity)?;
-        self.eject();
         Ok(staged)
     }
 
@@ -238,9 +238,9 @@ impl<'a> XorrisoBurner<'a> {
         )))
     }
 
-    /// Best-effort: the burn already succeeded, and an eject hiccup must not
-    /// turn a written disc into a failed run.
-    fn eject(&self) {
+    /// Open the tray. Best-effort: the burn already succeeded, and an eject
+    /// hiccup must not turn a written disc into a failed run.
+    pub fn eject(&self) {
         if let BurnDevice::ImageFile(_) = self.device {
             return;
         }
@@ -374,7 +374,12 @@ mod tests {
             script.ran("-close off"),
             "an unsealed session leaves it open"
         );
-        assert!(script.ran("-eject"), "a real device is ejected afterwards");
+        assert!(
+            !script.ran("-eject"),
+            "the burn leaves the disc in the drive; the pipeline ejects"
+        );
+        burner.eject();
+        assert!(script.ran("-eject"), "eject() ejects a real device");
     }
 
     /// The insert prompt is contract: it is what the operator reads, and the
@@ -741,15 +746,17 @@ mod tests {
         let script = Script::new().toc(&[BLANK]).identities(&[Some(IDENTITY_1)]);
         let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
         let op = ScriptedOperator::new(&[true]);
-        XorrisoBurner::new(
+        let burner = XorrisoBurner::new(
             BurnDevice::ImageFile(dir.path().join("d.iso")),
             &exec,
             &op,
             &NoopSink,
             2,
-        )
-        .burn(&image_of(dir.path(), 1, &[("a.txt", "hello")], false))
-        .expect("the burn succeeds");
+        );
+        burner
+            .burn(&image_of(dir.path(), 1, &[("a.txt", "hello")], false))
+            .expect("the burn succeeds");
+        burner.eject();
         assert!(!script.ran("-eject"));
     }
 
