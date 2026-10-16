@@ -31,10 +31,10 @@ fn env() -> Env {
     let lib = dir.path().join("lib");
     let work = dir.path().join("work");
     for rel in [
-        "u1/2021/2021-03-01/a.jpg",
+        "u1/2022/2022-03-01/a.jpg",
         "u1/2023/2023-07-01/d.jpg",
         "u2/2020/2020-01-01/b.jpg",
-        "u3/2022/2022-05-05/c.jpg",
+        "u3/2021/2021-05-05/c.jpg",
     ] {
         let p = lib.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -105,14 +105,16 @@ fn a_rooted_cycle_fills_each_disc_with_the_oldest_files_across_roots() {
     pipeline(&mut e).init(&pi).unwrap();
     let burner = Burner::Simulated(SimulatedBurner::new(&NoopSink, 2));
 
-    // Cycle 1: the two oldest files. By rel_path alone this disc would hold
-    // both of family/anna's files instead.
+    // Cycle 1: the two oldest files, b (2020) and c (2021). They sit in
+    // different groups (`family/`, `others/`), so this split is wrong under
+    // path order (anna's a and d first), group-first or round-robin order
+    // (a and b), and basename order (a and b).
     let out = pipeline(&mut e).plan("p", None, false, false).unwrap();
     assert_eq!(out.scan.added, 4);
     pipeline(&mut e).burn("p", at(1), &burner).unwrap();
     let oldest = vec![
-        "family/anna/2021/2021-03-01/a.jpg",
         "family/bela/2020/2020-01-01/b.jpg",
+        "others/cecil/2021/2021-05-05/c.jpg",
     ];
     assert_eq!(staged(&e, "1A"), oldest);
     assert_eq!(staged(&e, "1B"), oldest);
@@ -143,8 +145,8 @@ fn a_rooted_cycle_fills_each_disc_with_the_oldest_files_across_roots() {
     pipeline(&mut e).plan("p", None, false, false).unwrap();
     pipeline(&mut e).burn("p", at(2), &burner).unwrap();
     let newest = vec![
+        "family/anna/2022/2022-03-01/a.jpg",
         "family/anna/2023/2023-07-01/d.jpg",
-        "others/cecil/2022/2022-05-05/c.jpg",
     ];
     assert_eq!(staged(&e, "2A"), newest);
     assert_eq!(staged(&e, "2B"), newest);
