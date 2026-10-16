@@ -1160,6 +1160,7 @@ mod tests {
             finalized: false,
             staging_dir: "/w/staging".into(),
             image_bytes: 1,
+            read_back: None,
         };
         let r = BurnReport {
             discs: vec![d(0), d(1)],
@@ -1204,6 +1205,7 @@ mod tests {
                 finalized: false,
                 staging_dir: "/w/staging".into(),
                 image_bytes: 1,
+                read_back: None,
             }],
             remaining: RemainingEstimate {
                 more_discs: 0,
@@ -1273,6 +1275,7 @@ mod burn_render_tests {
                 finalized,
                 staging_dir: "/w/staging/disc-1".into(),
                 image_bytes: 4096,
+                read_back: None,
             }],
             remaining: RemainingEstimate {
                 more_discs,
@@ -1864,6 +1867,7 @@ mod snapshots {
                 finalized,
                 staging_dir: "/srv/work/staging/disc-1".into(),
                 image_bytes: 4096,
+                read_back: None,
             }],
             remaining: RemainingEstimate {
                 more_discs,

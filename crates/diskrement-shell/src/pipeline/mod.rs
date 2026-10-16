@@ -611,6 +611,7 @@ impl<'a> Pipeline<'a> {
             finalized: disc.will_finalize,
             staging_dir: burned.staging_dir,
             image_bytes: burned.image_bytes,
+            read_back: None,
         }))
     }
 
@@ -756,22 +757,7 @@ impl<'a> Pipeline<'a> {
         sessions: &[Session],
         verifier: &Verifier<'_>,
     ) -> Result<VerifyReport, PipelineError> {
-        let latest_session = self
-            .catalog
-            .placements_for_disc(p.id, disc)
-            .map_err(Self::failed)?;
-        let recorded = self
-            .catalog
-            .disc_recorded_contents(p.id, disc)
-            .map_err(Self::failed)?;
-        let expectation = DiscExpectation {
-            project_name: p.name.clone(),
-            disc,
-            disc_name: disc.name(p.copies),
-            latest_session,
-            visible: recorded.visible,
-            superseded: recorded.superseded,
-        };
+        let expectation = disc_expectation(self.catalog, p, disc)?;
 
         let outcome = verifier.verify(&expectation).map_err(PipelineError::Burn)?;
         if !outcome.skipped && outcome.mismatches.is_empty() {
@@ -961,6 +947,30 @@ fn burner_failure(e: crate::burn::BurnError) -> DiscFailure {
         | B::MountFailed(_)
         | B::Aborted => DiscFailure::Unwritten(PipelineError::Burn(e)),
     }
+}
+
+/// What one disc should hold, read from `catalog`: the live catalog for
+/// `verify`, or for `burn --verify` the post-burn work copy, which already
+/// holds the session being checked.
+fn disc_expectation(
+    catalog: &Catalog,
+    p: &Project,
+    disc: DiscKey,
+) -> Result<DiscExpectation, PipelineError> {
+    let latest_session = catalog
+        .placements_for_disc(p.id, disc)
+        .map_err(Pipeline::failed)?;
+    let recorded = catalog
+        .disc_recorded_contents(p.id, disc)
+        .map_err(Pipeline::failed)?;
+    Ok(DiscExpectation {
+        project_name: p.name.clone(),
+        disc,
+        disc_name: disc.name(p.copies),
+        latest_session,
+        visible: recorded.visible,
+        superseded: recorded.superseded,
+    })
 }
 
 /// The disc `arg` names in this project, or `UnknownDisc` echoing the
