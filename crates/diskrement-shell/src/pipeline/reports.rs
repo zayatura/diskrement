@@ -80,6 +80,16 @@ pub struct PlanReport {
     pub unplaceable_catch_up: Vec<ScannedFile>,
 }
 
+/// What `burn --verify` concluded about one disc it wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscReadBack {
+    /// Read back clean before it was recorded; its session is VERIFIED.
+    Verified { files: usize },
+    /// Recorded without a passing read-back: it could not be read back, and
+    /// the operator declined to reinsert it.
+    Unverified,
+}
+
 /// What one disc's burn produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscBurn {
@@ -91,6 +101,8 @@ pub struct DiscBurn {
     /// simulated backend it stays, as the disc `verify` reads back.
     pub staging_dir: PathBuf,
     pub image_bytes: u64,
+    /// `None` without `burn --verify`.
+    pub read_back: Option<DiscReadBack>,
 }
 
 /// The result of one burn cycle: every disc written this run, the largest

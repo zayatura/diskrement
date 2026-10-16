@@ -123,6 +123,22 @@ pub enum PipelineError {
     /// Renders its cause's message and nothing else (`PipelineError.Burn`).
     #[error(transparent)]
     Burn(#[from] crate::burn::BurnError),
+    /// `burn --verify` read back a disc it had just written and found it bad,
+    /// so the disc was not recorded (burn-verify spec §5.2). A first session
+    /// can be burned again on a new blank disc. An appended session is on the
+    /// disc for good and the catalog will never match it, so the disc must be
+    /// retired. Exit 4, as for a mismatch in `verify`. `disc` is its name.
+    #[error(
+        "disc {disc} failed verification: {bad} of {checked} files bad, so it was not recorded ({})",
+        verify_failed_advice(.disc, .appended)
+    )]
+    VerifyFailed {
+        disc: String,
+        session: u32,
+        bad: usize,
+        checked: usize,
+        appended: bool,
+    },
     /// A multi-disc burn that committed some discs and then failed. The cause
     /// decides the exit code — an aborted prompt still exits 0 — and also the
     /// advice: a stale plan needs a re-plan (never `reset`, which deletes the
@@ -176,13 +192,33 @@ impl UnrecordedDisc {
 }
 
 /// What to do after a `PartialBurn`, decided by its cause.
-fn partial_burn_advice(cause: &PipelineError) -> &'static str {
+fn partial_burn_advice(cause: &PipelineError) -> String {
     match cause {
         // The staged plan no longer holds, or its snapshot is gone. A fresh
         // `plan` rebuilds both, and turns the committed discs' files into
         // catch-up copies for the lagging sets.
-        PipelineError::StalePlan(_) | PipelineError::SnapshotMissing(_) => "re-run plan, then burn",
-        _ => "re-run burn",
+        PipelineError::StalePlan(_) | PipelineError::SnapshotMissing(_) => {
+            "re-run plan, then burn".to_string()
+        }
+        // The failed append is on the disc for good; `mark-dead` re-plans its
+        // files. Never `reset`.
+        PipelineError::VerifyFailed {
+            disc,
+            appended: true,
+            ..
+        } => format!("mark {disc} dead, then re-run plan and burn"),
+        _ => "re-run burn".to_string(),
+    }
+}
+
+/// What to do after a disc failed `burn --verify`'s read-back.
+fn verify_failed_advice(disc: &str, appended: &bool) -> String {
+    if *appended {
+        format!(
+            "disc {disc} can no longer be appended to: run disc mark-dead {disc}, then plan and burn"
+        )
+    } else {
+        "re-run burn with a new blank disc".to_string()
     }
 }
 
@@ -197,6 +233,9 @@ pub fn partial_burn_tail(
     cause: &PipelineError,
 ) -> String {
     let mut parts = vec![format!("{} committed", committed.join(", "))];
+    if let PipelineError::VerifyFailed { disc, .. } = cause {
+        parts.push(format!("{disc} failed verification and was not recorded"));
+    }
     match unrecorded {
         Some(d) if d.surely_written => {
             parts.push(format!("{} written but not recorded", d.name));
@@ -212,8 +251,9 @@ pub fn partial_burn_tail(
     }
     // After every disc committed, only the work-dir cleanup failed: there is
     // nothing to re-burn, and "re-run burn" would only find no staged plan.
-    let advice = if pending.is_empty() && unrecorded.is_none() {
-        "nothing is left to write"
+    let failed_disc = matches!(cause, PipelineError::VerifyFailed { .. });
+    let advice = if pending.is_empty() && unrecorded.is_none() && !failed_disc {
+        "nothing is left to write".to_string()
     } else {
         partial_burn_advice(cause)
     };
@@ -263,6 +303,7 @@ impl PipelineError {
             // other burn failure is 6 (media/burner).
             PipelineError::Burn(crate::burn::BurnError::Aborted) => 0,
             PipelineError::Burn(_) => 6,
+            PipelineError::VerifyFailed { .. } => 4,
             PipelineError::PartialBurn { cause, .. } => cause.exit_code(),
             PipelineError::Failed(_) => 5,
         }
@@ -426,6 +467,73 @@ mod tests {
             partial(cause).to_string(),
             format!("aborted by operator — {tail}")
         );
+    }
+
+    #[test]
+    fn a_failed_read_back_exits_4_and_says_what_to_do() {
+        let first = PipelineError::VerifyFailed {
+            disc: "1".into(),
+            session: 1,
+            bad: 3,
+            checked: 9042,
+            appended: false,
+        };
+        assert_eq!(first.exit_code(), 4);
+        assert_eq!(
+            first.to_string(),
+            "disc 1 failed verification: 3 of 9042 files bad, so it was not recorded \
+             (re-run burn with a new blank disc)"
+        );
+        let appended = PipelineError::VerifyFailed {
+            disc: "3".into(),
+            session: 2,
+            bad: 1,
+            checked: 40,
+            appended: true,
+        };
+        assert_eq!(appended.exit_code(), 4);
+        assert_eq!(
+            appended.to_string(),
+            "disc 3 failed verification: 1 of 40 files bad, so it was not recorded \
+             (disc 3 can no longer be appended to: run disc mark-dead 3, then plan and burn)"
+        );
+    }
+
+    #[test]
+    fn a_partial_burn_ending_in_a_failed_read_back_names_the_failed_disc() {
+        let cause = PipelineError::VerifyFailed {
+            disc: "1B".into(),
+            session: 1,
+            bad: 2,
+            checked: 10,
+            appended: false,
+        };
+        assert_eq!(
+            partial_burn_tail(&["1A".into()], &None, &[], &cause),
+            "1A committed; 1B failed verification and was not recorded (re-run burn)"
+        );
+        let err = PipelineError::PartialBurn {
+            committed: vec!["1A".into()],
+            unrecorded: None,
+            pending: vec![],
+            cause: Box::new(cause),
+        };
+        assert_eq!(err.exit_code(), 4);
+
+        let appended = PipelineError::VerifyFailed {
+            disc: "3B".into(),
+            session: 2,
+            bad: 1,
+            checked: 5,
+            appended: true,
+        };
+        let tail = partial_burn_tail(&["3A".into()], &None, &[], &appended);
+        assert_eq!(
+            tail,
+            "3A committed; 3B failed verification and was not recorded \
+             (mark 3B dead, then re-run plan and burn)"
+        );
+        assert!(!tail.contains("reset"));
     }
 
     #[test]

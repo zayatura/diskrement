@@ -21,7 +21,7 @@ use diskrement_shell::burn::{simulated::SimulatedBurner, BurnError, Burner};
 use diskrement_shell::catalog::model::{Project, ProjectInit};
 use diskrement_shell::catalog::Catalog;
 use diskrement_shell::error::PipelineError;
-use diskrement_shell::pipeline::{Pipeline, PipelinePaths};
+use diskrement_shell::pipeline::{Pipeline, PipelinePaths, VerifyAfterBurn};
 use diskrement_shell::progress::{NoopSink, ProgressSink};
 
 fn main() -> ExitCode {
@@ -177,7 +177,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             say(&render::status_report(&p, &report));
             Ok(0)
         }
-        Command::Burn { name, yes } => {
+        Command::Burn { name, yes, verify } => {
             // The project lookup comes first (`Runner.withProject` resolves the
             // project before `Prompt.confirm`), so an unknown project fails with
             // exit 2 without asking anything.
@@ -209,6 +209,23 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 return Ok(0);
             }
 
+            // The verifier is chosen by the same decision as the burner, so a
+            // simulated burn is read back from its staging tree.
+            let verifier = verify.then(|| {
+                resolve_verifier(
+                    cli.burner,
+                    cli.device.as_deref(),
+                    std::path::Path::new(&p.work_dir),
+                    &exec,
+                    &operator,
+                    &sink,
+                )
+            });
+            let step = verifier.as_ref().map(|v| VerifyAfterBurn {
+                verifier: v,
+                operator: &operator,
+            });
+
             let mut pipeline = Pipeline::new(
                 &mut catalog,
                 PipelinePaths {
@@ -217,7 +234,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
                 },
                 &sink,
             );
-            let report = pipeline.burn(&name, chrono::Utc::now(), &burner)?;
+            let report = pipeline.burn_with(&name, chrono::Utc::now(), &burner, step.as_ref())?;
             say(&render::burn_report(&report, p.copies));
             Ok(0)
         }

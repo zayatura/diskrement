@@ -141,6 +141,7 @@ pub struct ScriptedExec {
     burn_exit: i32,
     burn_lines: Vec<String>,
     calls: RefCell<Vec<String>>,
+    mounts: RefCell<VecDeque<Option<PathBuf>>>,
 }
 
 impl Default for ScriptedExec {
@@ -158,6 +159,7 @@ impl ScriptedExec {
             burn_exit: 0,
             burn_lines: vec!["xorriso : UPDATE : 100% done".to_string()],
             calls: RefCell::new(Vec::new()),
+            mounts: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -173,6 +175,13 @@ impl ScriptedExec {
 
     pub fn identities(mut self, ids: &[Option<&'static str>]) -> Self {
         self.identities = RefCell::new(ids.iter().copied().collect());
+        self
+    }
+
+    /// What each `udisksctl mount` answers, in order: `Some(dir)` mounts the
+    /// disc at `dir`, `None` fails as udisks does when it cannot mount.
+    pub fn mounts(mut self, points: &[Option<&Path>]) -> Self {
+        self.mounts = RefCell::new(points.iter().map(|p| p.map(Path::to_path_buf)).collect());
         self
     }
 
@@ -204,6 +213,31 @@ impl ScriptedExec {
     ) -> Result<CmdOutput, BurnError> {
         self.calls.borrow_mut().push(cmd.join(" "));
         let has = |flag: &str| cmd.iter().any(|a| a == flag);
+        if cmd.first().is_some_and(|c| c == "udisksctl") {
+            if cmd.get(1).is_some_and(|a| a == "mount") {
+                let device = cmd.last().expect("a device");
+                let point = self
+                    .mounts
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("the script ran out of mounts");
+                return Ok(match point {
+                    Some(dir) => CmdOutput {
+                        exit_code: 0,
+                        lines: vec![format!("Mounted {device} at {}.", dir.display())],
+                    },
+                    None => CmdOutput {
+                        exit_code: 1,
+                        lines: vec![format!("Error mounting {device}: wrong fs type")],
+                    },
+                });
+            }
+            // unmount
+            return Ok(CmdOutput {
+                exit_code: 0,
+                lines: Vec::new(),
+            });
+        }
         if has("--version") {
             return Ok(CmdOutput {
                 exit_code: 0,
@@ -335,6 +369,26 @@ pub fn image_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mounts answer in order: `None` fails the way udisks does (no mount
+    /// point to parse), `Some(dir)` mounts there. Unmounts always succeed.
+    #[test]
+    fn scripted_mounts_answer_in_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = ScriptedExec::new().mounts(&[None, Some(dir.path())]);
+        let mount: Vec<String> = ["udisksctl", "mount", "-b", "/dev/sr0"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let first = script.respond(&mount, &mut |_| {}).unwrap();
+        assert_eq!(crate::burn::reader::parse_mount_point(&first.lines), None);
+        let second = script.respond(&mount, &mut |_| {}).unwrap();
+        assert_eq!(
+            crate::burn::reader::parse_mount_point(&second.lines),
+            Some(dir.path().to_path_buf())
+        );
+        assert!(script.ran("udisksctl mount -b /dev/sr0"));
+    }
 
     /// Answers are consumed in order and exhaustion means "no", so a scripted
     /// run can never loop forever on a re-prompt.
