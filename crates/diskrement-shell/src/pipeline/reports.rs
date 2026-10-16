@@ -84,7 +84,9 @@ pub struct PlanReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscReadBack {
     /// Read back clean before it was recorded; its session is VERIFIED.
-    Verified { files: usize },
+    /// `through_xorriso` when the kernel could not mount the disc yet and
+    /// xorriso read it instead (burn-verify spec §8).
+    Verified { files: usize, through_xorriso: bool },
     /// Recorded without a passing read-back: it could not be read back, and
     /// the operator declined to reinsert it.
     Unverified,

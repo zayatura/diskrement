@@ -119,6 +119,25 @@ fn burn_verifying(
     pipeline(env).burn_with("p", now(), &burner, Some(&step))
 }
 
+/// `burn_verifying` whose read-back may fall back to xorriso, into the
+/// project's work dir, as `burn --verify` sets it up (spec §8).
+fn burn_verifying_with_fallback(
+    env: &mut Env,
+    exec: &dyn Exec,
+    op: &dyn BurnOperator,
+) -> Result<BurnReport, PipelineError> {
+    let device = BurnDevice::RealDevice("/dev/sr0".to_string());
+    let burner = Burner::Real(XorrisoBurner::new(device.clone(), exec, op, &NoopSink, 2));
+    let verifier = Verifier::Disc(
+        DiscVerifier::new(device, exec, op, &NoopSink).reading_back_through_xorriso_in(&env.work),
+    );
+    let step = VerifyAfterBurn {
+        verifier: &verifier,
+        operator: op,
+    };
+    pipeline(env).burn_with("p", now(), &burner, Some(&step))
+}
+
 /// `(disc ordinal, copy set, session ordinal)` of every session in `state`.
 fn sessions(env: &Env, state: SessionState) -> Vec<(u32, u32, u32)> {
     let mut out: Vec<(u32, u32, u32)> = env
@@ -169,7 +188,10 @@ fn a_disc_that_reads_back_clean_is_committed_verified_and_ejected_after() {
 
     assert_eq!(
         report.discs[0].read_back,
-        Some(DiscReadBack::Verified { files: 1 })
+        Some(DiscReadBack::Verified {
+            files: 1,
+            through_xorriso: false
+        })
     );
     assert_eq!(sessions(&env, SessionState::Verified), vec![(1, 0, 1)]);
     assert!(sessions(&env, SessionState::Burned).is_empty());
@@ -228,7 +250,10 @@ fn a_failed_first_session_is_not_recorded_and_a_retry_on_a_new_blank_passes() {
     assert!(op.said("To retry disc 1, insert a new blank disc when asked; decline to stop."));
     assert_eq!(
         report.discs[0].read_back,
-        Some(DiscReadBack::Verified { files: 1 })
+        Some(DiscReadBack::Verified {
+            files: 1,
+            through_xorriso: false
+        })
     );
     assert_eq!(sessions(&env, SessionState::Verified), vec![(1, 0, 1)]);
     assert!(
@@ -337,7 +362,10 @@ fn a_mount_still_showing_the_last_session_asks_for_the_disc_again() {
     );
     assert_eq!(
         report.discs[0].read_back,
-        Some(DiscReadBack::Verified { files: 2 })
+        Some(DiscReadBack::Verified {
+            files: 2,
+            through_xorriso: false
+        })
     );
     assert_eq!(
         sessions(&env, SessionState::Verified),
@@ -376,9 +404,54 @@ fn a_read_back_error_asks_for_the_disc_again() {
     );
     assert_eq!(
         report.discs[0].read_back,
-        Some(DiscReadBack::Verified { files: 1 })
+        Some(DiscReadBack::Verified {
+            files: 1,
+            through_xorriso: false
+        })
     );
     assert_eq!(sessions(&env, SessionState::Verified), vec![(1, 0, 1)]);
+}
+
+/// The disc the kernel cannot mount yet is read through xorriso: no
+/// reinsert prompt, recorded VERIFIED, ejected once, nothing left in the work
+/// dir (spec §8).
+#[test]
+fn a_disc_the_kernel_cannot_mount_reads_back_through_xorriso_without_a_reinsert() {
+    let mut env = env(1);
+    stage(&mut env, &[("a.bin", b"aaaa")]);
+    let files: &[(&str, &[u8])] = &[("a.bin", b"aaaa")];
+    let script = ScriptedExec::new()
+        .toc(&[BLANK, APPENDABLE])
+        .identities(&[Some(ID_1), Some(ID_1)])
+        .mounts(&[None])
+        .extractions(&[Some(files)]);
+    let calls = RefCell::new(Vec::new());
+    let exec = recording(&script, &calls);
+    let op = ScriptedOperator::new(&[true]);
+
+    let report = burn_verifying_with_fallback(&mut env, &exec, &op).unwrap();
+
+    assert_eq!(
+        report.discs[0].read_back,
+        Some(DiscReadBack::Verified {
+            files: 1,
+            through_xorriso: true
+        })
+    );
+    assert!(!op.said("Reinsert"), "{:?}", op.log());
+    assert!(
+        op.said("Reading it through xorriso instead"),
+        "{:?}",
+        op.log()
+    );
+    assert_eq!(sessions(&env, SessionState::Verified), vec![(1, 0, 1)]);
+    let ejects = calls
+        .borrow()
+        .iter()
+        .filter(|c| c.contains("-eject"))
+        .count();
+    assert_eq!(ejects, 1);
+    assert!(!env.work.join("readback").exists());
 }
 
 #[test]

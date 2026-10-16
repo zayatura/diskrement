@@ -509,12 +509,14 @@ impl Catalog {
             .map_err(CatalogError::from_sqlite)?;
 
         let mut visible = BTreeMap::new();
+        let mut visible_bytes = 0u64;
         let mut superseded = Vec::new();
         for row in rows {
             let (path, hash, session_ordinal, rank, size) =
                 row.map_err(CatalogError::from_sqlite)?;
             if rank == 1 {
                 visible.insert(RelPath(path), ContentHash(hash));
+                visible_bytes += size as u64;
             } else {
                 superseded.push(SupersededVersion {
                     session_ordinal: session_ordinal as u32,
@@ -526,6 +528,7 @@ impl Catalog {
         }
         Ok(DiscRecordedContents {
             visible,
+            visible_bytes,
             superseded,
         })
     }
@@ -896,6 +899,9 @@ mod tests {
                 size_bytes: 10,
             }]
         );
+        // What a mount shows, and so what reading it back needs room for:
+        // a.txt v2 and b.txt, not the hidden v1.
+        assert_eq!(recorded.visible_bytes, 12 + 20);
     }
 
     #[test]
@@ -929,6 +935,7 @@ mod tests {
                     RelPath("a.txt".to_string()),
                     ContentHash("aa".to_string())
                 )]),
+                visible_bytes: 10,
                 superseded: vec![],
             }
         );
@@ -940,6 +947,7 @@ mod tests {
                     RelPath("z.txt".to_string()),
                     ContentHash("zz".to_string())
                 )]),
+                visible_bytes: 30,
                 superseded: vec![],
             }
         );

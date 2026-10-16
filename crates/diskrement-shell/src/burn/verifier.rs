@@ -15,6 +15,7 @@ use crate::burn::cmd::Exec;
 use crate::burn::json::ProjectJson;
 use crate::burn::media::{MediaInspector, MediaStatus};
 use crate::burn::reader::DiscReader;
+use crate::burn::xorriso::parse;
 use crate::burn::{BurnDevice, BurnError, BurnOperator, DiscIdentity};
 use crate::catalog::model::SupersededVersion;
 use crate::fs::hasher;
@@ -36,6 +37,9 @@ pub struct DiscExpectation {
     pub disc_name: String,
     pub latest_session: BTreeMap<RelPath, ContentHash>,
     pub visible: BTreeMap<RelPath, ContentHash>,
+    /// The bytes of `visible`: what reading the disc back into a directory
+    /// needs room for (burn-verify spec §8.2).
+    pub visible_bytes: u64,
     pub superseded: Vec<SupersededVersion>,
 }
 
@@ -55,8 +59,10 @@ pub struct VerifyOutcome {
 /// before it is recorded (burn-verify spec §4.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadBack {
-    /// Every file is there and hashes as recorded.
-    Passed { files: usize },
+    /// Every file is there and hashes as recorded. `through_xorriso` when
+    /// the kernel could not mount the disc and xorriso read it instead
+    /// (burn-verify spec §8).
+    Passed { files: usize, through_xorriso: bool },
     /// Evidence against the disc: mismatched, missing or unreadable files.
     Failed {
         files: usize,
@@ -72,6 +78,7 @@ impl ReadBack {
         if o.mismatches.is_empty() {
             ReadBack::Passed {
                 files: o.files_checked,
+                through_xorriso: false,
             }
         } else {
             ReadBack::Failed {
@@ -105,6 +112,35 @@ fn combine_tiers(
         mismatches,
         skipped: false,
     }))
+}
+
+/// Free bytes for an unprivileged writer on the filesystem holding `dir`.
+fn free_bytes(dir: &Path) -> std::io::Result<u64> {
+    let st = rustix::fs::statvfs(dir)?;
+    Ok(st.f_bavail.saturating_mul(st.f_frsize))
+}
+
+/// `24.4 GB`, the way the progress bars count.
+fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1e9)
+}
+
+/// Remove a read-back dir, absent or not. xorriso restores the disc's
+/// permissions, so a directory may come back without write permission, which
+/// would stop the removal; those are made writable and the removal retried.
+fn remove_readback(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {}
+    }
+    for entry in walkdir::WalkDir::new(dir).into_iter().flatten() {
+        if entry.file_type().is_dir() {
+            let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    std::fs::remove_dir_all(dir)
 }
 
 /// This project's disc `exp.disc`, at exactly session `session`.
@@ -279,7 +315,14 @@ pub struct DiscVerifier<'a> {
     exec: &'a dyn Exec,
     operator: &'a dyn BurnOperator,
     sink: &'a dyn ProgressSink,
+    /// Where `read_back` may extract the disc through xorriso when the kernel
+    /// cannot mount it; `None` keeps it mount-only (plain `verify`).
+    readback_dir: Option<PathBuf>,
 }
+
+/// Room kept free beyond the disc's own bytes when reading it back through
+/// xorriso: the work dir's filesystem must not end up full.
+const READBACK_MARGIN_BYTES: u64 = 1 << 30;
 
 impl<'a> DiscVerifier<'a> {
     pub fn new(
@@ -293,7 +336,17 @@ impl<'a> DiscVerifier<'a> {
             exec,
             operator,
             sink,
+            readback_dir: None,
         }
+    }
+
+    /// Let `read_back` fall back to extracting the disc through xorriso into
+    /// `<work_dir>/readback` when the kernel cannot mount it, which is the
+    /// rule straight after a burn on drives whose tray software cannot close
+    /// (burn-verify spec §8). Only `burn --verify` sets this.
+    pub fn reading_back_through_xorriso_in(mut self, work_dir: &Path) -> Self {
+        self.readback_dir = Some(work_dir.join("readback"));
+        self
     }
 
     pub fn verify(&self, exp: &DiscExpectation) -> Result<VerifyOutcome, BurnError> {
@@ -347,15 +400,112 @@ impl<'a> DiscVerifier<'a> {
                 None => Ok(compare_visible(data_dir, exp, self.sink)),
             })
         });
-        let (checked_1, mismatches) = match tier1 {
-            Ok(Ok(found)) => found,
-            Ok(Err(stale)) => return Ok(ReadBack::Unverifiable(stale)),
-            Err(BurnError::MountFailed(why)) => {
-                return Ok(ReadBack::Unverifiable(format!("could not mount it: {why}")))
-            }
+        let not_mountable = match tier1 {
+            Ok(Ok(found)) => return combine_tiers(found, self.tier2(exp)),
+            Ok(Err(stale)) => stale,
+            Err(BurnError::MountFailed(why)) => format!(
+                "could not mount it ({}); a freshly burned disc usually needs a reinsert \
+                 before the system can mount it",
+                why.trim_end_matches('.')
+            ),
             Err(e) => return Err(e),
         };
-        combine_tiers((checked_1, mismatches), self.tier2(exp))
+        match self.through_xorriso(exp, &not_mountable) {
+            Ok(found) => Ok(match combine_tiers(found, self.tier2(exp))? {
+                ReadBack::Passed { files, .. } => ReadBack::Passed {
+                    files,
+                    through_xorriso: true,
+                },
+                other => other,
+            }),
+            Err(why) => Ok(ReadBack::Unverifiable(why)),
+        }
+    }
+
+    /// Tier 1 through xorriso, for a disc the kernel cannot mount: extract
+    /// `/data` into the read-back dir, hash it, remove it. `Err` is why that
+    /// was not possible, worded after `not_mountable`; it never says anything
+    /// about the disc, so the caller treats it as unverifiable.
+    fn through_xorriso(
+        &self,
+        exp: &DiscExpectation,
+        not_mountable: &str,
+    ) -> Result<(usize, Vec<RelPath>), String> {
+        let dir = match (&self.readback_dir, &self.device) {
+            (Some(dir), BurnDevice::RealDevice(_)) => dir,
+            _ => return Err(not_mountable.to_string()),
+        };
+        let room = dir.parent().unwrap_or(dir);
+        // xorriso extracts into an existing directory by merging: a leftover
+        // tree would supply files the disc lacks. Never extract over one.
+        if let Err(e) = remove_readback(dir) {
+            return Err(format!(
+                "{not_mountable}; the leftover read-back dir {} could not be removed ({e})",
+                dir.display()
+            ));
+        }
+        let need = exp.visible_bytes.saturating_add(READBACK_MARGIN_BYTES);
+        match free_bytes(room) {
+            Ok(free) if free >= need => {}
+            Ok(free) => {
+                return Err(format!(
+                    "{not_mountable}; reading it through xorriso instead needs {} plus a {} \
+                     margin free in {}, and only {} is",
+                    gb(exp.visible_bytes),
+                    gb(READBACK_MARGIN_BYTES),
+                    room.display(),
+                    gb(free)
+                ))
+            }
+            Err(e) => {
+                return Err(format!(
+                    "{not_mountable}; the free space in {} could not be read ({e})",
+                    room.display()
+                ))
+            }
+        }
+
+        self.operator.progress(&format!(
+            "Disc {} is not mountable yet: {not_mountable}. Reading it through xorriso \
+             instead, into {} (needs {}).",
+            exp.disc_name,
+            dir.display(),
+            gb(exp.visible_bytes)
+        ));
+        let reader = DiscReader::new(self.device.clone(), self.exec);
+        let total = exp.visible_bytes;
+        self.sink.start_bytes(
+            &format!("reading disc {} through xorriso", exp.disc_name),
+            total,
+        );
+        let mut reported = 0u64;
+        let extracted = reader.extract_data_tree(dir, &mut |line| {
+            if let Some(bytes) = parse::restored_bytes(line) {
+                let bytes = bytes.min(total);
+                if bytes > reported {
+                    self.sink.advance(bytes - reported, 0);
+                    reported = bytes;
+                }
+            }
+        });
+        if extracted.is_ok() && total > reported {
+            self.sink.advance(total - reported, 0);
+        }
+        self.sink.done();
+
+        let found = match extracted {
+            Ok(()) => Ok(compare_visible(dir, exp, self.sink)),
+            Err(e) => Err(format!(
+                "{not_mountable}; reading it through xorriso failed too: {e}"
+            )),
+        };
+        if let Err(e) = remove_readback(dir) {
+            eprintln!(
+                "could not remove the read-back dir {} ({e}); it is safe to delete by hand",
+                dir.display()
+            );
+        }
+        found
     }
 
     /// `Some(reason)` when the mounted tree is not session `session` of this
@@ -516,6 +666,7 @@ mod tests {
                 .map(|(rel, body)| (RelPath((*rel).to_string()), sha(body)))
                 .collect(),
             visible: BTreeMap::new(),
+            visible_bytes: 0,
             superseded: Vec::new(),
         }
     }
@@ -727,7 +878,10 @@ mod tests {
         );
         assert_eq!(
             combine_tiers((3, Vec::new()), Ok((2, Vec::new()))).unwrap(),
-            ReadBack::Passed { files: 5 }
+            ReadBack::Passed {
+                files: 5,
+                through_xorriso: false
+            }
         );
     }
 
@@ -745,7 +899,10 @@ mod tests {
         assert_eq!(
             v.read_back(&expectation(&[("a.txt", b"hello")], 1))
                 .unwrap(),
-            ReadBack::Passed { files: 1 }
+            ReadBack::Passed {
+                files: 1,
+                through_xorriso: false
+            }
         );
         assert_eq!(
             v.read_back(&expectation(&[("a.txt", b"other")], 1))
@@ -831,6 +988,7 @@ mod tests {
                 disc_name: "1".to_string(),
                 latest_session: BTreeMap::new(),
                 visible: BTreeMap::new(),
+                visible_bytes: 0,
                 superseded: Vec::new(),
             }
         }
@@ -963,7 +1121,13 @@ mod tests {
                 .identities(&[Some(IDENTITY)])
                 .mounts(&[Some(disc.path())]);
             let (out, log) = read_back(&script, &visible(&[("a.txt", b"hello")]), 1);
-            assert_eq!(out, ReadBack::Passed { files: 1 });
+            assert_eq!(
+                out,
+                ReadBack::Passed {
+                    files: 1,
+                    through_xorriso: false
+                }
+            );
             assert_eq!(log, vec!["Mounting disc 1…".to_string()]);
             assert!(script.ran("udisksctl unmount -b /dev/sr0"));
         }
@@ -999,6 +1163,10 @@ mod tests {
             assert!(
                 matches!(&out, ReadBack::Unverifiable(why) if why.contains("could not mount it")),
                 "{out:?}"
+            );
+            assert!(
+                !script.ran("-extract /data"),
+                "without a work dir (plain verify) there is no xorriso fallback"
             );
         }
 
@@ -1048,6 +1216,257 @@ mod tests {
             assert!(
                 script.ran("udisksctl unmount"),
                 "the stale mount is released"
+            );
+        }
+
+        /// `read_back` with the xorriso fallback reading into `work`, with
+        /// the operator's transcript and the progress events.
+        fn read_back_via(
+            script: &ScriptedExec,
+            exp: &DiscExpectation,
+            session: u32,
+            work: &std::path::Path,
+        ) -> (ReadBack, Vec<String>, Vec<String>) {
+            let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+            let op = ScriptedOperator::new(&[]);
+            let sink = RecordingSink::default();
+            let out = DiscVerifier::new(
+                BurnDevice::RealDevice("/dev/sr0".to_string()),
+                &exec,
+                &op,
+                &sink,
+            )
+            .reading_back_through_xorriso_in(work)
+            .read_back(exp, session)
+            .unwrap();
+            (out, op.log(), sink.events())
+        }
+
+        fn sized(pairs: &[(&str, &[u8])]) -> DiscExpectation {
+            DiscExpectation {
+                visible_bytes: pairs.iter().map(|(_, b)| b.len() as u64).sum(),
+                ..visible(pairs)
+            }
+        }
+
+        /// The kernel cannot mount a disc it has not noticed yet, so the
+        /// read-back extracts it through xorriso into the work dir, hashes
+        /// that, says so, and leaves nothing behind (burn-verify spec §8).
+        #[test]
+        fn a_disc_the_kernel_cannot_mount_is_read_through_xorriso() {
+            let work = tempfile::TempDir::new().unwrap();
+            let files: &[(&str, &[u8])] = &[("a.txt", b"hello"), ("sub/b.txt", b"keep")];
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[None])
+                .extractions(&[Some(files)]);
+            let (out, log, events) = read_back_via(&script, &sized(files), 1, work.path());
+
+            assert_eq!(
+                out,
+                ReadBack::Passed {
+                    files: 2,
+                    through_xorriso: true
+                }
+            );
+            assert!(
+                log.iter()
+                    .any(|l| l.contains("Reading it through xorriso instead")
+                        && l.contains("needs 0.0 GB")),
+                "{log:?}"
+            );
+            assert_eq!(events[0], "start_bytes reading disc 1 through xorriso 9");
+            assert!(events.contains(&"advance 9 0".to_string()), "{events:?}");
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.starts_with("start verifying disc 1 9 2")),
+                "the extracted tree is hashed as its own phase: {events:?}"
+            );
+            assert!(
+                !work.path().join("readback").exists(),
+                "nothing left behind"
+            );
+        }
+
+        /// A mount still showing the previous session falls back the same way.
+        #[test]
+        fn a_stale_mount_is_read_through_xorriso() {
+            let work = tempfile::TempDir::new().unwrap();
+            let stale = mounted(&[("a.txt", b"hello")], IDENTITY);
+            let files: &[(&str, &[u8])] = &[("a.txt", b"hello"), ("b.txt", b"new")];
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY_2)])
+                .mounts(&[Some(stale.path())])
+                .extractions(&[Some(files)]);
+            let (out, _, _) = read_back_via(&script, &sized(files), 2, work.path());
+            assert_eq!(
+                out,
+                ReadBack::Passed {
+                    files: 2,
+                    through_xorriso: true
+                }
+            );
+        }
+
+        /// What xorriso extracts is evidence like a mount: a bad file fails.
+        #[test]
+        fn a_bad_file_read_through_xorriso_fails_the_disc() {
+            let work = tempfile::TempDir::new().unwrap();
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[None])
+                .extractions(&[Some(&[("a.txt", b"HELLO")])]);
+            let (out, _, _) =
+                read_back_via(&script, &sized(&[("a.txt", b"hello")]), 1, work.path());
+            assert_eq!(
+                out,
+                ReadBack::Failed {
+                    files: 1,
+                    mismatches: vec![RelPath("a.txt".to_string())],
+                }
+            );
+            assert!(!work.path().join("readback").exists());
+        }
+
+        /// A failed extraction says nothing about the disc: unverifiable, so
+        /// the operator is asked to reinsert it, never told to discard it.
+        #[test]
+        fn a_failed_extraction_is_unverifiable() {
+            let work = tempfile::TempDir::new().unwrap();
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[None])
+                .extractions(&[None]);
+            let (out, _, _) =
+                read_back_via(&script, &sized(&[("a.txt", b"hello")]), 1, work.path());
+            assert!(
+                matches!(&out, ReadBack::Unverifiable(why)
+                    if why.contains("could not mount it")
+                        && why.contains("reading it through xorriso failed too")),
+                "{out:?}"
+            );
+            assert!(!work.path().join("readback").exists());
+        }
+
+        /// Too little room in the work dir: unverifiable, naming both numbers,
+        /// and nothing is extracted.
+        #[test]
+        fn too_little_space_for_the_extraction_is_unverifiable() {
+            let work = tempfile::TempDir::new().unwrap();
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[None]);
+            let huge = DiscExpectation {
+                visible_bytes: u64::MAX / 4,
+                ..visible(&[("a.txt", b"hello")])
+            };
+            let (out, _, _) = read_back_via(&script, &huge, 1, work.path());
+            assert!(
+                matches!(&out, ReadBack::Unverifiable(why) if why.contains("needs") && why.contains("free")),
+                "{out:?}"
+            );
+            assert!(!script.ran("-extract /data"));
+        }
+
+        /// A leftover that cannot be removed is never extracted over: xorriso
+        /// would merge into it, and its files could stand in for ones the disc
+        /// lacks. Unverifiable instead.
+        #[test]
+        fn a_leftover_that_cannot_be_removed_is_never_extracted_over() {
+            use std::os::unix::fs::PermissionsExt;
+            let work = tempfile::TempDir::new().unwrap();
+            std::fs::create_dir_all(work.path().join("readback/old")).unwrap();
+            std::fs::write(work.path().join("readback/old/a.txt"), b"hello").unwrap();
+            // A work dir the user cannot write: the leftover cannot be unlinked.
+            std::fs::set_permissions(work.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            if std::fs::write(work.path().join("probe"), b"").is_ok() {
+                std::fs::set_permissions(work.path(), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                eprintln!(
+                    "SKIP [a_leftover_that_cannot_be_removed_is_never_extracted_over]: running as root"
+                );
+                return;
+            }
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[None]);
+            let (out, _, _) =
+                read_back_via(&script, &sized(&[("a.txt", b"hello")]), 1, work.path());
+            std::fs::set_permissions(work.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                matches!(&out, ReadBack::Unverifiable(why) if why.contains("could not be removed")),
+                "{out:?}"
+            );
+            assert!(!script.ran("-extract /data"));
+        }
+
+        /// xorriso restores read-only directories; the removal makes them
+        /// writable and tries again.
+        #[test]
+        fn a_read_only_extracted_tree_is_still_removed() {
+            use std::os::unix::fs::PermissionsExt;
+            let work = tempfile::TempDir::new().unwrap();
+            let sub = work.path().join("readback/sub");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join("a.txt"), b"x").unwrap();
+            std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
+            remove_readback(&work.path().join("readback")).expect("removed");
+            assert!(!work.path().join("readback").exists());
+            remove_readback(&work.path().join("readback")).expect("absent is fine");
+        }
+
+        /// An image file is read by osirrox already, so a failed read of it is
+        /// never retried through the fallback.
+        #[test]
+        fn an_image_file_never_falls_back() {
+            let work = tempfile::TempDir::new().unwrap();
+            // One /data extraction, the image path's own, and it fails; a
+            // second would find the script empty and panic.
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .extractions(&[None]);
+            let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+            let op = ScriptedOperator::new(&[]);
+            let out = DiscVerifier::new(
+                BurnDevice::ImageFile(std::path::PathBuf::from("/tmp/none.iso")),
+                &exec,
+                &op,
+                &NoopSink,
+            )
+            .reading_back_through_xorriso_in(work.path())
+            .read_back(&sized(&[("a.txt", b"hello")]), 1)
+            .unwrap();
+            assert!(matches!(out, ReadBack::Unverifiable(_)), "{out:?}");
+        }
+
+        /// A leftover from a crashed read-back is cleared before extracting.
+        #[test]
+        fn a_leftover_readback_dir_is_cleared_first() {
+            let work = tempfile::TempDir::new().unwrap();
+            std::fs::create_dir_all(work.path().join("readback/old")).unwrap();
+            std::fs::write(work.path().join("readback/old/stale.txt"), b"x").unwrap();
+            let files: &[(&str, &[u8])] = &[("a.txt", b"hello")];
+            let script = ScriptedExec::new()
+                .toc(&[APPENDABLE])
+                .identities(&[Some(IDENTITY)])
+                .mounts(&[None])
+                .extractions(&[Some(files)]);
+            let (out, _, _) = read_back_via(&script, &sized(files), 1, work.path());
+            assert_eq!(
+                out,
+                ReadBack::Passed {
+                    files: 1,
+                    through_xorriso: true
+                },
+                "the stale file would have been an unexpected file"
             );
         }
 
@@ -1107,7 +1526,13 @@ mod tests {
                 .unwrap()
             };
             // Toc serves the session-1 extraction of a.txt with today's body.
-            assert_eq!(run(&hidden(b"hello")), ReadBack::Passed { files: 2 });
+            assert_eq!(
+                run(&hidden(b"hello")),
+                ReadBack::Passed {
+                    files: 2,
+                    through_xorriso: false
+                }
+            );
             assert_eq!(
                 run(&hidden(b"older")),
                 ReadBack::Failed {

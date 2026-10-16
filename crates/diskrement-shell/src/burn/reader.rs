@@ -54,6 +54,30 @@ impl<'a> DiscReader<'a> {
         }
     }
 
+    /// Extract the disc's `/data` tree into `dest`, which must not exist yet,
+    /// through xorriso's own reader rather than a kernel mount, passing each
+    /// output line to `on_line` (the restore pacifier is the progress). This
+    /// is how `burn --verify` reads a disc the kernel has not noticed yet
+    /// (burn-verify spec §8). `Err` carries xorriso's words.
+    pub fn extract_data_tree(
+        &self,
+        dest: &Path,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
+        let result = self
+            .exec
+            .run(&args::extract(&self.device, "/data", dest, None), on_line)
+            .map_err(|e| crate::error::with_causes(&e))?;
+        if result.exit_code != 0 {
+            return Err(format!(
+                "xorriso exited {}: {}",
+                result.exit_code,
+                result.tail(5).join(" | ")
+            ));
+        }
+        Ok(())
+    }
+
     /// Extract one file as recorded by a specific session — the tier-2 read of
     /// a version a later session hid.
     pub fn extract_from_session(

@@ -22,12 +22,17 @@ pub(super) struct ReadBackBurn {
     /// `Some(files)` when the read-back passed; `None` when the operator
     /// chose to record the disc unverified.
     pub verified_files: Option<usize>,
+    /// The disc passed when read through xorriso, not a mount.
+    pub through_xorriso: bool,
     /// Whether the disc has already left the drive.
     pub ejected: bool,
 }
 
 enum Settled {
-    Passed(usize),
+    Passed {
+        files: usize,
+        through_xorriso: bool,
+    },
     Failed {
         files: usize,
         mismatches: Vec<RelPath>,
@@ -61,10 +66,14 @@ pub(super) fn burn_and_read_back(
         step.operator
             .progress(&format!("Reading disc {name} back before it is recorded."));
         match settle(burner, step, exp, session) {
-            Settled::Passed(files) => {
+            Settled::Passed {
+                files,
+                through_xorriso,
+            } => {
                 return Ok(ReadBackBurn {
                     burned,
                     verified_files: Some(files),
+                    through_xorriso,
                     ejected: false,
                 })
             }
@@ -72,6 +81,7 @@ pub(super) fn burn_and_read_back(
                 return Ok(ReadBackBurn {
                     burned,
                     verified_files: None,
+                    through_xorriso: false,
                     ejected: true,
                 })
             }
@@ -109,7 +119,15 @@ fn settle(
     let name = &exp.disc_name;
     loop {
         let reason = match step.verifier.read_back(exp, session) {
-            Ok(ReadBack::Passed { files }) => return Settled::Passed(files),
+            Ok(ReadBack::Passed {
+                files,
+                through_xorriso,
+            }) => {
+                return Settled::Passed {
+                    files,
+                    through_xorriso,
+                }
+            }
             Ok(ReadBack::Failed { files, mismatches }) => {
                 return Settled::Failed { files, mismatches }
             }
@@ -118,6 +136,8 @@ fn settle(
             Err(e) => crate::error::with_causes(&e),
         };
         burner.eject();
+        // udisks ends its messages with a period of its own.
+        let reason = reason.trim_end_matches('.');
         if !step.operator.confirm_insert(&format!(
             "Couldn't verify disc {name}: {reason}. Reinsert disc {name} to verify it, \
              or decline to leave it unverified."

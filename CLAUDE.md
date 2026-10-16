@@ -69,14 +69,26 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   `burn --verify` after the read-back (`pipeline/read_back.rs`). The read-back
   happens before the commit, against expected contents read from the post-burn
   work copy (`disc_expectation`), and a failed disc is never recorded.
-- **A read-back trusts the mount only if it shows the new session.** Without an
-  eject the kernel may still show the previous session; `DiscVerifier::read_back`
-  compares the mounted `/.diskrement/project.json` with the session just written
-  and calls a mismatch `Unverifiable` (reinsert), never `Failed`. Otherwise a
-  good appended disc would read as missing its new files.
-- **xorriso extracts over an existing file** (validated 2026-09-07, 1.5.8.pl02),
-  but every extraction in this tree still targets a fresh path inside a
-  `TempDir`, so nothing depends on that.
+- **The kernel cannot mount a disc it has just burned.** Closing a session raises
+  no media-change event, so until an eject `/sys/block/sr0/size` keeps the blank
+  disc's 2048 bytes and `udisksctl mount` fails ("not a mountable filesystem");
+  udisks `Block.Rescan` and a STOP UNIT spin-down do not help (validated
+  2026-10-16, Pioneer BDR-UD04, kernel 6.18). So `burn --verify`'s
+  `DiscVerifier::read_back` falls back to extracting `/data` through xorriso
+  (SCSI pass-through, which sees the new session) into `<work_dir>/readback`,
+  removed before and after. An extraction failure is `Unverifiable` (reinsert),
+  never `Failed`. Plain `verify` stays mount-only: it is the check through the
+  kernel's ISO 9660 driver, the path a restore takes.
+- **A read-back trusts the mount only if it shows the new session.** A mount
+  that still shows the previous session (the same staleness, on an appended
+  disc) is compared via the mounted `/.diskrement/project.json` and treated
+  like a failed mount, never `Failed`. Otherwise a good appended disc would
+  read as missing its new files.
+- **xorriso extracts over an existing file, and merges into an existing
+  directory** (validated 2026-09-07 and 2026-10-16, 1.5.8.pl02). Every
+  extraction here targets a fresh path: a `TempDir`, or `<work_dir>/readback`,
+  which `read_back` refuses to use unless it could remove the leftover first.
+  A merge into a leftover tree could pass a disc that lacks files.
 - **`-toc -tell_media_space` prints `Media status` twice**, once per
   sub-command. The parser takes the first match; do not "fix" it into an
   exactly-once assertion.

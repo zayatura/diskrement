@@ -116,7 +116,7 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       · ETA 0m00s`, then `disc 2A: 9042 files OK ✓`. Read-back ran at ~20 MB/s.
       No superseded versions on this disc, so the tier-2 line was not
       exercised on real media.)
-- [ ] 12. `burn --verify` on real media, before relying on the flag (burn-verify
+- [x] 12. `burn --verify` on real media, before relying on the flag (burn-verify
       spec §2, §7.4). (a) A blank BD-R: after `Writing done`, `Reading disc <name>
       back before it is recorded.`, `Mounting disc <name>…` and the verifying
       line appear with no eject, then `Read back: verified (N files).`; the
@@ -124,6 +124,25 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       mount shows the new session. Record whether `udisksctl` mounted the new
       session without a reload. If it did not, confirm that the `Couldn't verify
       … Reinsert` prompt appeared and that the reinserted disc verified.
+      (Rust @ ad7a954/3473456, 2026-10-16, immich-family 1A and 1B, 24.4 GB
+      blank BD-Rs, Pioneer at `/dev/sr0`: (a) `udisksctl` did NOT mount the new
+      disc: `Object … sr0 is not a mountable filesystem`. The kernel kept the
+      blank disc's capacity (`/sys/block/sr0/size` = 4, `blkid -p` empty) while
+      `xorriso -toc` already showed the closed session. udisks `Block.Rescan`
+      (no password needed) and `xorriso -calm_drive on` did not change that.
+      After the reinsert the size read 47,709,312 sectors at once, and both
+      discs read back clean at ~20 MB/s: `Read back: verified (2614 files).`,
+      both sessions VERIFIED. (b) Not run; no append yet. This led to the xorriso
+      fallback, item 13.)
+- [ ] 13. `burn --verify`'s xorriso fallback (burn-verify spec §8), on the next
+      blank: after `Writing done`, `Disc <name> is not mountable yet: … Reading
+      it through xorriso instead, into <work_dir>/readback (needs N GB).`, then
+      a `reading disc <name> through xorriso` bar that advances about once a
+      second, then a short `verifying disc <name>` phase, then `Read back:
+      verified (N files, read through xorriso).` with no reinsert prompt and one
+      eject. `<work_dir>/readback` is gone afterwards. (Pacifier cadence checked
+      beforehand by extracting one 440 MB folder of disc 1B: one `files
+      restored ( 431.1m) in 26 seconds , 5.3xB` line a second, ~24 MB/s.)
 
 Run record: 2026-09-11, Rust binary @ commit b81b342 (release build), Pioneer
 BDR-UD04 at `/dev/sr1`, one CMC BD-R (POW caveat above did not apply — media
