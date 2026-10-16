@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use args::Command;
-use clap::Parser as _;
 use diskrement_shell::burn::cmd::{self, CmdOutput, Exec};
 use diskrement_shell::burn::verifier::{DiscVerifier, StagingVerifier, Verifier};
 use diskrement_shell::burn::xorriso::burner::XorrisoBurner;
@@ -30,7 +29,8 @@ fn main() -> ExitCode {
     // the contract's 2 means state/lookup — zio-cli used 1 for argument
     // errors, so the port maps them to 1 itself. Only the *wording* of
     // clap's message may drift (spec §3.2).
-    match args::Cli::try_parse() {
+    // `try_parse_checked_from` also refuses bad `--root` sets the same way.
+    match args::Cli::try_parse_checked_from(std::env::args_os()) {
         Ok(cli) => match dispatch(cli) {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
@@ -102,11 +102,15 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
         Command::Init {
             name,
             source,
+            root,
             work_dir,
             disc_type,
             margin,
             copies,
         } => {
+            // Cannot fail: `try_parse_checked_from` already accepted the roots.
+            let sources = args::init_sources(source, root)
+                .map_err(|e| PipelineError::Failed(e.to_string()))?;
             // The work dir exists before anything else (Runner.dispatch).
             std::fs::create_dir_all(&work_dir).map_err(|e| PipelineError::failed(&e))?;
             let mut catalog = open_catalog(&resolved.catalog)?;
@@ -122,7 +126,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             );
             let pi = ProjectInit {
                 name: name.clone(),
-                source_root: source.display().to_string(),
+                sources,
                 work_dir: work_dir.display().to_string(),
                 default_disc_type: disc_type,
                 margin_percent: margin,

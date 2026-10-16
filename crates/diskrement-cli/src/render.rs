@@ -1,7 +1,7 @@
 //! Output rendering (`Render.scala`). Success text goes to stdout; error text
 //! is `PipelineError`'s `Display` and goes to stderr with its exit code.
 
-use diskrement_core::{set_letter, RelPath, SetCoverage};
+use diskrement_core::{set_letter, RelPath, SetCoverage, Sources};
 use diskrement_shell::catalog::model::{
     FileHistoryEntry, LostReport, Project, ProjectId, VersionStatus,
 };
@@ -270,10 +270,21 @@ pub fn status_report(p: &Project, r: &StatusReport) -> String {
     } else {
         String::new()
     };
+    let source = match &p.sources {
+        Sources::Single(path) => format!("source {}", path.display()),
+        Sources::Rooted(roots) if roots.len() == 1 => "1 root".to_string(),
+        Sources::Rooted(roots) => format!("{} roots", roots.len()),
+    };
     let mut out = format!(
-        "Project {}  (source {}, {}, margin {:.1}%{copies})\n",
-        p.name, p.source_root, p.default_disc_type, p.margin_percent
+        "Project {}  ({source}, {}, margin {:.1}%{copies})\n",
+        p.name, p.default_disc_type, p.margin_percent
     );
+    if let Sources::Rooted(roots) = &p.sources {
+        out.push_str("Roots:\n");
+        for (name, path) in roots {
+            out.push_str(&format!("  {name} → {}\n", path.display()));
+        }
+    }
     out.push_str("Discs:\n");
     for d in &r.discs {
         let open = if r.open_discs.contains(&d.key()) {
@@ -536,7 +547,7 @@ mod tests {
         Project {
             id: ProjectId(1),
             name: "photos".into(),
-            source_root: "/srv/photos".into(),
+            sources: Sources::Single("/srv/photos".into()),
             work_dir: "/srv/work".into(),
             default_disc_type: DiscType::BdR,
             margin_percent: 2.0,
@@ -633,6 +644,44 @@ mod tests {
              No live copy: 2 files (0.8 GB) — re-burn on next plan/burn.\n\
              Current files: 2      Last burn: never"
         );
+    }
+
+    fn nothing_burned() -> StatusReport {
+        StatusReport {
+            discs: vec![],
+            open_discs: vec![],
+            coverage: diskrement_core::Coverage::default(),
+            total_current_files: 0,
+            last_burn_at: None,
+        }
+    }
+
+    #[test]
+    fn a_rooted_status_names_its_roots_before_the_discs() {
+        let mut p = project();
+        p.sources = Sources::rooted(vec![
+            ("others/cecil".parse().unwrap(), "/lib/u3".into()),
+            ("family/anna".parse().unwrap(), "/lib/u1".into()),
+        ])
+        .unwrap();
+        assert_eq!(
+            status_report(&p, &nothing_burned()),
+            "Project photos  (2 roots, BD_R, margin 2.0%)\n\
+             Roots:\n  \
+             family/anna → /lib/u1\n  \
+             others/cecil → /lib/u3\n\
+             Discs:\n\
+             Current files: 0      Last burn: never"
+        );
+    }
+
+    #[test]
+    fn a_status_with_one_root_says_one_root() {
+        let mut p = project();
+        p.sources = Sources::rooted(vec![("anna".parse().unwrap(), "/lib/u1".into())]).unwrap();
+        assert!(status_report(&p, &nothing_burned()).starts_with(
+            "Project photos  (1 root, BD_R, margin 2.0%)\nRoots:\n  anna → /lib/u1\nDiscs:\n"
+        ));
     }
 
     #[test]
@@ -1798,7 +1847,7 @@ mod snapshots {
         Project {
             id: ProjectId(1),
             name: name.to_string(),
-            source_root: source.to_string(),
+            sources: Sources::Single(source.into()),
             work_dir: "/srv/work".to_string(),
             default_disc_type: DiscType::BdR,
             margin_percent: 2.0,

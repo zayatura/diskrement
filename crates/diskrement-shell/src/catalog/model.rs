@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use diskrement_core::{ContentHash, DiscKey, DiscStatus, DiscType, ManifestChangeKind, RelPath};
+use diskrement_core::{
+    ContentHash, DiscKey, DiscStatus, DiscType, ManifestChangeKind, RelPath, Sources,
+};
 
 /// Primary key of a project row (a SQLite rowid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +20,9 @@ pub struct ProjectId(pub i64);
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectInit {
     pub name: String,
-    pub source_root: String,
+    /// What the project archives. A rooted project's roots live in
+    /// `project_root`, and its `project.source_root` column holds `''`.
+    pub sources: Sources,
     pub work_dir: String,
     pub default_disc_type: DiscType,
     pub margin_percent: f64,
@@ -31,7 +35,9 @@ pub struct ProjectInit {
 pub struct Project {
     pub id: ProjectId,
     pub name: String,
-    pub source_root: String,
+    /// What the project archives. A rooted project's roots live in
+    /// `project_root`, and its `project.source_root` column holds `''`.
+    pub sources: Sources,
     pub work_dir: String,
     pub default_disc_type: DiscType,
     pub margin_percent: f64,

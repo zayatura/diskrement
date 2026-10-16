@@ -4,10 +4,11 @@
 //! `Expect::ExitOnly` (the harness was deleted with the Scala tree; the
 //! `scala` branch preserves both).
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
-use diskrement_core::{DiscArg, DiscType};
+use clap::{CommandFactory as _, Parser, Subcommand};
+use diskrement_core::{DiscArg, DiscType, RootName, RootsError, Sources};
 
 /// The burn backend, as a flag. zio-cli's `Options.enumeration` rejected an
 /// unknown value as an argument error and clap's `ValueEnum` does the same.
@@ -37,13 +38,79 @@ pub struct Cli {
     pub command: Command,
 }
 
+impl Cli {
+    /// `try_parse_from`, plus the check clap cannot express on its own: the
+    /// `--root` names as a set. A name given twice, or one inside another,
+    /// is a clap `ValueValidation` error, so it exits 1 like any usage
+    /// error, before anything opens the catalog.
+    pub fn try_parse_checked_from<I, T>(args: I) -> Result<Cli, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let cli = Cli::try_parse_from(args)?;
+        if let Command::Init { source, root, .. } = &cli.command {
+            init_sources(source.clone(), root.clone()).map_err(|e| {
+                // Built against `init`, so the usage line shown is init's.
+                let mut cmd = Cli::command();
+                cmd.build();
+                cmd.find_subcommand_mut("init")
+                    .expect("init exists")
+                    .error(clap::error::ErrorKind::ValueValidation, e)
+            })?;
+        }
+        Ok(cli)
+    }
+}
+
+/// A project's sources from `init`'s flags. The `sources` group guarantees
+/// exactly one of `--source` and `--root` is present.
+pub fn init_sources(
+    source: Option<PathBuf>,
+    root: Vec<(RootName, PathBuf)>,
+) -> Result<Sources, RootsError> {
+    match source {
+        Some(path) => Ok(Sources::Single(path)),
+        None => Sources::rooted(root),
+    }
+}
+
+/// One `--root NAME=PATH`, split at the first `=`: a path may contain `=`,
+/// a name may not. The name is checked here; the names as a set are checked
+/// by `Cli::try_parse_checked_from`.
+///
+/// Parsing the value as `&str` is deliberate: a non-UTF-8 `--root` is rejected
+/// at parse time (exit 1) because the catalog stores paths as TEXT. Accepting
+/// such a path would store it lossily and create a project that can never plan.
+fn root_arg(raw: &str) -> Result<(RootName, PathBuf), String> {
+    let (name, path) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("expected NAME=PATH, got {raw}"))?;
+    if path.is_empty() {
+        return Err(format!("root {name} has no path (expected NAME=PATH)"));
+    }
+    Ok((name.parse()?, PathBuf::from(path)))
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Create a project and run filesystem checks.
+    #[command(group(
+        clap::ArgGroup::new("sources")
+            .required(true)
+            .args(["source", "root"])
+    ))]
     Init {
         name: String,
+        /// The directory to archive. Exclusive with --root.
         #[arg(long)]
-        source: PathBuf,
+        source: Option<PathBuf>,
+        /// A named directory to archive, as NAME=PATH; repeat for each.
+        /// Its files go under NAME/ on every disc, and NAME may contain '/'.
+        /// A NAME starting with '-' needs the --root=NAME=PATH form.
+        /// Exclusive with --source.
+        #[arg(long = "root", value_name = "NAME=PATH", value_parser = root_arg)]
+        root: Vec<(RootName, PathBuf)>,
         #[arg(long)]
         work_dir: PathBuf,
         #[arg(long, default_value = "BD_R")]
@@ -151,6 +218,7 @@ mod tests {
         let Command::Init {
             name,
             source,
+            root,
             work_dir,
             disc_type,
             margin,
@@ -160,7 +228,8 @@ mod tests {
             panic!("not init")
         };
         assert_eq!(name, "photos");
-        assert_eq!(source, PathBuf::from("/srv/p"));
+        assert_eq!(source, Some(PathBuf::from("/srv/p")));
+        assert!(root.is_empty());
         assert_eq!(work_dir, PathBuf::from("/srv/w"));
         assert_eq!(disc_type, DiscType::BdR);
         assert_eq!(margin, 2.0);
@@ -186,17 +255,14 @@ mod tests {
         ])
         .unwrap();
         let Command::Init {
-            name,
-            source,
-            work_dir,
             disc_type,
             margin,
             copies,
+            ..
         } = cli.command
         else {
             panic!("not init")
         };
-        let _ = (name, source, work_dir);
         assert_eq!(disc_type, DiscType::BdRDl);
         assert_eq!(margin, 5.0);
         assert_eq!(copies, 2);
@@ -516,5 +582,95 @@ mod tests {
         assert!(Cli::try_parse_from(["diskrement", "disc", "mark-dead"]).is_err());
         assert!(Cli::try_parse_from(["diskrement", "disc", "mark-dead", "p"]).is_err());
         assert!(Cli::try_parse_from(["diskrement", "disc", "bury", "p", "1"]).is_err());
+    }
+
+    fn init_args(extra: &[&str]) -> Vec<String> {
+        ["diskrement", "init", "fam", "--work-dir", "/w"]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn init_takes_repeated_named_roots() {
+        let cli = Cli::try_parse_checked_from(init_args(&[
+            "--root",
+            "family/anna=/lib/u1",
+            "--root",
+            "cecil=/lib/u3",
+        ]))
+        .unwrap();
+        let Command::Init { source, root, .. } = cli.command else {
+            panic!("not init")
+        };
+        assert_eq!(source, None);
+        assert_eq!(
+            root,
+            vec![
+                ("family/anna".parse().unwrap(), PathBuf::from("/lib/u1")),
+                ("cecil".parse().unwrap(), PathBuf::from("/lib/u3")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_root_path_may_contain_equals() {
+        let cli = Cli::try_parse_checked_from(init_args(&["--root", "anna=/lib/a=b"])).unwrap();
+        let Command::Init { root, .. } = cli.command else {
+            panic!("not init")
+        };
+        assert_eq!(root[0].1, PathBuf::from("/lib/a=b"));
+    }
+
+    #[test]
+    fn init_needs_exactly_one_of_source_and_root() {
+        let neither = Cli::try_parse_checked_from(init_args(&[])).unwrap_err();
+        assert_eq!(
+            neither.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let both =
+            Cli::try_parse_checked_from(init_args(&["--source", "/s", "--root", "a=/lib/a"]))
+                .unwrap_err();
+        assert_eq!(both.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn a_malformed_root_is_refused() {
+        for bad in [
+            "anna",
+            "anna=",
+            "=/lib/a",
+            "family//anna=/lib/a",
+            "../x=/lib/a",
+        ] {
+            let err = Cli::try_parse_checked_from(init_args(&["--root", bad])).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{bad}");
+        }
+    }
+
+    #[test]
+    fn root_names_given_twice_or_nested_are_refused() {
+        for [first, second] in [
+            ["anna=/lib/a", "anna=/lib/b"],
+            ["family=/lib/f", "family/anna=/lib/a"],
+        ] {
+            let err = Cli::try_parse_checked_from(init_args(&["--root", first, "--root", second]))
+                .unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{first} {second}"
+            );
+            assert!(err.to_string().contains("diskrement init"), "{err}");
+        }
+        assert!(Cli::try_parse_checked_from(init_args(&[
+            "--root",
+            "family=/lib/f",
+            "--root",
+            "familyx=/lib/x",
+        ]))
+        .is_ok());
     }
 }

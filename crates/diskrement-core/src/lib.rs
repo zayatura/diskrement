@@ -2,7 +2,7 @@
 //!
 //! Nothing here touches the filesystem, SQLite, a subprocess, or the clock.
 //! The shell crate owns every effect; this crate owns the change-set,
-//! planning, and manifest models (spec §5.3).
+//! planning, manifest and source-root models (spec §5.3).
 //!
 //! Functions are reached through their modules — `diff::diff`, `planner::plan`,
 //! `manifest::build`, `replication::shortfall` — mirroring the Scala `Diff.diff` / `Planner.plan` /
@@ -13,6 +13,7 @@ pub mod manifest;
 pub mod model;
 pub mod planner;
 pub mod replication;
+pub mod roots;
 
 #[cfg(test)]
 // Helpers land in the task that first needs them, which is sometimes one task
@@ -29,6 +30,7 @@ pub use model::{
 };
 pub use planner::{BurnPlan, DiscState, DiscStatus, PlannedDisc};
 pub use replication::{Coverage, DiscContents, SetCoverage};
+pub use roots::{FillOrder, RootName, RootsError, Sources};
 
 #[cfg(test)]
 mod tests {
