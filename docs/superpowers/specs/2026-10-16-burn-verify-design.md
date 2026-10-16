@@ -125,9 +125,18 @@ catalog.
 ### 4.4 `Pipeline::burn`
 
 ```rust
-pub fn burn(&mut self, name: &str, now: DateTime<Utc>, burner: &Burner<'_>,
-            verifier: Option<&Verifier<'_>>) -> Result<BurnReport, PipelineError>;
+pub struct VerifyAfterBurn<'a> {
+    pub verifier: &'a Verifier<'a>,
+    pub operator: &'a dyn BurnOperator,
+}
+
+pub fn burn_with(&mut self, name: &str, now: DateTime<Utc>, burner: &Burner<'_>,
+                 read_back: Option<&VerifyAfterBurn<'_>>) -> Result<BurnReport, PipelineError>;
 ```
+
+`burn(name, now, burner)` keeps its signature and calls `burn_with(…, None)`.
+`VerifyAfterBurn` carries the operator because the pipeline prompts for a
+reinsert itself; the burner does not expose its operator.
 
 `burn_disc` gains the per-disc loop in §5.1. Everything before `burner.burn`
 (the dead-disc guard, session ordinals, stale-plan checks, the work-copy catalog)
@@ -266,7 +275,9 @@ With `run_real_burn_with` and a scripted operator and exec:
 - `tests/binary.rs`: `burn --verify` with no stdin declines before the device is
   opened (exit 0).
 - One scenario in `crates/diskrement-cli/tests/scenarios/`: a simulated
-  `burn --verify` at `--copies 2`, after which `status` shows both discs VERIFIED.
+  `burn --verify` at `--copies 2`, after which the burn report says both discs
+  read back verified and a `verify` sweep exits 0. (`status` does not render
+  session states; the VERIFIED rows are asserted in the pipeline tests.)
 
 ### 7.4 Docs
 
