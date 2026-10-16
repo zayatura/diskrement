@@ -1136,3 +1136,155 @@ mod unplaceable_catch_up {
             .stdout(contains("up to date").not());
     }
 }
+
+mod roots {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn cmd() -> Command {
+        Command::cargo_bin("diskrement").expect("binary builds")
+    }
+
+    /// Two Immich-style libraries under `lib/`; the catalog's directory does
+    /// not exist yet, so a test can tell whether a command opened it.
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        lib: PathBuf,
+        catalog: PathBuf,
+        work: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let lib = root.join("lib");
+        for rel in ["u1/2021/2021-03-01/a.jpg", "u2/2020/2020-01-01/b.jpg"] {
+            let p = lib.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, rel.as_bytes()).unwrap();
+        }
+        Fixture {
+            lib,
+            catalog: root.join("catalog/cat.sqlite"),
+            work: root.join("work"),
+            _dir: dir,
+        }
+    }
+
+    fn root(name: &str, path: &Path) -> String {
+        format!("{name}={}", path.display())
+    }
+
+    fn init(f: &Fixture, roots: &[String]) -> assert_cmd::assert::Assert {
+        let mut c = cmd();
+        c.arg("--catalog")
+            .arg(&f.catalog)
+            .args(["init", "fam", "--work-dir"])
+            .arg(&f.work);
+        for r in roots {
+            c.arg("--root").arg(r);
+        }
+        c.assert()
+    }
+
+    #[test]
+    fn status_lists_the_roots_and_plan_scans_under_their_names() {
+        let f = fixture();
+        init(
+            &f,
+            &[
+                root("family/anna", &f.lib.join("u1")),
+                root("bela", &f.lib.join("u2")),
+            ],
+        )
+        .success()
+        .stdout(contains("Created project fam (id 1)."));
+
+        cmd()
+            .arg("--catalog")
+            .arg(&f.catalog)
+            .args(["status", "fam"])
+            .assert()
+            .success()
+            .stdout(
+                contains("Project fam  (2 roots, BD_R, margin 2.0%)\nRoots:\n")
+                    .and(contains(format!(
+                        "  bela → {}\n",
+                        f.lib.join("u2").display()
+                    )))
+                    .and(contains(format!(
+                        "  family/anna → {}\n",
+                        f.lib.join("u1").display()
+                    ))),
+            );
+
+        cmd()
+            .arg("--catalog")
+            .arg(&f.catalog)
+            .args(["plan", "fam"])
+            .assert()
+            .success()
+            .stdout(contains(
+                "Scanned: 2 added, 0 modified, 0 deleted, 0 unchanged.",
+            ));
+        let scan = std::fs::read_to_string(f.work.join("staged/scan.json")).unwrap();
+        assert!(scan.contains("family/anna/2021/2021-03-01/a.jpg"), "{scan}");
+        assert!(scan.contains("bela/2020/2020-01-01/b.jpg"), "{scan}");
+    }
+
+    #[test]
+    fn source_and_root_together_or_neither_are_usage_errors() {
+        let f = fixture();
+        init(&f, &[]).failure().code(1).stderr(contains("error:"));
+        cmd()
+            .arg("--catalog")
+            .arg(&f.catalog)
+            .args(["init", "fam", "--work-dir"])
+            .arg(&f.work)
+            .arg("--source")
+            .arg(&f.lib)
+            .arg("--root")
+            .arg(root("anna", &f.lib.join("u1")))
+            .assert()
+            .failure()
+            .code(1)
+            .stderr(contains("error:"));
+        assert!(!f.catalog.exists(), "a usage error opens no catalog");
+    }
+
+    #[test]
+    fn bad_root_names_are_usage_errors_before_any_catalog_opens() {
+        let f = fixture();
+        let (u1, u2) = (f.lib.join("u1"), f.lib.join("u2"));
+        for (roots, needle) in [
+            (vec![root("family//anna", &u1)], "empty component"),
+            (vec![root("anna", &u1), root("anna", &u2)], "given twice"),
+            (
+                vec![root("family", &u1), root("family/anna", &u2)],
+                "must not nest",
+            ),
+        ] {
+            init(&f, &roots).failure().code(1).stderr(contains(needle));
+        }
+        assert!(!f.catalog.exists(), "a usage error opens no catalog");
+    }
+
+    #[test]
+    fn overlapping_root_paths_exit_3() {
+        let f = fixture();
+        init(&f, &[root("all", &f.lib), root("anna", &f.lib.join("u1"))])
+            .failure()
+            .code(3)
+            .stderr(contains("overlap"));
+    }
+
+    #[test]
+    fn a_missing_root_exits_5_naming_it() {
+        let f = fixture();
+        let gone = f.lib.join("gone");
+        init(&f, &[root("anna", &f.lib.join("u1")), root("gone", &gone)])
+            .failure()
+            .code(5)
+            .stderr(contains(gone.display().to_string()));
+    }
+}
