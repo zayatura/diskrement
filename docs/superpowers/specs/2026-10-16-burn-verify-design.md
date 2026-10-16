@@ -288,3 +288,44 @@ With `run_real_burn_with` and a scripted operator and exec:
   `burn --verify` on a blank disc and on an append. Record whether `udisksctl`
   mounts the new session without a reload. If it does not, confirm that the
   reinsert prompt appears and that the reinserted disc verifies.
+
+## 8. Addendum (2026-10-16): reading back through xorriso when the mount is not possible
+
+**Status:** Approved after the first real use; branch `feat/readback-xorriso`.
+
+### 8.1 What the first real burns showed
+
+immich-family 1A and 1B, Pioneer BDR-UD04, kernel 6.18:
+
+- Straight after the burn, `udisksctl mount` fails with "not a mountable filesystem".
+- The cause is the kernel, not udisks. `/sys/block/sr0/size` still holds the blank disc's 4 sectors (2048 bytes), and `blkid -p` finds nothing. xorriso, which reads the drive through SCSI pass-through, already sees the closed session.
+- The kernel re-reads a disc's capacity only after a media-change event. Closing a session raises none, so only an eject and reinsert does. After the reinsert the size reads 47,709,312 sectors, which is xorriso's block count × 4.
+- Neither udisks `Block.Rescan` (allowed without a password for an active session) nor a STOP UNIT spin-down (`xorriso -calm_drive on`) made the kernel re-read the capacity. growisofs reloads the tray after burning for the same reason, and asks for a manual reload on slim drives, whose trays cannot be closed by software.
+
+So on this hardware, §5.1's reinsert path runs on every disc, and each disc takes two trips to the drive.
+
+### 8.2 Decision
+
+When `DiscVerifier::read_back` cannot use the mount, it reads the disc through xorriso instead, before falling back to the reinsert prompt. "Cannot use the mount" means the mount failed, or the mount shows another session than the one just written.
+
+xorriso extracts `/data` into `<work_dir>/readback/`. The same tier-1 comparison then runs on that tree, and tier 2 is unchanged.
+
+- **Only `burn --verify`, only a real drive.** Plain `verify` stays mount-only, so a mount-based check through the kernel's ISO 9660 driver remains available whenever a disc is reinserted. That driver is the path a restore takes.
+- **The risk accepted.** The fallback checks the disc through libisofs's reader rather than the kernel's driver. A disc one reads and the other misreads is unlikely. The operator chose this over handling every disc twice.
+- **Space comes first.** The extraction needs the bytes of the disc's visible files, which the catalog records (`DiscRecordedContents::visible_bytes`, carried into `DiscExpectation`), plus a 1 GiB margin. If the work dir's filesystem has less free space, the read-back is `Unverifiable` with a message naming both numbers.
+- **An extraction failure is `Unverifiable`, not `Failed`.** That covers xorriso exiting non-zero, for example an open disc that `-indev` refuses, or a read error. A full disk or a tool hiccup must never turn a good disc into a coaster. The reinsert that follows reaches the mount, whose read-back finds any bad file.
+- **`<work_dir>/readback/` is removed before and after use.** It never holds anything that matters, and a crash's leftover is cleared on the next read-back.
+- **Progress.** Reading the disc is one bytes phase, `reading disc 1B through xorriso`, driven by xorriso's `UPDATE : N files restored ( 22.7g) in S seconds` lines. Hashing the extracted tree is the usual `verifying disc 1B` phase, which takes seconds from NVMe.
+- **The operator is told which path was used.** A progress line says the disc is not mountable yet and is being read through xorriso, naming the space needed. The report line reads `Read back: verified (2614 files, read through xorriso).`
+- **Two small fixes ride along.** The reinsert prompt drops udisks's trailing period, so there is no more `filesystem..`. For this expected case it says what is happening: `the system has not noticed the new disc yet`.
+
+### 8.3 Tests
+
+- `parse::restored_bytes` against xorriso's restore pacifier line, with units k, m, g and t.
+- `read_back` on the scripted drive:
+  - A mount failure followed by an extraction passes, and the result says the disc was read through xorriso.
+  - A stale mount followed by an extraction passes.
+  - A failed extraction, or too little space, is `Unverifiable`.
+  - A verifier without a scratch dir (plain `verify`) never extracts.
+  - `readback/` is gone afterwards.
+- A pipeline test: a disc that cannot be mounted reads back through xorriso with no reinsert prompt and is recorded VERIFIED, ejected once.
