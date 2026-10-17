@@ -152,6 +152,21 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
       the run went straight on to ask for 2B's blank. 2A's session is VERIFIED
       and `readback/` was gone afterwards. Burn plus read-back took one hour,
       unattended.)
+- [ ] 14. `run` (continuous-run spec §7.4), on the first immich-dsz pair:
+      `diskrement run immich-dsz` with
+      `DISKREMENT_DEVICE=/dev/disk/by-id/usb-PIONEER_BD-RW_BDR-UD04_<serial>-0:0`.
+      - (a) With the tray open and no disc, the run prints `Waiting for a blank
+        disc …` and the tray stays open: nothing pulls it in.
+      - (b) A blank is picked up within seconds of the tray closing, and the
+        burn starts with no `[y/N]`.
+      - (c) After the eject, closing the tray on the disc just burned prints
+        `Found disc …; waiting for …` exactly once, and nothing more until the
+        tray is opened again.
+      - (d) Ctrl-C while waiting: `status` is unchanged.
+      - (e) Record whether `xorriso cannot read the disc in the drive (…)`
+        ever appears after a tray closes on a good blank, and with what reason
+        (busy device, no disc). The retries (~30 s) should absorb it; if they
+        do not, raise `UNREADABLE_RETRIES` or add a settle (spec §4.3).
 
 Run record: 2026-09-11, Rust binary @ commit b81b342 (release build), Pioneer
 BDR-UD04 at `/dev/sr1`, one CMC BD-R (POW caveat above did not apply — media

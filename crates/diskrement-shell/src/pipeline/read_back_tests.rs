@@ -115,6 +115,7 @@ fn burn_verifying(
     let step = VerifyAfterBurn {
         verifier: &verifier,
         operator: op,
+        retry_failed_first_session: true,
     };
     pipeline(env).burn_with("p", now(), &burner, Some(&step))
 }
@@ -134,6 +135,7 @@ fn burn_verifying_with_fallback(
     let step = VerifyAfterBurn {
         verifier: &verifier,
         operator: op,
+        retry_failed_first_session: true,
     };
     pipeline(env).burn_with("p", now(), &burner, Some(&step))
 }
@@ -297,6 +299,64 @@ fn declining_the_retry_stops_with_verify_failed_and_records_nothing() {
         env.work.join("staged/plan.json").is_file(),
         "the plan survives for the next attempt"
     );
+}
+
+/// `run` (continuous-run spec §5): a failed first session stops at once.
+/// Under detection a retry would just wait for the next blank and carry on.
+#[test]
+fn without_retries_a_failed_first_session_stops_at_once() {
+    let mut env = env(1);
+    stage(&mut env, &[("a.bin", b"aaaa")]);
+    let tree = env.work.join("staging/disc-1");
+    let script = ScriptedExec::new()
+        .toc(&[BLANK, APPENDABLE])
+        .identities(&[Some(ID_1), Some(ID_1)])
+        .mounts(&[Some(&tree)]);
+    let calls = RefCell::new(Vec::new());
+    let rec = recording(&script, &calls);
+    let exec = |c: &[String], l: &mut dyn FnMut(&str)| {
+        if c.iter().any(|a| a == "-commit") {
+            std::fs::write(tree.join("data/a.bin"), b"rot!").unwrap();
+        }
+        rec.run(c, l)
+    };
+    let op = ScriptedOperator::new(&[true]);
+    let device = BurnDevice::RealDevice("/dev/sr0".to_string());
+    let burner = Burner::Real(XorrisoBurner::new(device.clone(), &exec, &op, &NoopSink, 2));
+    let verifier = Verifier::Disc(DiscVerifier::new(device, &exec, &op, &NoopSink));
+    let step = VerifyAfterBurn {
+        verifier: &verifier,
+        operator: &op,
+        retry_failed_first_session: false,
+    };
+
+    let err = pipeline(&mut env)
+        .burn_with("p", now(), &burner, Some(&step))
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PipelineError::VerifyFailed {
+                session: 1,
+                appended: false,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(!op.said("To retry"), "{:?}", op.log());
+    assert_eq!(
+        calls
+            .borrow()
+            .iter()
+            .filter(|c| c.contains("-commit"))
+            .count(),
+        1,
+        "burned once, never retried"
+    );
+    assert!(sessions(&env, SessionState::Burned).is_empty());
+    assert!(script.ran("-eject"), "the failed disc is ejected");
 }
 
 #[test]

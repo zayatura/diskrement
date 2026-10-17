@@ -97,7 +97,19 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   refusals are assertable only on real media (`docs/smoke-test-real-media.md`).
 - **The real backend prompts before it opens the device.** That is what lets
   `tests/binary.rs` exercise it with no drive: a child with no stdin declines,
-  and the burn aborts (exit 0) before anything is touched.
+  and the burn aborts (exit 0) before anything is touched. `run` replaces that
+  prompt with waiting for a seated disc that passes the same identity check;
+  plain `burn` keeps it.
+- **xorriso closes the tray whenever it acquires the drive.** So `run` never
+  polls with it: `burn::drive::SysDriveWatch` asks the kernel
+  (`CDROM_DRIVE_STATUS` on an `O_NONBLOCK` open, which neither moves the tray nor
+  reads the media), and the burner inspects through xorriso only once a disc is
+  seated, once per insertion. A wrong disc waits for the tray to open. A disc
+  xorriso cannot read yet (spinning up, or udev's probe holding the drive
+  exclusively: "busy device") is looked at again for ~30 s, then waited out like a
+  wrong disc; it must never end the run. `run` does not retry a failed first
+  session (`VerifyAfterBurn::retry_failed_first_session`): under detection a
+  retry would carry the run on past a failure.
 - **Disc names depend on `copies`.** `DiscKey::name(copies)` is `3` in a single-copy project and `3B` otherwise; labels, staging dirs (`staging/disc-3B`), volids, prompts and reports all go through it. Never format a disc ordinal by hand.
 - **Fill order is `FillOrder::key`, not `rel_path`.** A rooted project (`init --root
   NAME=PATH`) fills discs by *(path below the root, root name)*, so its libraries

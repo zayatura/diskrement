@@ -1010,6 +1010,7 @@ fn burner_failure(e: crate::burn::BurnError) -> DiscFailure {
         | B::ToolTooOld(_)
         | B::DeviceNotFound(_)
         | B::DevicePermissionDenied(_)
+        | B::DriveStatusUnavailable { .. }
         | B::NoMedia(_)
         | B::InsufficientCapacity { .. }
         | B::MountFailed(_)

@@ -42,7 +42,9 @@ pub fn confirm_from(
 ///
 /// `confirm_insert` never assumes yes: `burn --yes` answers "burn the staged
 /// plan?", not "is the right disc in the drive?", and no flag may skip the
-/// second question.
+/// second question. `run` does not skip it either: its burner waits for a
+/// seated disc that passes the same identity check (continuous-run spec
+/// §4.5), and only the reinsert question still comes here.
 pub struct ConsoleOperator;
 
 impl BurnOperator for ConsoleOperator {

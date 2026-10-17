@@ -776,6 +776,13 @@ mod tests {
             ),
             (BurnError::NoMedia("/dev/sr0".into()), "no disc in /dev/sr0"),
             (
+                BurnError::DriveStatusUnavailable {
+                    device: "/dev/sr0".into(),
+                    reason: "Inappropriate ioctl for device".into(),
+                },
+                "cannot read the drive status of /dev/sr0: Inappropriate ioctl for device",
+            ),
+            (
                 BurnError::InsufficientCapacity {
                     needed_bytes: 1_000,
                     free_bytes: 10,

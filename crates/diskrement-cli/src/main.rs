@@ -8,6 +8,7 @@ mod paths;
 mod progress;
 mod prompt;
 mod render;
+mod run;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,9 +16,10 @@ use std::process::ExitCode;
 
 use args::Command;
 use diskrement_shell::burn::cmd::{self, CmdOutput, Exec};
+use diskrement_shell::burn::drive::{DriveWatch as _, SysDriveWatch};
 use diskrement_shell::burn::verifier::{DiscVerifier, StagingVerifier, Verifier};
 use diskrement_shell::burn::xorriso::burner::XorrisoBurner;
-use diskrement_shell::burn::{simulated::SimulatedBurner, BurnError, Burner};
+use diskrement_shell::burn::{simulated::SimulatedBurner, BurnDevice, BurnError, Burner};
 use diskrement_shell::catalog::model::{Project, ProjectInit};
 use diskrement_shell::catalog::Catalog;
 use diskrement_shell::error::PipelineError;
@@ -82,6 +84,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
         Command::Plan { name, .. } => name,
         Command::Status { name, .. } => name,
         Command::Burn { name, .. } => name,
+        Command::Run { name, .. } => name,
         Command::Reset { name, .. } => name,
         Command::Verify { name, .. } => name,
         Command::History { name, .. } => name,
@@ -237,6 +240,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             let step = verifier.as_ref().map(|v| VerifyAfterBurn {
                 verifier: v,
                 operator: &operator,
+                retry_failed_first_session: true,
             });
 
             let mut pipeline = Pipeline::new(
@@ -250,6 +254,63 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             let report = pipeline.burn_with(&name, chrono::Utc::now(), &burner, step.as_ref())?;
             say(&render::burn_report(&report, p.copies));
             Ok(0)
+        }
+        Command::Run { name, yes } => {
+            let sink = progress::ConsoleProgress::new();
+            let mut catalog = open_catalog(&resolved.catalog)?;
+            let p = find_or_fail(&catalog, &name)?;
+            let par = diskrement_shell::fs::scanner::parallelism_from_env();
+            for w in &par.warnings {
+                eprintln!("{w}");
+            }
+            let exec = SYSTEM_EXEC;
+            let operator = prompt::ConsoleOperator;
+            let backend = backend::resolve(cli.burner, cli.device.as_deref(), &env_lookup);
+            // Up front (spec §4.4): a drive that cannot be watched fails
+            // before minutes of scanning, not at the first wait.
+            let watch = match &backend {
+                backend::Backend::Real(BurnDevice::RealDevice(path)) => {
+                    let watch = SysDriveWatch::new(path.clone());
+                    watch.state()?;
+                    Some(watch)
+                }
+                _ => None,
+            };
+            let burner = match backend {
+                backend::Backend::Simulated => {
+                    Burner::Simulated(SimulatedBurner::new(&sink, par.value))
+                }
+                backend::Backend::Real(device) => {
+                    let burner = XorrisoBurner::new(device, &exec, &operator, &sink, par.value);
+                    Burner::Real(match &watch {
+                        Some(watch) => burner.detecting_media(watch),
+                        None => burner,
+                    })
+                }
+            };
+            let verifier = resolve_verifier(
+                cli.burner,
+                cli.device.as_deref(),
+                std::path::Path::new(&p.work_dir),
+                true,
+                &exec,
+                &operator,
+                &sink,
+            );
+            let step = VerifyAfterBurn {
+                verifier: &verifier,
+                operator: &operator,
+                retry_failed_first_session: false,
+            };
+            let mut pipeline = Pipeline::new(
+                &mut catalog,
+                PipelinePaths {
+                    work_dir: PathBuf::from(&p.work_dir),
+                    scan_cache: paths::scan_cache_path(&resolved.catalog, &name),
+                },
+                &sink,
+            );
+            run::backlog(&mut pipeline, &name, p.copies, yes, &burner, &step)
         }
         Command::Reset { name } => {
             let mut catalog = open_catalog(&resolved.catalog)?;

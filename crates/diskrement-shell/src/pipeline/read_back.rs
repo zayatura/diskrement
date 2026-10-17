@@ -14,6 +14,11 @@ use super::{burner_failure, DiscFailure};
 pub struct VerifyAfterBurn<'a> {
     pub verifier: &'a Verifier<'a>,
     pub operator: &'a dyn BurnOperator,
+    /// Offer a failed first session again on a new blank disc. `burn
+    /// --verify` does; `run` stops instead (continuous-run spec §5), because
+    /// under disc detection the retry would just wait for the next blank and
+    /// the run would carry on past a failure.
+    pub retry_failed_first_session: bool,
 }
 
 /// A disc written and read back, ready to be recorded.
@@ -44,8 +49,8 @@ enum Settled {
 const SHOWN_MISMATCHES: usize = 5;
 
 /// Burn `image` and read it back until it passes, is left unverified, or
-/// fails. A failed first session is offered again on a new blank disc,
-/// through the burner's own prompt (declining stops with `VerifyFailed`). A
+/// fails. A failed first session is offered again on a new blank disc when
+/// `step` allows it, through the burner's own prompt (declining stops with `VerifyFailed`). A
 /// failed append stops at once: its session is on the disc for good.
 pub(super) fn burn_and_read_back(
     burner: &Burner<'_>,
@@ -96,7 +101,7 @@ pub(super) fn burn_and_read_back(
                     checked: files,
                     appended: session > 1,
                 };
-                if session > 1 {
+                if session > 1 || !step.retry_failed_first_session {
                     return Err(DiscFailure::Unwritten(err));
                 }
                 step.operator.progress(&format!(

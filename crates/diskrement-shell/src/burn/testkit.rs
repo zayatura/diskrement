@@ -6,7 +6,7 @@
 //! (`diskrement-shell` is its own dev-dependency with that feature on).
 //! Nothing here ships in the binary.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,7 @@ use diskrement_core::{ContentHash, RelPath, ScannedFile, SessionManifest};
 use sha2::{Digest, Sha256};
 
 use crate::burn::cmd::CmdOutput;
+use crate::burn::drive::{DriveState, DriveWatch};
 use crate::burn::{BurnError, BurnOperator, DiscIdentity, DiscImage, DiscMetadata};
 use crate::progress::ProgressSink;
 
@@ -423,6 +424,66 @@ pub fn image_of(
             pointers: Vec::new(),
         },
         close_disc,
+    }
+}
+
+/// `-toc` output for a drive xorriso finds empty.
+pub const NOT_PRESENT: &[&str] = &["Media status : is not present"];
+
+/// A `DriveWatch` answering from a queue. Running out panics, so a wait loop
+/// that polls more than the test expects fails instead of hanging. In
+/// `with_errors`, a `None` answers that poll with `DriveStatusUnavailable`;
+/// `failing` answers every poll that way.
+pub struct ScriptedWatch {
+    states: RefCell<VecDeque<Option<DriveState>>>,
+    fail: bool,
+    pauses: Cell<usize>,
+}
+
+impl ScriptedWatch {
+    pub fn new(states: &[DriveState]) -> Self {
+        let states: Vec<Option<DriveState>> = states.iter().copied().map(Some).collect();
+        ScriptedWatch::with_errors(&states)
+    }
+
+    pub fn with_errors(states: &[Option<DriveState>]) -> Self {
+        ScriptedWatch {
+            states: RefCell::new(states.iter().copied().collect()),
+            fail: false,
+            pauses: Cell::new(0),
+        }
+    }
+
+    pub fn failing() -> Self {
+        ScriptedWatch {
+            fail: true,
+            ..ScriptedWatch::new(&[])
+        }
+    }
+
+    pub fn pauses(&self) -> usize {
+        self.pauses.get()
+    }
+}
+
+impl DriveWatch for ScriptedWatch {
+    fn state(&self) -> Result<DriveState, BurnError> {
+        let state = if self.fail {
+            None
+        } else {
+            self.states
+                .borrow_mut()
+                .pop_front()
+                .expect("the script ran out of drive states")
+        };
+        state.ok_or_else(|| BurnError::DriveStatusUnavailable {
+            device: "/dev/sr0".to_string(),
+            reason: "Inappropriate ioctl for device".to_string(),
+        })
+    }
+
+    fn pause(&self) {
+        self.pauses.set(self.pauses.get() + 1);
     }
 }
 
