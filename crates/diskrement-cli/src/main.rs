@@ -8,6 +8,7 @@ mod paths;
 mod progress;
 mod prompt;
 mod render;
+mod run;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
