@@ -1636,3 +1636,13 @@ Under a new `## Execution notes` heading at the end of this file, list every pla
 
 A final whole-branch review, then the merge per the repo etiquette:
 `git switch main && git merge --no-ff feat/continuous-run -m "Merge feat/continuous-run: run burns the backlog, waiting for each disc"`, then delete the branch locally and on `origin`.
+
+## Execution notes
+
+Executed inline on 2026-10-17. Baseline 742 tests; final 766 (+24, exactly as planned), with `DISKREMENT_SCENARIOS_REQUIRED=1`, no skips.
+
+- **Task 1:** `pipeline::burner_failure` matches `BurnError` exhaustively on purpose, so the new `DriveStatusUnavailable` had to be classified: it is `Unwritten`, because the watch runs before anything is written. The testkit additions went above its `#[cfg(test)] mod tests` (clippy's `items_after_test_module`).
+- **Task 2:** instead of wrapping every arm of `check_media` in `Mismatch::Wrong`, the string arms stay as they were and the whole match is mapped once (`.map_err(Mismatch::Wrong)`); `NoMedia` returns `Mismatch::NoDisc` early.
+- **Task 5:** `burn_discs` had no caller until Task 8, and warnings are errors, so it carried a temporary `#[allow(dead_code)]`, removed in Task 8 (as `run.rs`'s was).
+- **Task 9:** the `run` decline test sits in `tests/binary.rs`'s `real_backend` module, next to the `burn --verify` decline test as planned, although it runs on the simulated backend.
+- **Observed, not changed:** a cycle's `✔ Wrote disc …` blocks (with the labels) print after the whole cycle, as `burn`'s report always has. Between the twins the operator sees 1A's read-back and eject, then `Waiting for a blank disc for … 1B`, but 1A's label only once 1B is done.
