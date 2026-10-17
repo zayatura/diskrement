@@ -179,6 +179,46 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
         }
         None => {}
     }
+    lines.extend(disc_lines(r, copies));
+    if copies > 1 {
+        lines.extend(coverage_lines(&r.coverage.sets));
+    }
+    // While a file has no live copy, or a set lacks one, "up to date" would
+    // be false.
+    let no_live_copy = no_live_copy_line(&r.coverage.no_live_copy);
+    let sets_complete = r.coverage.sets.iter().all(|c| c.missing_files == 0);
+    let next = if r.remaining.more_discs > 0 {
+        Some(format!(
+            "~{} more discs of changes remain. Run: plan → burn",
+            r.remaining.more_discs
+        ))
+    } else if no_live_copy.is_some() {
+        // That line already says what to run; those files also count as
+        // missing from every set.
+        None
+    } else if !sets_complete {
+        // A lagging set catches up one disc per cycle; `plan` names any copy
+        // this disc type cannot hold (issue #12).
+        Some("Copy sets are incomplete. Run: plan → burn".to_string())
+    } else if copies > 1 {
+        Some("No more changes — every copy set is up to date.".to_string())
+    } else {
+        Some("No more changes — the set is up to date.".to_string())
+    };
+    lines.extend(no_live_copy);
+    lines.extend(next);
+    lines.join("\n")
+}
+
+/// One block per disc written: the line with its label, its status and, under
+/// `burn --verify`, its read-back. `run` prints these after every cycle.
+#[allow(dead_code)] // until `run` uses it
+pub fn burn_discs(r: &BurnReport, copies: u32) -> String {
+    disc_lines(r, copies).join("\n")
+}
+
+fn disc_lines(r: &BurnReport, copies: u32) -> Vec<String> {
+    let mut lines = Vec::new();
     for d in &r.discs {
         lines.push(format!(
             "✔ Wrote disc {}  —  label: \"{}\"",
@@ -209,34 +249,7 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
             None => {}
         }
     }
-    if copies > 1 {
-        lines.extend(coverage_lines(&r.coverage.sets));
-    }
-    // While a file has no live copy, or a set lacks one, "up to date" would
-    // be false.
-    let no_live_copy = no_live_copy_line(&r.coverage.no_live_copy);
-    let sets_complete = r.coverage.sets.iter().all(|c| c.missing_files == 0);
-    let next = if r.remaining.more_discs > 0 {
-        Some(format!(
-            "~{} more discs of changes remain. Run: plan → burn",
-            r.remaining.more_discs
-        ))
-    } else if no_live_copy.is_some() {
-        // That line already says what to run; those files also count as
-        // missing from every set.
-        None
-    } else if !sets_complete {
-        // A lagging set catches up one disc per cycle; `plan` names any copy
-        // this disc type cannot hold (issue #12).
-        Some("Copy sets are incomplete. Run: plan → burn".to_string())
-    } else if copies > 1 {
-        Some("No more changes — every copy set is up to date.".to_string())
-    } else {
-        Some("No more changes — the set is up to date.".to_string())
-    };
-    lines.extend(no_live_copy);
-    lines.extend(next);
-    lines.join("\n")
+    lines
 }
 
 /// One line when every set is complete, otherwise one line per lagging set.
@@ -1394,6 +1407,44 @@ mod burn_render_tests {
             .unwrap()
             .to_string();
         assert_eq!(line, "✔ Wrote disc 1  —  label: \"p disc 1\"");
+    }
+
+    /// `run`'s per-cycle output: the disc blocks of the burn report, without
+    /// its coverage or its "Run: plan → burn" advice.
+    #[test]
+    fn burn_discs_is_the_disc_part_of_the_burn_report() {
+        use diskrement_core::DiscKey;
+        use diskrement_shell::pipeline::reports::DiscReadBack;
+        let r = BurnReport {
+            discs: vec![DiscBurn {
+                disc: DiscKey::new(5, 1),
+                label: "immich-dsz disc 5B".to_string(),
+                finalized: true,
+                staging_dir: "/w/staging".into(),
+                image_bytes: 1,
+                read_back: Some(DiscReadBack::Verified {
+                    files: 9042,
+                    through_xorriso: true,
+                }),
+            }],
+            remaining: RemainingEstimate {
+                more_discs: 9,
+                more_files: 1,
+                more_bytes: 1,
+            },
+            coverage: diskrement_core::Coverage {
+                sets: vec![SetCoverage::default(); 2],
+                no_live_copy: SetCoverage::default(),
+            },
+            deferred_deletions: None,
+        };
+        assert_eq!(
+            burn_discs(&r, 2),
+            "✔ Wrote disc 5B  —  label: \"immich-dsz disc 5B\"\n\
+             Status: FINALIZED — set this disc aside, it is sealed.\n\
+             Read back: verified (9042 files, read through xorriso)."
+        );
+        assert!(burn_report(&r, 2).starts_with(&burn_discs(&r, 2)));
     }
 }
 
