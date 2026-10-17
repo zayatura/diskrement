@@ -163,28 +163,50 @@ impl<'a> XorrisoBurner<'a> {
     /// seated, so it never pulls the tray in on an operator swapping discs,
     /// and a wrong disc is inspected and named once per insertion: the next
     /// inspection waits for the tray to open.
+    ///
+    /// A seated disc xorriso cannot read yet is looked at again: right after
+    /// the tray closes the drive may still be spinning up, or udev's probe may
+    /// hold it open exclusively ("Cannot open busy device"). Only after
+    /// `UNREADABLE_RETRIES` tries is it named, once, and waited out like a
+    /// wrong disc; it never ends the run. A missing device or a permission
+    /// problem from xorriso still does.
     fn detect_media(
         &self,
         watch: &dyn DriveWatch,
         id: &DiscIdentity,
         expected: &str,
     ) -> Result<u64, BurnError> {
+        let mut unreadable = 0;
         loop {
-            while watch.state()? != DriveState::DiscOk {
-                watch.pause();
+            if wait_while(watch, |s| s != DriveState::DiscOk)? {
+                // Another insertion: a fresh disc gets its full retries.
+                unreadable = 0;
             }
-            match self.check_media(id)? {
-                Ok(free_bytes) => return Ok(free_bytes),
-                // The kernel saw the disc before xorriso could: look again.
-                Err(Mismatch::NoDisc) => watch.pause(),
-                Err(found) => {
-                    self.operator
-                        .progress(&format!("Found {found}; waiting for {expected}."));
-                    while watch.state()? == DriveState::DiscOk {
-                        watch.pause();
-                    }
+            // `(what to tell the operator, whether to look again first)`.
+            let (why, unread) = match self.check_media(id) {
+                Ok(Ok(free_bytes)) => return Ok(free_bytes),
+                Ok(Err(Mismatch::Wrong(found))) => (format!("Found {found}"), false),
+                Ok(Err(Mismatch::NoDisc)) => (
+                    "xorriso cannot read the disc in the drive (it reports no disc)".to_string(),
+                    true,
+                ),
+                Err(e @ BurnError::InspectFailed { .. }) => (
+                    format!("xorriso cannot read the disc in the drive ({e})"),
+                    true,
+                ),
+                Err(e) => return Err(e),
+            };
+            if unread {
+                unreadable += 1;
+                if unreadable < UNREADABLE_RETRIES {
+                    watch.pause();
+                    continue;
                 }
             }
+            unreadable = 0;
+            self.operator
+                .progress(&format!("{why}; waiting for {expected}."));
+            wait_while(watch, |s| s == DriveState::DiscOk)?;
         }
     }
 
@@ -402,6 +424,40 @@ impl WriteProgress {
 fn is_closing(line: &str) -> bool {
     let line = line.to_ascii_lowercase();
     line.contains("closing") || line.contains("fixating")
+}
+
+/// Inspections of a seated disc xorriso cannot read before it is named and
+/// waited out: about 30 s at `SysDriveWatch`'s 2 s interval.
+const UNREADABLE_RETRIES: usize = 15;
+/// Watch errors in a row tolerated while waiting, such as a USB drive
+/// re-enumerating; `run` checked the watch once already, before planning.
+const WATCH_ERROR_RETRIES: usize = 5;
+
+/// Poll until `waiting` no longer holds, pausing between polls; `true` when
+/// it held at least once. A short run of watch errors is ridden out; a longer
+/// one is the error.
+fn wait_while(
+    watch: &dyn DriveWatch,
+    waiting: impl Fn(DriveState) -> bool,
+) -> Result<bool, BurnError> {
+    let mut errors = 0;
+    let mut waited = false;
+    loop {
+        match watch.state() {
+            Ok(state) if !waiting(state) => return Ok(waited),
+            Ok(_) => {
+                errors = 0;
+                waited = true;
+            }
+            Err(e) => {
+                errors += 1;
+                if errors > WATCH_ERROR_RETRIES {
+                    return Err(e);
+                }
+            }
+        }
+        watch.pause();
+    }
 }
 
 /// One percent of slack plus the fixed overhead — the Scala arithmetic,
@@ -1061,6 +1117,87 @@ mod tests {
             "{err:?}"
         );
         assert!(!script.ran("-toc"));
+        assert_eq!(
+            watch.pauses(),
+            WATCH_ERROR_RETRIES,
+            "a short run of errors is ridden out first"
+        );
+    }
+
+    /// A USB drive re-enumerating answers a poll or two with an error; the
+    /// wait rides it out.
+    #[test]
+    fn a_few_watch_errors_are_ridden_out() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch = ScriptedWatch::with_errors(&[None, Some(TrayOpen), None, Some(DiscOk)]);
+        let script = Script::new().toc(&[BLANK]).identities(&[Some(IDENTITY_1)]);
+        let op = ScriptedOperator::new(&[]);
+        detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 1, &[("a.txt", "hello")], false),
+        )
+        .expect("the burn succeeds");
+        assert_eq!(watch.pauses(), 3);
+    }
+
+    /// udev's probe can hold a freshly closed drive open exclusively, and
+    /// xorriso then fails to inspect it. That is not the end of the run: the
+    /// disc is looked at again.
+    #[test]
+    fn a_busy_drive_is_looked_at_again() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch = ScriptedWatch::new(&[DiscOk, DiscOk]);
+        let busy: &[&str] = &["libburn : SORRY : Cannot open busy device '/dev/sr0'"];
+        let script = Script::new()
+            .toc(&[busy, BLANK])
+            .identities(&[Some(IDENTITY_1)]);
+        let op = ScriptedOperator::new(&[]);
+        detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 1, &[("a.txt", "hello")], false),
+        )
+        .expect("the burn succeeds");
+        assert!(!op.said("cannot read"), "{:?}", op.log());
+        assert_eq!(watch.pauses(), 1);
+    }
+
+    /// A seated disc xorriso never reads is named once after its retries,
+    /// then waited out like a wrong disc: the next inspection comes only
+    /// after the tray has been opened.
+    #[test]
+    fn a_disc_xorriso_cannot_read_is_named_once_and_waited_out() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut states = vec![DiscOk; UNREADABLE_RETRIES];
+        states.extend([TrayOpen, DiscOk]);
+        let watch = ScriptedWatch::new(&states);
+        let mut tocs: Vec<&[&str]> = vec![NOT_PRESENT; UNREADABLE_RETRIES];
+        tocs.push(BLANK);
+        let script = Script::new().toc(&tocs).identities(&[Some(IDENTITY_1)]);
+        let op = ScriptedOperator::new(&[]);
+        detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 1, &[("a.txt", "hello")], false),
+        )
+        .expect("the swapped-in blank is burned");
+        let named: Vec<String> = op
+            .log()
+            .into_iter()
+            .filter(|l| l.starts_with("xorriso cannot read"))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                "xorriso cannot read the disc in the drive (it reports no disc); \
+                 waiting for a blank disc for 'photos' disc 1."
+            ]
+        );
+        assert_eq!(watch.pauses(), UNREADABLE_RETRIES - 1);
     }
 
     const FILES_ADDED: &str = "xorriso : UPDATE :       1 files added in 1 seconds";

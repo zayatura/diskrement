@@ -431,16 +431,22 @@ pub fn image_of(
 pub const NOT_PRESENT: &[&str] = &["Media status : is not present"];
 
 /// A `DriveWatch` answering from a queue. Running out panics, so a wait loop
-/// that polls more than the test expects fails instead of hanging; `failing`
-/// answers every poll with `DriveStatusUnavailable`.
+/// that polls more than the test expects fails instead of hanging. In
+/// `with_errors`, a `None` answers that poll with `DriveStatusUnavailable`;
+/// `failing` answers every poll that way.
 pub struct ScriptedWatch {
-    states: RefCell<VecDeque<DriveState>>,
+    states: RefCell<VecDeque<Option<DriveState>>>,
     fail: bool,
     pauses: Cell<usize>,
 }
 
 impl ScriptedWatch {
     pub fn new(states: &[DriveState]) -> Self {
+        let states: Vec<Option<DriveState>> = states.iter().copied().map(Some).collect();
+        ScriptedWatch::with_errors(&states)
+    }
+
+    pub fn with_errors(states: &[Option<DriveState>]) -> Self {
         ScriptedWatch {
             states: RefCell::new(states.iter().copied().collect()),
             fail: false,
@@ -462,17 +468,18 @@ impl ScriptedWatch {
 
 impl DriveWatch for ScriptedWatch {
     fn state(&self) -> Result<DriveState, BurnError> {
-        if self.fail {
-            return Err(BurnError::DriveStatusUnavailable {
-                device: "/dev/sr0".to_string(),
-                reason: "Inappropriate ioctl for device".to_string(),
-            });
-        }
-        Ok(self
-            .states
-            .borrow_mut()
-            .pop_front()
-            .expect("the script ran out of drive states"))
+        let state = if self.fail {
+            None
+        } else {
+            self.states
+                .borrow_mut()
+                .pop_front()
+                .expect("the script ran out of drive states")
+        };
+        state.ok_or_else(|| BurnError::DriveStatusUnavailable {
+            device: "/dev/sr0".to_string(),
+            reason: "Inappropriate ioctl for device".to_string(),
+        })
     }
 
     fn pause(&self) {
