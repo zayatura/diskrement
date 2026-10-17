@@ -1,12 +1,13 @@
 //! The real burner (`XorrisoBurner.scala`).
 //!
-//! Prompt for the disc, inspect it (strict identity check), stage with
-//! re-hash, check capacity, burn, sanity-check the result. The pipeline
-//! ejects afterwards (`Burner::eject`), once it has recorded the disc or,
+//! Get the disc (asked for, or waited for under `run`), inspect it (strict
+//! identity check), stage with re-hash, check capacity, burn, sanity-check
+//! the result. The pipeline ejects afterwards (`Burner::eject`), once it has recorded the disc or,
 //! under `burn --verify`, read it back. Any failure leaves the catalog
 //! uncommitted, because `Pipeline::burn` commits only after this returns.
 
 use crate::burn::cmd::Exec;
+use crate::burn::drive::{DriveState, DriveWatch};
 use crate::burn::media::{MediaInspector, MediaStatus};
 use crate::burn::xorriso::{args, parse};
 use crate::burn::{
@@ -43,6 +44,9 @@ pub struct XorrisoBurner<'a> {
     parallelism: usize,
     /// `burn --no-eject`: never open the tray (see `keeping_disc_in_drive`).
     keep_in_drive: bool,
+    /// `run`: wait for the right disc instead of asking for it
+    /// (`detecting_media`).
+    watch: Option<&'a dyn DriveWatch>,
 }
 
 impl<'a> XorrisoBurner<'a> {
@@ -60,6 +64,7 @@ impl<'a> XorrisoBurner<'a> {
             progress,
             parallelism,
             keep_in_drive: false,
+            watch: None,
         }
     }
 
@@ -68,6 +73,14 @@ impl<'a> XorrisoBurner<'a> {
     /// in the state the read-back found it in.
     pub fn keeping_disc_in_drive(mut self) -> Self {
         self.keep_in_drive = true;
+        self
+    }
+
+    /// `run` (continuous-run spec §4.3): instead of asking for the disc, wait
+    /// until the kernel reports one seated, then check it as the prompt
+    /// would. An image file has no drive and is still asked for.
+    pub fn detecting_media(mut self, watch: &'a dyn DriveWatch) -> Self {
+        self.watch = Some(watch);
         self
     }
 
@@ -99,9 +112,10 @@ impl<'a> XorrisoBurner<'a> {
         }
     }
 
-    /// Prompt-and-inspect until the right disc is in the drive; return its free
-    /// space. A decline is `Aborted`; the wrong disc re-prompts forever, which
-    /// is what an operator swapping discs actually wants.
+    /// Get the right disc into the drive and return its free space: asked for
+    /// and inspected until it is right (a decline is `Aborted`; the wrong
+    /// disc re-prompts forever, which is what an operator swapping discs
+    /// actually wants), or, in detect mode, waited for.
     fn await_correct_media(&self, image: &DiscImage) -> Result<u64, BurnError> {
         let id = &image.metadata.identity;
         let expected = if id.session_ordinal == 1 {
@@ -123,10 +137,14 @@ impl<'a> XorrisoBurner<'a> {
         } else {
             ""
         };
-        let prompt = format!(
-            "Insert {expected} into {} and confirm.{seal_note}",
-            self.device.xorriso_address()
-        );
+        let address = self.device.xorriso_address();
+        if let (Some(watch), BurnDevice::RealDevice(_)) = (self.watch, &self.device) {
+            self.operator.progress(&format!(
+                "Waiting for {expected} in {address} (Ctrl-C to stop; nothing is written yet).{seal_note}"
+            ));
+            return self.detect_media(watch, id, &expected);
+        }
+        let prompt = format!("Insert {expected} into {address} and confirm.{seal_note}");
 
         loop {
             if !self.operator.confirm_insert(&prompt) {
@@ -137,6 +155,35 @@ impl<'a> XorrisoBurner<'a> {
                 Err(found) => self.operator.progress(&format!(
                     "Not the expected disc: found {found}. Swap discs and confirm again."
                 )),
+            }
+        }
+    }
+
+    /// Detect mode's wait. xorriso runs only once the kernel reports a disc
+    /// seated, so it never pulls the tray in on an operator swapping discs,
+    /// and a wrong disc is inspected and named once per insertion: the next
+    /// inspection waits for the tray to open.
+    fn detect_media(
+        &self,
+        watch: &dyn DriveWatch,
+        id: &DiscIdentity,
+        expected: &str,
+    ) -> Result<u64, BurnError> {
+        loop {
+            while watch.state()? != DriveState::DiscOk {
+                watch.pause();
+            }
+            match self.check_media(id)? {
+                Ok(free_bytes) => return Ok(free_bytes),
+                // The kernel saw the disc before xorriso could: look again.
+                Err(Mismatch::NoDisc) => watch.pause(),
+                Err(found) => {
+                    self.operator
+                        .progress(&format!("Found {found}; waiting for {expected}."));
+                    while watch.state()? == DriveState::DiscOk {
+                        watch.pause();
+                    }
+                }
             }
         }
     }
@@ -374,8 +421,10 @@ fn check_capacity(staged_bytes: u64, free_bytes: u64) -> Result<(), BurnError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::burn::drive::DriveState::{self, *};
     use crate::burn::testkit::{
-        image_of, RecordingSink, ScriptedExec as Script, ScriptedOperator, APPENDABLE, BLANK,
+        image_of, RecordingSink, ScriptedExec as Script, ScriptedOperator, ScriptedWatch,
+        APPENDABLE, BLANK, NOT_PRESENT,
     };
     use crate::progress::NoopSink;
 
@@ -815,6 +864,203 @@ mod tests {
             .expect("the burn succeeds");
         burner.eject();
         assert!(!script.ran("-eject"));
+    }
+
+    const WAITING_1: &str =
+        "Waiting for a blank disc for 'photos' disc 1 in /dev/sr0 (Ctrl-C to stop; nothing is written yet).";
+
+    /// A detecting burner on /dev/sr0 over `script`, burning `image`.
+    fn detect_burn(
+        watch: &ScriptedWatch,
+        script: &Script,
+        op: &ScriptedOperator,
+        image: &DiscImage,
+    ) -> Result<BurnResult, BurnError> {
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+        XorrisoBurner::new(
+            BurnDevice::RealDevice("/dev/sr0".to_string()),
+            &exec,
+            op,
+            &NoopSink,
+            2,
+        )
+        .detecting_media(watch)
+        .burn(image)
+    }
+
+    /// A blank already seated is burned with no question asked: the
+    /// operator has no answers, so any `confirm_insert` would abort.
+    #[test]
+    fn a_seated_blank_is_burned_without_asking() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch = ScriptedWatch::new(&[DiscOk]);
+        let script = Script::new().toc(&[BLANK]).identities(&[Some(IDENTITY_1)]);
+        let op = ScriptedOperator::new(&[]);
+        detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 1, &[("a.txt", "hello")], false),
+        )
+        .expect("the burn succeeds");
+        assert_eq!(op.log()[0], WAITING_1);
+        assert_eq!(watch.pauses(), 0);
+    }
+
+    /// Only a seated disc is inspected: the script holds one `-toc`, so a
+    /// second inspection would panic.
+    #[test]
+    fn the_wait_polls_through_an_open_tray_and_an_empty_drive() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let states: &[DriveState] = &[TrayOpen, NoDisc, NotReady, NoInfo, DiscOk];
+        let watch = ScriptedWatch::new(states);
+        let script = Script::new().toc(&[BLANK]).identities(&[Some(IDENTITY_1)]);
+        let op = ScriptedOperator::new(&[]);
+        detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 1, &[("a.txt", "hello")], false),
+        )
+        .expect("the burn succeeds");
+        assert_eq!(watch.pauses(), 4);
+    }
+
+    /// A wrong disc is inspected once and named once; the next inspection
+    /// waits until the tray has been opened and a disc seated again.
+    #[test]
+    fn a_wrong_disc_is_inspected_once_and_named_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let states: &[DriveState] = &[DiscOk, DiscOk, DiscOk, TrayOpen, NoDisc, DiscOk];
+        let watch = ScriptedWatch::new(states);
+        let script = Script::new()
+            .toc(&[APPENDABLE, BLANK])
+            .identities(&[Some(IDENTITY_1), Some(IDENTITY_1)]);
+        let op = ScriptedOperator::new(&[]);
+        detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 1, &[("a.txt", "hello")], false),
+        )
+        .expect("the swapped-in blank is burned");
+        let found: Vec<String> = op
+            .log()
+            .into_iter()
+            .filter(|l| l.starts_with("Found"))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                "Found written media (expected a blank disc); \
+                 waiting for a blank disc for 'photos' disc 1."
+            ]
+        );
+        assert_eq!(watch.pauses(), 3);
+    }
+
+    /// The kernel can report a disc before xorriso sees one. That is not a
+    /// wrong disc: look again rather than wait for the tray to open.
+    #[test]
+    fn xorriso_not_seeing_the_disc_yet_looks_again() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch = ScriptedWatch::new(&[DiscOk, DiscOk]);
+        let script = Script::new()
+            .toc(&[NOT_PRESENT, BLANK])
+            .identities(&[Some(IDENTITY_1)]);
+        let op = ScriptedOperator::new(&[]);
+        detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 1, &[("a.txt", "hello")], false),
+        )
+        .expect("the burn succeeds");
+        assert!(!op.said("Found"), "{:?}", op.log());
+        assert_eq!(watch.pauses(), 1);
+    }
+
+    #[test]
+    fn an_append_waits_for_this_disc_at_the_previous_session() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch = ScriptedWatch::new(&[DiscOk]);
+        let script = Script::new()
+            .toc(&[APPENDABLE])
+            .identities(&[Some(IDENTITY_1), Some(IDENTITY_2)]);
+        let op = ScriptedOperator::new(&[]);
+        detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 2, &[("a.txt", "hello")], false),
+        )
+        .expect("the append succeeds");
+        assert_eq!(
+            op.log()[0],
+            "Waiting for disc 1 of 'photos' (last burned session 1) in /dev/sr0 \
+             (Ctrl-C to stop; nothing is written yet)."
+        );
+    }
+
+    #[test]
+    fn the_waiting_line_names_the_seal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch = ScriptedWatch::new(&[DiscOk]);
+        let script = Script::new().toc(&[BLANK]).identities(&[Some(IDENTITY_1)]);
+        let op = ScriptedOperator::new(&[]);
+        detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 1, &[("a.txt", "hello")], true),
+        )
+        .expect("the burn succeeds");
+        assert_eq!(
+            op.log()[0],
+            format!("{WAITING_1} This burn will FINALIZE the disc.")
+        );
+    }
+
+    /// An image file has no drive to watch: it is asked for as before, and
+    /// the watch (which would panic) is never polled.
+    #[test]
+    fn an_image_file_is_never_polled() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch = ScriptedWatch::new(&[]);
+        let script = Script::new().toc(&[BLANK]).identities(&[Some(IDENTITY_1)]);
+        let exec = |c: &[String], l: &mut dyn FnMut(&str)| script.respond(c, l);
+        let op = ScriptedOperator::new(&[true]);
+        XorrisoBurner::new(
+            BurnDevice::ImageFile(dir.path().join("d.iso")),
+            &exec,
+            &op,
+            &NoopSink,
+            2,
+        )
+        .detecting_media(&watch)
+        .burn(&image_of(dir.path(), 1, &[("a.txt", "hello")], false))
+        .expect("the burn succeeds");
+        assert!(op.log()[0].starts_with("Insert"), "{:?}", op.log());
+    }
+
+    #[test]
+    fn a_drive_that_cannot_be_watched_fails_before_any_inspection() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let watch = ScriptedWatch::failing();
+        let script = Script::new().toc(&[]).identities(&[]);
+        let op = ScriptedOperator::new(&[]);
+        let err = detect_burn(
+            &watch,
+            &script,
+            &op,
+            &image_of(dir.path(), 1, &[("a.txt", "hello")], false),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, BurnError::DriveStatusUnavailable { .. }),
+            "{err:?}"
+        );
+        assert!(!script.ran("-toc"));
     }
 
     const FILES_ADDED: &str = "xorriso : UPDATE :       1 files added in 1 seconds";
