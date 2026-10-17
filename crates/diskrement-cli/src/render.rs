@@ -212,7 +212,6 @@ pub fn burn_report(r: &BurnReport, copies: u32) -> String {
 
 /// One block per disc written: the line with its label, its status and, under
 /// `burn --verify`, its read-back. `run` prints these after every cycle.
-#[allow(dead_code)] // until `run` uses it
 pub fn burn_discs(r: &BurnReport, copies: u32) -> String {
     disc_lines(r, copies).join("\n")
 }

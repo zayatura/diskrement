@@ -1,14 +1,15 @@
-#![allow(dead_code)] // until `backlog` lands
 //! `diskrement run`: plan and burn cycle after cycle until the backlog is on
 //! disc, each disc waited for rather than asked for (continuous-run spec).
 //! The stop rules and the renderings are pure; `backlog` is the loop.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use diskrement_shell::burn::Burner;
 use diskrement_shell::error::PipelineError;
 use diskrement_shell::pipeline::reports::{BurnReport, DiscBurn, DiscReadBack, PlanReport};
+use diskrement_shell::pipeline::{Pipeline, VerifyAfterBurn};
 
-use crate::render;
+use crate::{prompt, render, say};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Next {
@@ -156,6 +157,68 @@ pub fn rerun_advice(name: &str, err: &PipelineError) -> Option<String> {
             "Or re-run diskrement run {name}; it re-plans first."
         )),
     }
+}
+
+/// The loop (spec §3): plan, ask once, then burn and re-plan until a plan
+/// has nothing to place or a cycle leaves its discs open. The first error
+/// stops it. An error in the first plan is returned as usual; any later one
+/// is reported here, after the summary, and becomes the exit code.
+pub fn backlog(
+    pipeline: &mut Pipeline<'_>,
+    name: &str,
+    copies: u32,
+    yes: bool,
+    burner: &Burner<'_>,
+    step: &VerifyAfterBurn<'_>,
+) -> Result<u8, PipelineError> {
+    let started = Instant::now();
+    let mut burned: Vec<DiscBurn> = Vec::new();
+    let stop = |burned: &[DiscBurn], err: PipelineError, advice: Option<String>| -> u8 {
+        say(&summary(burned, copies, started.elapsed()));
+        eprintln!("{}", render::error_line(&err));
+        if let Some(advice) = advice {
+            eprintln!("{advice}");
+        }
+        err.exit_code() as u8
+    };
+    for cycle in 1.. {
+        let outcome = match pipeline.plan(name, None, false, false) {
+            Ok(outcome) => outcome,
+            Err(err) if cycle == 1 => return Err(err),
+            Err(err) => return Ok(stop(&burned, err, None)),
+        };
+        if cycle == 1 {
+            say(&render::scan_report(&outcome.scan));
+            say(&render::plan_report(&outcome.plan));
+        }
+        if after_plan(&outcome.plan) == Next::Done {
+            if cycle > 1 {
+                say(&render::plan_report(&outcome.plan));
+                say(&summary(&burned, copies, started.elapsed()));
+            }
+            return Ok(0);
+        }
+        if cycle == 1 && !prompt::confirm(&confirm_question(name, &outcome.plan), yes) {
+            say("Aborted.");
+            return Ok(0);
+        }
+        say(&cycle_line(cycle, &outcome.plan));
+        let report = match pipeline.burn_with(name, chrono::Utc::now(), burner, Some(step)) {
+            Ok(report) => report,
+            Err(err) => {
+                let advice = rerun_advice(name, &err);
+                return Ok(stop(&burned, err, advice));
+            }
+        };
+        burned.extend(report.discs.iter().cloned());
+        if after_burn(&report) == Next::Done {
+            say(&render::burn_report(&report, copies));
+            say(&summary(&burned, copies, started.elapsed()));
+            return Ok(0);
+        }
+        say(&render::burn_discs(&report, copies));
+    }
+    unreachable!("the cycle counter does not run out")
 }
 
 #[cfg(test)]
