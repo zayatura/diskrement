@@ -1655,7 +1655,7 @@ The review found no critical defects. Fixed (4ded530):
 - **A transient watch error ended the wait.** Up to `WATCH_ERROR_RETRIES` (5) in a row are now ridden out.
 - **The ioctl's safety argument.** `SysDriveWatch` now requires a block device (`fstat`), so the cdrom opcode never reaches a character device's driver.
 - **Spec wording.** The spec now matches the code: the cycle line, the summary format, `DriveWatch::pause`.
-- **Tests.** +5: busy drive, unreadable disc named once, watch errors ridden out, character device refused, plus the stronger `a_drive_that_cannot_be_watched…`.
+- **Tests.** +4 (770 in all): busy drive, unreadable disc named once, watch errors ridden out, character device refused. `a_drive_that_cannot_be_watched…` also checks the errors were ridden out first.
 
 Accepted, left as they are:
 
