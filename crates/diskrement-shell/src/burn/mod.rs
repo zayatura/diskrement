@@ -7,6 +7,7 @@
 //! expressed as two `ZLayer`s.
 
 pub mod cmd;
+pub mod drive;
 pub mod json;
 pub mod media;
 pub mod reader;
@@ -211,6 +212,12 @@ pub enum BurnError {
     PostBurnCheckFailed(String),
     #[error("could not mount the disc for verification: {0}")]
     MountFailed(String),
+    /// `run` could not ask the kernel whether a disc is seated
+    /// (continuous-run spec §4.2): not an optical drive, or one that does not
+    /// answer `CDROM_DRIVE_STATUS`. A missing device or a permission problem
+    /// keeps its own variant.
+    #[error("cannot read the drive status of {device}: {reason}")]
+    DriveStatusUnavailable { device: String, reason: String },
     #[error("aborted by operator")]
     Aborted,
 }
