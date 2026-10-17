@@ -130,6 +130,9 @@ loop:
                      poll until state() is no longer DiscOk (the tray was opened), then loop
 ```
 
+- **xorriso seeing no disc** although the kernel reports `DiscOk` (a drive still
+  spinning up) is not a wrong disc: the loop polls again and re-inspects, rather
+  than waiting for the tray to open.
 - **Only `DiscOk` is inspected.** `TrayOpen`, `NoDisc`, `NotReady` and `NoInfo`
   all mean keep polling.
 - **One inspection per insertion.** A wrong disc left in the drive is not inspected
@@ -164,7 +167,12 @@ wording of both places is updated to say so.
 ## 5. Errors
 
 - **The first error stops the run.** Earlier cycles stay committed; the current cycle
-  behaves as `burn --verify` does (a `PartialBurn` if a set already committed). The
+  behaves as `burn --verify` does (a `PartialBurn` if a set already committed), with
+  one difference: a failed first session is **not** retried. Under `burn --verify`
+  the retry goes through the burner's insert prompt; under detection it would simply
+  wait for the next blank, and the run would carry on past a failure (decision 3).
+  `VerifyAfterBurn` gains `retry_failed_first_session`, true for `burn --verify` and
+  false for `run`, which stops with `VerifyFailed` straight away. The
   summary (§3) is printed, then the error's usual message and advice, and the run
   exits with that error's code.
 - **Advice.** The existing advice is unchanged: "re-run burn" still works, because the
@@ -207,8 +215,12 @@ wording of both places is updated to say so.
 
 ### 7.3 Contract and scenario
 
-- `tests/binary.rs`: `run` on the real backend with no stdin declines at the
-  confirmation and exits 0, with nothing burned.
+- `tests/binary.rs`:
+  - `run` on the simulated backend with no stdin declines at the confirmation and
+    exits 0, with nothing burned. (The real backend cannot be used here: §4.4's
+    up-front check needs a drive, and test machines may have none.)
+  - `run --burner real --device <missing path>` exits 6 naming the device, before
+    anything is scanned or staged (§4.4).
 - Scenario `s17_run`: simulated backend, `--copies 2`, and a small
   `DISKREMENT_DISC_BYTES` so the backlog spans three pairs.
   - `run --yes` burns 1A to 3B, each read back verified, and 3A/3B stay open.
