@@ -18,6 +18,23 @@ use crate::progress::ProgressSink;
 /// constant, kept exactly: capacity refusals must trigger in the same places.
 const FIXED_OVERHEAD_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Why the disc in the drive is not the one to write.
+enum Mismatch {
+    /// xorriso finds the drive empty.
+    NoDisc,
+    /// Some other disc, worded for the operator.
+    Wrong(String),
+}
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mismatch::NoDisc => f.write_str("no disc in the drive"),
+            Mismatch::Wrong(found) => f.write_str(found),
+        }
+    }
+}
+
 pub struct XorrisoBurner<'a> {
     device: BurnDevice,
     exec: &'a dyn Exec,
@@ -126,10 +143,10 @@ impl<'a> XorrisoBurner<'a> {
 
     /// `Ok(free)` when this is the disc to write; `Err(description)` when it is
     /// not, worded for the operator.
-    fn check_media(&self, id: &DiscIdentity) -> Result<Result<u64, String>, BurnError> {
+    fn check_media(&self, id: &DiscIdentity) -> Result<Result<u64, Mismatch>, BurnError> {
         let status = MediaInspector::new(self.device.clone(), self.exec).inspect()?;
         Ok(match (status, id.session_ordinal) {
-            (MediaStatus::NoMedia, _) => Err("no disc in the drive".to_string()),
+            (MediaStatus::NoMedia, _) => return Ok(Err(Mismatch::NoDisc)),
             (MediaStatus::Blank(free), 1) => Ok(free),
             (MediaStatus::Blank(_), _) => {
                 Err("a blank disc (expected written media to append to)".to_string())
@@ -165,7 +182,8 @@ impl<'a> XorrisoBurner<'a> {
                 "unsuitable media (e.g. a POW-formatted BD-R) — use a plain unformatted BD-R"
                     .to_string(),
             ),
-        })
+        }
+        .map_err(Mismatch::Wrong))
     }
 
     fn write(&self, image: &DiscImage, image_bytes: u64) -> Result<(), BurnError> {
