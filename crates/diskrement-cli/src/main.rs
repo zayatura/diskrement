@@ -82,6 +82,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
         Command::Plan { name, .. } => name,
         Command::Status { name, .. } => name,
         Command::Burn { name, .. } => name,
+        Command::Run { name, .. } => name,
         Command::Reset { name, .. } => name,
         Command::Verify { name, .. } => name,
         Command::History { name, .. } => name,
@@ -252,6 +253,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             say(&render::burn_report(&report, p.copies));
             Ok(0)
         }
+        Command::Run { .. } => Err(PipelineError::Failed("run is not wired yet".to_string())),
         Command::Reset { name } => {
             let mut catalog = open_catalog(&resolved.catalog)?;
             let p = find_or_fail(&catalog, &name)?;

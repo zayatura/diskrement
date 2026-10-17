@@ -150,6 +150,19 @@ pub enum Command {
         #[arg(long, default_value_t = false, hide = true)]
         no_eject: bool,
     },
+    /// Plan and burn, cycle after cycle, until the backlog is on disc.
+    ///
+    /// Each cycle is `plan`, then `burn --verify`, but each disc is waited
+    /// for rather than asked for: the burn starts once a disc that is exactly
+    /// the one expected is in the drive. Stops at the first error, and after
+    /// the cycle that leaves its discs open. Ctrl-C while waiting for a disc
+    /// stops it with nothing written.
+    Run {
+        name: String,
+        /// Skip the one confirmation at the start.
+        #[arg(long, short = 'y', default_value_t = false)]
+        yes: bool,
+    },
     /// Discard staged plan state.
     Reset { name: String },
     /// Re-hash burned disc(s) against the catalog.
@@ -475,6 +488,24 @@ mod tests {
             .render_long_help()
             .to_string();
         assert!(!help.contains("no-eject"), "{help}");
+    }
+
+    #[test]
+    fn run_takes_a_name_and_an_optional_yes() {
+        let parse = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Command::Run { name, yes } => (name, yes),
+            _ => panic!("not run"),
+        };
+        assert_eq!(parse(&["diskrement", "run", "p"]), ("p".to_string(), false));
+        assert_eq!(
+            parse(&["diskrement", "run", "p", "--yes"]),
+            ("p".to_string(), true)
+        );
+        assert_eq!(
+            parse(&["diskrement", "run", "p", "-y"]),
+            ("p".to_string(), true)
+        );
+        assert!(Cli::try_parse_from(["diskrement", "run"]).is_err());
     }
 
     #[test]
