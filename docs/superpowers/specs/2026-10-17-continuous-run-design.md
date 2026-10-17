@@ -69,13 +69,17 @@ loop:
   those would be appended to the disc just ejected. They wait for the next ordinary
   `plan`/`burn`, or the next `run`.
 - **The cycle line** is printed once per cycle, before the burn: `Cycle 3: 7A
-  (24.5 GB, finalizes) and 7B; about 10 more cycles after this.` A cycle is one
+  (24.5 GB, finalizes), 7B (24.5 GB, finalizes); about 10 more cycles after this.`
+  (`the last cycle` when nothing spills.) A cycle is one
   disc per copy set, so the count reads the same at any `copies`. It is derived
   from `PlanReport`'s remaining estimate, in discs per set. Only the first cycle renders the full plan
   report.
 - **The summary** is printed when the run ends, whether it ended normally or on an
-  error: `This run: 5A, 5B, 6A verified, 6B recorded unverified; 1h 32m.` A disc
-  recorded unverified is named as such, with its `verify --disc` advice.
+  error: `This run: 4 discs in 1h 32m — verified: 5A, 5B, 6A; recorded unverified:
+  6B (run verify --disc 6B).` It covers the cycles that completed; a disc committed
+  in the cycle that failed is named by the error's own `PartialBurn` line instead
+  (accepted after the final review: carrying its read-back there would change
+  `PartialBurn` across the pipeline).
 - **Where it lives.** The loop is in the CLI (`crates/diskrement-cli/src/run.rs`),
   around the existing `Pipeline::plan` and `Pipeline::burn_with`; `Pipeline` still
   does no I/O. The stop rules are pure functions over `PlanReport` and `BurnReport`,
@@ -98,12 +102,15 @@ pub enum DriveState { TrayOpen, NoDisc, NotReady, DiscOk, NoInfo }
 
 pub trait DriveWatch {
     fn state(&self) -> Result<DriveState, BurnError>;
+    /// The wait between two polls: 2 s for the real watch, free when scripted.
+    fn pause(&self);
 }
 ```
 
 The real implementation opens the device with `O_RDONLY | O_NONBLOCK`, which neither
-closes the tray nor reads the media and follows a `/dev/disk/by-id` symlink. It then
-calls `ioctl(CDROM_DRIVE_STATUS, CDSL_CURRENT)` through `rustix`. Each poll opens and
+closes the tray nor reads the media and follows a `/dev/disk/by-id` symlink. It requires a block device (`fstat`), so the
+cdrom opcode never reaches a character device's driver, and then calls
+`ioctl(CDROM_DRIVE_STATUS, CDSL_CURRENT)` through `rustix`. Each poll opens and
 closes the device, so no descriptor is held while xorriso runs. The mapping from the
 ioctl's return values (`CDS_NO_INFO` 0 to `CDS_DISC_OK` 4) to `DriveState` is a pure
 function. An open or ioctl failure is `BurnError` with the device named, exit 6.
@@ -130,9 +137,17 @@ loop:
                      poll until state() is no longer DiscOk (the tray was opened), then loop
 ```
 
-- **xorriso seeing no disc** although the kernel reports `DiscOk` (a drive still
-  spinning up) is not a wrong disc: the loop polls again and re-inspects, rather
-  than waiting for the tray to open.
+- **A seated disc xorriso cannot read yet** is not a wrong disc. It reports no disc
+  while the drive spins up, or fails to inspect it while udev's media-change probe
+  holds the drive open exclusively ("Cannot open busy device"). The loop pauses and
+  re-inspects, up to 15 times (about 30 s), and only then names it once (`xorriso
+  cannot read the disc in the drive (…); waiting for …`) and waits for the tray to
+  open, as for a wrong disc. It never ends the run. A missing device or a
+  permission problem reported by xorriso still does. (Added after the final
+  review.)
+- **A short run of watch errors** (up to 5 polls in a row, such as a USB drive
+  re-enumerating) is ridden out during the wait; §4.4's up-front check stays
+  strict.
 - **Only `DiscOk` is inspected.** `TrayOpen`, `NoDisc`, `NotReady` and `NoInfo`
   all mean keep polling.
 - **One inspection per insertion.** A wrong disc left in the drive is not inspected

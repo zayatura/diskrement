@@ -1646,3 +1646,20 @@ Executed inline on 2026-10-17. Baseline 742 tests; final 766 (+24, exactly as pl
 - **Task 5:** `burn_discs` had no caller until Task 8, and warnings are errors, so it carried a temporary `#[allow(dead_code)]`, removed in Task 8 (as `run.rs`'s was).
 - **Task 9:** the `run` decline test sits in `tests/binary.rs`'s `real_backend` module, next to the `burn --verify` decline test as planned, although it runs on the simulated backend.
 - **Observed, not changed:** a cycle's `✔ Wrote disc …` blocks (with the labels) print after the whole cycle, as `burn`'s report always has. Between the twins the operator sees 1A's read-back and eject, then `Waiting for a blank disc for … 1B`, but 1A's label only once 1B is done.
+
+### After the final review (2026-10-17)
+
+The review found no critical defects. Fixed (4ded530):
+
+- **A busy device ended an unattended run.** Detection inspects within 2 s of the kernel reporting a disc, which is when udev's probe can hold the drive open exclusively, so xorriso's `InspectFailed` ended the run with exit 6. A seated disc xorriso cannot read (that, or "no disc") is now re-inspected up to `UNREADABLE_RETRIES` (15, ~30 s) times, then named once and waited out like a wrong disc. The count restarts with each insertion.
+- **A transient watch error ended the wait.** Up to `WATCH_ERROR_RETRIES` (5) in a row are now ridden out.
+- **The ioctl's safety argument.** `SysDriveWatch` now requires a block device (`fstat`), so the cdrom opcode never reaches a character device's driver.
+- **Spec wording.** The spec now matches the code: the cycle line, the summary format, `DriveWatch::pause`.
+- **Tests.** +5: busy drive, unreadable disc named once, watch errors ridden out, character device refused, plus the stronger `a_drive_that_cannot_be_watched…`.
+
+Accepted, left as they are:
+
+- **The summary covers completed cycles only.** A disc committed in the failing cycle is named by the `PartialBurn` line, but its read-back state (and the `verify --disc` advice when it was recorded unverified) is not repeated. Carrying it would change `PartialBurn` across the pipeline.
+- **A tray swap faster than one 2 s poll would go unseen.** This is not physically realistic: a closing tray reports `NotReady` for seconds while it spins up.
+- **No test drives `backlog`'s mid-run error path**, and the CLI's `retry_failed_first_session: false` is not pinned by a CLI-level test. The simulated backend cannot fail a read-back on demand.
+

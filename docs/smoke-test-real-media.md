@@ -163,8 +163,10 @@ Use plain UNFORMATTED BD-R media: a POW (Pseudo Overwrite) formatted BD-R is
         `Found disc …; waiting for …` exactly once, and nothing more until the
         tray is opened again.
       - (d) Ctrl-C while waiting: `status` is unchanged.
-      - (e) Record whether the first inspection after a tray closes ever
-        misreads the disc. If it does, add the 5 s settle (spec §4.3).
+      - (e) Record whether `xorriso cannot read the disc in the drive (…)`
+        ever appears after a tray closes on a good blank, and with what reason
+        (busy device, no disc). The retries (~30 s) should absorb it; if they
+        do not, raise `UNREADABLE_RETRIES` or add a settle (spec §4.3).
 
 Run record: 2026-09-11, Rust binary @ commit b81b342 (release build), Pioneer
 BDR-UD04 at `/dev/sr1`, one CMC BD-R (POW caveat above did not apply — media

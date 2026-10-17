@@ -104,8 +104,10 @@ Caveat: the ported integration scenarios in `crates/diskrement-cli/tests/scenari
   polls with it: `burn::drive::SysDriveWatch` asks the kernel
   (`CDROM_DRIVE_STATUS` on an `O_NONBLOCK` open, which neither moves the tray nor
   reads the media), and the burner inspects through xorriso only once a disc is
-  seated, once per insertion. A wrong disc waits for the tray to open; xorriso
-  seeing no disc yet is looked at again. `run` does not retry a failed first
+  seated, once per insertion. A wrong disc waits for the tray to open. A disc
+  xorriso cannot read yet (spinning up, or udev's probe holding the drive
+  exclusively: "busy device") is looked at again for ~30 s, then waited out like a
+  wrong disc; it must never end the run. `run` does not retry a failed first
   session (`VerifyAfterBurn::retry_failed_first_session`): under detection a
   retry would carry the run on past a failure.
 - **Disc names depend on `copies`.** `DiscKey::name(copies)` is `3` in a single-copy project and `3B` otherwise; labels, staging dirs (`staging/disc-3B`), volids, prompts and reports all go through it. Never format a disc ordinal by hand.
