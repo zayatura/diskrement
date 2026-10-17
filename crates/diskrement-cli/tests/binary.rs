@@ -1090,6 +1090,63 @@ mod real_backend {
         assert!(p.work.join("staged/plan.json").is_file());
     }
 
+    /// `run` asks once, before its first burn. With no stdin the answer is
+    /// "no": exit 0, nothing burned.
+    #[test]
+    fn run_asks_once_and_an_unanswered_question_burns_nothing() {
+        let p = project();
+        base(&p)
+            .args(["init", "p", "--source"])
+            .arg(&p.source)
+            .arg("--work-dir")
+            .arg(&p.work)
+            .assert()
+            .success();
+        base(&p)
+            .args(["run", "p"])
+            .assert()
+            .code(0)
+            .stdout(contains("Burn the backlog of p (about 1 cycle)? [y/N]"))
+            .stdout(contains("Aborted."));
+        base(&p)
+            .args(["status", "p"])
+            .assert()
+            .success()
+            .stdout(contains("Last burn: never"));
+    }
+
+    /// A drive that cannot be watched fails before anything is scanned or
+    /// staged (spec §4.4): exit 6, naming the device.
+    #[test]
+    fn run_on_a_missing_drive_fails_before_planning() {
+        let p = project();
+        base(&p)
+            .args(["init", "p", "--source"])
+            .arg(&p.source)
+            .arg("--work-dir")
+            .arg(&p.work)
+            .assert()
+            .success();
+        let missing = p.work.join("no-such-drive");
+        Command::cargo_bin("diskrement")
+            .expect("binary builds")
+            .arg("--catalog")
+            .arg(&p.catalog)
+            .args(["--burner", "real", "--device"])
+            .arg(&missing)
+            .args(["run", "p", "--yes"])
+            .env_remove("DISKREMENT_BURNER")
+            .env_remove("DISKREMENT_DEVICE")
+            .assert()
+            .code(6)
+            .stderr(contains("burner device not found"))
+            .stderr(contains("no-such-drive"));
+        assert!(
+            !p.work.join("staged/plan.json").exists(),
+            "nothing was planned"
+        );
+    }
+
     /// Without xorriso on `PATH` the same run fails at the preflight, with the
     /// message that names the package to install — exit 6, the media/burner
     /// rung.
