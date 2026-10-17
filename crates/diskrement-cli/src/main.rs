@@ -237,6 +237,7 @@ fn dispatch(cli: args::Cli) -> Result<u8, PipelineError> {
             let step = verifier.as_ref().map(|v| VerifyAfterBurn {
                 verifier: v,
                 operator: &operator,
+                retry_failed_first_session: true,
             });
 
             let mut pipeline = Pipeline::new(
