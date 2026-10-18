@@ -1,295 +1,142 @@
 # diskrement
 
-**Incremental backups to optical discs, with a memory.**
+**Incremental backups to Blu-ray, with a memory.**
 
----
+Optical discs are a good home for data you want to keep forever: they need no power,
+nothing can rewrite them, and they outlast most hard drives. But burning tools treat
+each disc as a one-off. They don't remember what you burned last month, so backing up a
+growing directory (a photo library, say) across dozens of discs is left to you.
 
-## The problem
+diskrement does that bookkeeping. It keeps a catalog of every file it has burned, and
+each cycle it writes only what changed since the last one, topping off the current
+multisession disc before starting a new one.
 
-Optical media — Blu-ray in particular — is one of the most durable long-term storage
-formats available to individuals. It doesn't need power, it can't be silently corrupted
-by ransomware, and a pressed disc can outlast most hard drives by decades. For archiving
-data you want to keep forever, it's a compelling choice.
+## Features
 
-But burning files to discs is painful in a way that hard-drive backups are not.
-Hard drives are random-access: tools can compare what's on the drive to what's in
-your source tree and copy only what changed. Optical media is write-once. Once a
-session is burned, it cannot be modified. New sessions can be appended to a
-multisession disc, but nothing already written can be touched.
+- **Incremental.** Each cycle scans the source, burns new and changed files, and records
+  deletions. Files already on disc are not burned again.
+- **Full history.** Every version of every file is kept in an append-only catalog, and
+  `history` shows which disc holds each one.
+- **Multiple copies.** `--copies 2` keeps every file on two independent disc series
+  (1A/1B, 2A/2B, …), so you can store one set off-site.
+- **Self-describing discs.** Files sit under `/data` on a plain ISO 9660 + Rock Ridge
+  filesystem that any computer can read. Beside them, `/.diskrement` holds the disc's
+  manifest and a snapshot of the catalog, so a single disc is enough to see what the
+  whole archive held when it was burned.
+- **Verified.** `burn --verify` reads each disc back before recording it, and `verify`
+  re-hashes burned discs against the catalog at any time.
+- **Unattended runs.** `run` works through a large backlog disc after disc: it waits for
+  the right blank disc to be inserted, burns it, verifies it and ejects it.
+- **Lost-disc recovery.** `disc mark-dead` writes off a broken or lost disc, reports what
+  was lost for good, and re-burns everything that is still current on the next cycle.
+- **Crash-safe.** The catalog is updated only after a disc is burned. An interrupted
+  burn leaves it untouched, and running `burn` again resumes from the staged plan.
 
-Most burning tools treat this as a constraint to work around rather than a property
-to embrace. They give you a "file manager" view of a disc and let you drag in files.
-They have no memory of what you've already burned. If you want to back up a directory
-tree incrementally across many discs over time — burning only what changed since
-the last run, topping off partly-used discs before opening new ones, knowing which
-discs hold which files — you're on your own.
+## Requirements
 
-`diskrement` (disk + incremental) is built around that workflow.
+- Linux.
+- [xorriso](https://www.gnu.org/software/xorriso/), and udisks2 for `verify`.
+- A copy-on-write filesystem (btrfs, XFS with reflink, or bcachefs) holding both the
+  source and the work directory. Each cycle takes an instant reflink snapshot of the
+  source, so you can keep using your files while a burn runs.
+- Permission to use the drive: on most distributions, membership in the `optical` group.
+- A Blu-ray burner. BD-R (25 GB) is the default disc type; `BD_R_DL`, `DVD` and
+  `DVD_DL` are also available via `--disc-type`.
 
----
+## Installation
 
-## What it does
+You need a Rust toolchain ([rustup](https://rustup.rs) picks up the pinned version) and a
+C compiler, since SQLite is built from source.
 
-Given a source directory and a catalog database, `diskrement`:
-
-1. **Scans** the source tree and detects what has been added, modified, or deleted
-   since the last burn.
-2. **Plans** a burn (the same command scans first): tops off the current open (multisession) disc first, then spills
-   new data onto as many new discs as needed.
-3. **Burns** each disc and commits the result to the catalog atomically. A crash
-   before the commit leaves the catalog unchanged; the staged plan is the recovery unit.
-4. **Verifies** burned discs by re-hashing the staged data against the catalog.
-5. **Tracks history**: every version of every file is retained forever — the catalog
-   is an append-only log. Because optical media can never delete what's already
-   burned, the catalog reflects that reality.
-
-Each disc is also **self-describing**: it carries a manifest and a full snapshot of
-the catalog as it stood at burn time. A disc can be understood and the catalog
-rebuilt from a single disc alone, without the host database.
-
----
-
-## Design
-
-`diskrement` follows a **functional core / imperative shell** architecture (sometimes
-called hexagonal or ports-and-adapters):
-
-- **`crates/diskrement-core/`** — pure Rust with no I/O. `diff` computes a change
-  set between the last burned state and a fresh scan; `planner` packs it onto
-  discs; `manifest` builds what gets written. One dependency, `chrono` with
-  `default-features = false`, which excludes the `clock` feature — `Utc::now()`
-  does not compile here; purity is enforced by the dependency graph, not by
-  discipline.
-
-- **`crates/diskrement-shell/`** — every effect: the SQLite catalog, the
-  scanner and hasher, the CoW snapshot, staging, and the burners.
-
-- **`crates/diskrement-cli/`** — the `diskrement` binary: argument parsing,
-  path resolution, rendering and the exit-code contract.
-
-The write-once nature of optical media is treated as a first principle, not an
-afterthought. The append-only catalog, the commit-after-success burn, the
-self-describing discs — all of these follow directly from "you can never undo a burn."
-
-**Tech stack:** Rust (stable, edition 2021), `clap` 4, `rusqlite` (bundled
-SQLite), `serde`/`serde_json`, `sha2`, `rayon`, `walkdir`, `reflink-copy`.
-
----
-
-## Status
-
-`diskrement` is under active development. **Cycle 1 is complete:**
-
-| Component | Status |
-|-----------|--------|
-| Functional core (Diff, Planner, Manifest) | Done |
-| SQLite catalog with append-only schema and migrations | Done |
-| File scanning, SHA-256 hashing, CoW source snapshots | Done |
-| Disc staging, `/.diskrement` layout, simulated burner | Done |
-| Pipeline orchestration (all 9 operations) | Done |
-| CLI adapter (argument parsing, prompts, output formatting) | Done |
-| Real disc burning (xorriso, BD-R multisession) | Done (burn + read-back verify) |
-| Coaster workflow (mark-dead + re-plan) | Done (lost-history report + re-plan) |
-
-The pipeline orchestration layer is fully tested with integration tests against
-real temp directories and a full plan → burn → verify → history loop. The
-simulated burner stages disc contents to directories rather than writing to physical
-media — this makes the entire workflow testable without hardware.
-
-With the CLI adapter (Plan 3b) in place, the tool is runnable end-to-end with
-simulated burns:
-
-```
-diskrement init photos --source /srv/photos --work-dir /srv/work
-diskrement plan photos
-diskrement burn photos          # asks for confirmation; --yes to skip
-diskrement status photos
-diskrement verify photos
-diskrement history photos some/file.jpg
-diskrement disc mark-dead photos 1   # write off a destroyed disc; --yes to skip
-```
-
-The per-project catalog defaults to `$XDG_DATA_HOME/diskrement/<name>.sqlite`
-(or systemd's `$STATE_DIRECTORY`), overridable with `--catalog`.
-
-### Several directories in one project
-
-Instead of one `--source`, a project can archive several directories onto one disc
-series, each under a name you choose:
-
-```
-diskrement init family --work-dir /srv/work \
-  --root family/anna=/srv/immich/library/65966390-… \
-  --root family/bela=/srv/immich/library/4efdf184-… \
-  --root others/cecil=/srv/immich/library/48199862-…
-```
-
-Each root's files appear on the discs under its name (`family/anna/2024/…`). Discs fill
-in order of the path *below* each root, then the root name, so libraries laid out by date
-(Immich's `YYYY/YYYY-MM-DD/`) interleave: the first disc holds the oldest files from
-every root, whichever group it sits in. `--source` and `--root` are exclusive, and `init`
-needs one of them. A `--root` value splits at its first `=`, so a path may contain `=`
-but a name may not.
-
-A name is one or more `/`-separated components. No component may be empty, `.` or `..`,
-or longer than 255 bytes, and the name may not contain a control character. Spaces and
-non-ASCII are fine. A bad name is a usage error (exit 1), as are a path that is not valid
-UTF-8, two equal names, and a name inside another (`family` with `family/anna`), which
-would put one root's files in another's directory; `family` with `familyx` is fine.
-`init` also refuses two roots that share a directory or sit one inside the other, after
-resolving symlinks, and reports their paths as you gave them (exit 3). It checks that
-every root exists and is on the work dir's filesystem.
-
-The roots are fixed at `init`: a name is permanent once files are burned under it,
-because renaming one would read as deleting and re-adding everything below it. `status`
-lists the roots before the discs.
-
-### Real burning
-
-The default backend burns real media via `xorriso` (ISO 9660 level 3 + Rock Ridge,
-multisession). Select the device and backend with `--device /dev/sr0` /
-`--burner real|simulated` (env: `DISKREMENT_DEVICE`, `DISKREMENT_BURNER`).
-Your user must be able to open the drive — on most distros that means membership
-in the `optical` group. `verify` mounts the disc via `udisks2` and re-hashes every
-file, including versions superseded by later sessions on the same disc.
-
-### Dead discs (coasters)
-
-A burned disc that is later lost, destroyed, or unreadable can be written off:
-
-```
-diskrement disc mark-dead photos 1
-```
-
-This records an append-only `MARKED_DEAD` event — the disc row itself is left untouched — and
-prints a report of the casualties: versions that lived only on that disc and are no
-longer their path's current version are **permanently lost**; the ones still current are
-listed for re-burn, and the next `plan` / `burn` writes them to fresh media.
-A dead disc is excluded from `verify`, is never topped off again, and shows as `DEAD`
-in `status`.
-
-`history` numbers versions, oldest first, and shows where each copy lives. After the
-recovery burn every copy on the dead disc reads `LOST`, including the one holding
-content you still have. `LOST` means
-*those bytes* are gone, not that the content is unrecoverable: a file that was
-superseded once on the dead disc ends up reading
-
-```
-b.txt
-  v1  disc 1 / session 1   ...  LOST
-  v2  disc 1 / session 2   ...  LOST
-  v3  disc 2 / session 1   ...  CURRENT
-```
-
-where v2 and v3 carry the same content hash — the live copy came back on fresh media.
-With `copies` > 1, each version prints its size and hash once, followed by one line per
-copy (1A, 1B, …) with that copy's status. There a dead disc's copy of a version that is
-still current keeps reading `CURRENT (on a dead disc)`, even after its set has been
-caught up: the catch-up adds another copy of the same version rather than a new one.
-Between the mark-dead and that recovery burn, `status` keeps counting the re-burn list
-under `Current files` — `history` shows them as `CURRENT (on a dead disc)` — and names them on
-a line of their own:
-
-```
-No live copy: 2 files (0.0 GB) — re-burn on next plan/burn.
-```
-
-With more than one copy, those files also count as missing from every copy set, so no
-set reads `complete` while a file has no live copy anywhere; `burn` prints the same line
-and does not claim the archive is up to date.
-
-If a plan was already staged against the disc when it was marked dead, `burn` refuses
-it — re-run `plan`, which is the whole recovery: it scans the source again, re-reads the
-disc states and targets fresh media. `reset` is
-not part of the fix and throws away staged state you would only have to rebuild (with
-the simulated backend, including the staging trees `verify` reads back). Likewise,
-`verify --disc <n>` naming a dead or unknown disc is an error rather than a quiet
-"nothing to verify".
-
-A real burn deletes each disc's staging tree (`<work-dir>/staging/disc-<name>`) as soon
-as that disc is committed. The burned disc and the catalog are the record, and a kept
-tree would pin the space of source files you have since deleted, through its reflinks.
-The simulated backend keeps its trees, because they are what `verify` reads back. Trees
-left by older versions of diskrement stay until you remove them. On a real-backend
-project with nothing staged, for example right after a burn, `reset <name>` does that
-safely. `btrfs filesystem du -s <work-dir>/staging/*` shows how much space they hold
-exclusively.
-
-### Performance
-
-`plan` hashes new or changed content (it scans the source before planning) with up to 6 workers in parallel; override with
-`DISKREMENT_HASH_PARALLELISM` (a positive integer, clamped to 64 — an unusable
-non-empty value falls back to 6 with a warning; an empty value is treated as unset). Long hashing or staging phases report progress on
-**stderr** (a refreshed line on a TTY, a periodic line otherwise), so `stdout` stays
-clean for data; diagnostics and warnings go to stderr too.
-
-`plan`'s scan also keeps a fingerprint cache: a sidecar SQLite file next to the catalog,
-named `<catalog-stem>.<project>.scancache.sqlite` (with the default catalog location
-that reads a little oddly, e.g. `photos.photos.scancache.sqlite` — deliberate, since
-one catalog file can hold several projects and the cache must not be shared between
-them). The first scan of a large library is the expensive one; later ones hash only what
-changed, and `plan` reports the split, e.g. `Hashed 12 of 75618 files (75606
-fingerprints reused).` Every `plan` scans afresh, so a cycle that found nothing to burn
-never hides later changes. The cache is disposable — deleting it is always safe and merely costs
-one full re-hash on the next plan. It is never embedded on a disc and `reset` does
-not touch it. `plan --rehash` re-hashes everything regardless of the cache; this is
-also the escape hatch for the cache's one real caveat: it extends the same size+mtime
-trust burned files already get to *scanned* files, so an in-place edit that preserves
-both size and mtime goes unnoticed where an uncached scan would have re-hashed it.
-
-`burn` stages the disc tree with copy-on-write reflink clones where the filesystem
-supports them (the btrfs/XFS/bcachefs `init` already requires), falling back to a
-plain copy otherwise, then re-hashes the staged tree as the integrity gate before
-burning.
-
-`scripts/perf-bench.sh SOURCE_DIR WORK_AREA` runs a full init → plan → burn → plan
-cycle (each plan scans; the second is the warm rescan) against a throwaway project and reports per-step wall time alongside I/O
-(`rchar`/`read_bytes`/`write_bytes`) from `/proc/<pid>/io`, so a rescan's savings are
-visible directly. Set `DROP_CACHES=1` to drop the page cache before the first plan for
-cold-cache comparability. `SOURCE_DIR` and `WORK_AREA` must be on the same filesystem,
-since the benchmark's staging step relies on the same reflink support `burn` does.
-
----
-
-## Building
-
-**Requirements:** a stable Rust toolchain (pinned by `rust-toolchain.toml`),
-Linux, and a CoW filesystem (btrfs, XFS with reflink, or bcachefs) for the
-work area. `rusqlite`'s bundled SQLite is compiled from source, so a C
-compiler is needed for the first build.
-
-```
+```sh
 git clone https://github.com/zayatura/diskrement
 cd diskrement
-cargo build --release          # -> target/release/diskrement
-cargo test --workspace         # all tests
-cargo run -p diskrement-cli -- plan photos
-```
-
-The test suite includes integration tests that auto-skip on filesystems without
-copy-on-write support.
-
-### Producing an executable
-
-```bash
 cargo build --release
-```
-
-This produces `target/release/diskrement`, a single self-contained binary —
-no launcher script, and no JVM on the target machine. You can run it directly:
-
-```bash
-target/release/diskrement --help
-```
-
-Or put it on your `PATH` permanently with a symlink:
-
-```bash
 ln -s "$PWD/target/release/diskrement" ~/.local/bin/diskrement
 ```
 
----
+The result is a single self-contained binary.
+
+## Quick start
+
+```sh
+# Create a project: what to archive, and where to stage discs.
+diskrement init photos --source /srv/photos --work-dir /srv/work
+
+# Scan the source and plan the next disc.
+diskrement plan photos
+
+# Burn it, reading it back before it is recorded.
+diskrement burn photos --verify
+
+# See what is on disc and what is left.
+diskrement status photos
+```
+
+Repeat `plan` and `burn` whenever the source changes. To burn a large backlog, use
+`diskrement run photos` instead: it plans and burns cycle after cycle, starting each burn
+as soon as the expected disc is in the drive, and stops once everything is on disc.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `init NAME` | Create a project. `--source DIR` or `--root NAME=DIR` (repeatable), `--work-dir DIR`, `--copies N`, `--disc-type`, `--margin PERCENT` |
+| `plan NAME` | Scan the source and stage the next disc(s). `--finalize` seals the open disc; `--rehash` ignores the fingerprint cache |
+| `burn NAME` | Burn the staged plan. `--verify` reads each disc back first; `--yes` skips the confirmation |
+| `run NAME` | Plan and burn repeatedly until the backlog is on disc, waiting for each disc |
+| `status NAME` | Show discs, totals and the last burn |
+| `verify NAME` | Mount burned discs and re-hash every file. `--disc N` checks just one |
+| `history NAME PATH` | Show every version of a file and where each copy lives |
+| `disc mark-dead NAME DISC` | Write off a lost or unreadable disc; its current files are re-burned |
+| `reset NAME` | Discard the staged plan |
+
+Run `diskrement <command> --help` for every option.
+
+## Archiving several directories
+
+A project can archive several directories onto one disc series, each under a name of
+your choice:
+
+```sh
+diskrement init family --work-dir /srv/work \
+  --root family/anna=/srv/immich/library/anna \
+  --root family/bela=/srv/immich/library/bela
+```
+
+Files appear on disc under their root's name (`family/anna/2024/…`). Discs fill in order
+of the path below each root, so libraries organized by date interleave: the first disc
+holds the oldest files from every root. Roots are fixed at `init`, because renaming one
+would look like deleting and re-adding everything under it.
+
+## Lost or damaged discs
+
+```sh
+diskrement disc mark-dead photos 3
+```
+
+This records the disc as dead (the catalog keeps its history) and prints what that cost:
+old versions that lived only on that disc are reported as lost, and files that are still
+current are queued for re-burning. Then run `plan` and `burn` as usual. A dead disc is
+never topped off and is skipped by `verify`.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `DISKREMENT_DEVICE` | Burner device, default `/dev/sr0`; a stable `/dev/disk/by-id/…` path also works (also `--device`) |
+| `DISKREMENT_BURNER` | `real` (default) or `simulated`, which stages discs to directories instead of burning them (also `--burner`) |
+| `DISKREMENT_HASH_PARALLELISM` | Hashing workers, default 6 |
+
+Each project's catalog lives at `$XDG_DATA_HOME/diskrement/<name>.sqlite` (or under
+systemd's `$STATE_DIRECTORY`); override it with `--catalog` or `--data-dir`. Next to it, a
+disposable fingerprint cache lets later scans re-hash only files whose size or mtime
+changed. Deleting the cache is always safe.
+
+Progress and diagnostics go to stderr. Exit codes: `0` success (or a burn you declined),
+`1` usage, `2` project state, `3` environment, `4` verification mismatch, `5` unexpected
+error, `6` media or burner.
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+[MIT](LICENSE)

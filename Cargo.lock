@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "diskrement-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "diskrement-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "proptest",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "diskrement-shell"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "diskrement-core",
